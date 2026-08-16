@@ -40,8 +40,8 @@ MENU_TEXT = (
     "acmer群管理插件菜单\n"
     "【所有人可用】\n"
     "acmer激活 - 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
-    "/nc（牛客）- 牛客全部未开始比赛\n"
-    "/最近nc（最近牛客）- 牛客最近一场\n"
+    "/nk（牛客）- 牛客全部未开始比赛\n"
+    "/最近nk（最近牛客）- 牛客最近一场\n"
     "/cf（codeforces）- Codeforces 全部未开始比赛\n"
     "/最近cf（最近Codeforces）- Codeforces 最近一场\n"
     "/atc（atcoder）- AtCoder 全部未开始比赛\n"
@@ -311,8 +311,8 @@ class AcmerGroupBot(Star):
             lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("nc", alias={"牛客"})
-    async def nc(self, event: AstrMessageEvent):
+    @filter.command("nk", alias={"牛客"})
+    async def nk(self, event: AstrMessageEvent):
         async for result in self._reply_platform(event, "nowcoder", "all"):
             yield result
 
@@ -331,8 +331,8 @@ class AcmerGroupBot(Star):
         async for result in self._reply_platform(event, "luogu", "all"):
             yield result
 
-    @filter.command("最近nc", alias={"最近牛客"})
-    async def recent_nc(self, event: AstrMessageEvent):
+    @filter.command("最近nk", alias={"最近牛客"})
+    async def recent_nk(self, event: AstrMessageEvent):
         async for result in self._reply_platform(event, "nowcoder", "nearest"):
             yield result
 

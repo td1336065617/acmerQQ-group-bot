@@ -19,6 +19,7 @@ CF_API_URL = "https://codeforces.com/api/contest.list"
 NC_CALENDAR_URL = "https://ac.nowcoder.com/acm/calendar/contest"
 NC_REFERER = "https://ac.nowcoder.com/acm/contest/calendar"
 LUOGU_CONTEST_URL = "https://www.luogu.com.cn/contest/list"
+ATCODER_CONTESTS_URL = "https://atcoder.jp/contests/"
 
 
 class ContestFetcher:
@@ -55,7 +56,7 @@ class ContestFetcher:
             elif platform == "nowcoder":
                 contests = await self._fetch_nowcoder_calendar("nowcoder")
             elif platform == "atcoder":
-                contests = await self._fetch_nowcoder_calendar("atcoder")
+                contests = await self._fetch_atcoder()
             elif platform == "luogu":
                 contests = await self._fetch_luogu()
             else:
@@ -184,6 +185,59 @@ class ContestFetcher:
                     contest_id=str(item.get("contestId") or ""),
                 )
             )
+        return contests
+
+    async def _fetch_atcoder(self) -> List[Contest]:
+        """直接解析 AtCoder 官网赛程表（Upcoming Contests）。
+
+        牛客比赛日历对 AtCoder 收录不全（实测 9 月起为空），因此 AtCoder
+        改用官网页面解析，保证拿到全部未开始比赛。
+        """
+        if self.session is None:
+            raise RuntimeError("session 未初始化")
+        text = await fetch_text_with_retry(self.session, ATCODER_CONTESTS_URL)
+        match = re.search(
+            r'<div id="contest-table-upcoming">(.*?)'
+            r'(?:<div id="contest-table-|</main>|$)',
+            text,
+            re.S,
+        )
+        if not match:
+            raise ValueError("未找到 AtCoder upcoming 赛程")
+        section = match.group(1)
+        contests: List[Contest] = []
+        for row in re.findall(r"<tr>(.*?)</tr>", section, re.S):
+            link = re.search(r'href="(/contests/[^"]+)"[^>]*>([^<]+)</a>', row)
+            time_tag = re.search(r"<time[^>]*>([^<]+)</time>", row)
+            if not link or not time_tag:
+                continue
+            try:
+                start = datetime.strptime(
+                    time_tag.group(1).strip(), "%Y-%m-%d %H:%M:%S%z"
+                )
+                start = start.astimezone(timezone.utc)
+            except ValueError:
+                continue
+            duration = re.search(
+                r'<td class="text-center">(\d{1,2}):(\d{2})</td>', row
+            )
+            duration_minutes = (
+                int(duration.group(1)) * 60 + int(duration.group(2))
+                if duration
+                else 0
+            )
+            slug = link.group(1)
+            contests.append(
+                Contest(
+                    platform="atcoder",
+                    name=link.group(2).strip(),
+                    start_time=start,
+                    duration_minutes=duration_minutes,
+                    url=f"https://atcoder.jp{slug}",
+                    contest_id=slug.split("/")[-1],
+                )
+            )
+        contests.sort(key=lambda c: c.start_time)
         return contests
 
     async def _fetch_luogu(self) -> List[Contest]:

@@ -15,8 +15,8 @@
 
 | 指令 | 功能 | 权限 |
 | :--- | :--- | :--- |
-| `/nc`（`牛客`） | 牛客全部未开始比赛 | 所有人 |
-| `/最近nc`（`最近牛客`） | 牛客最近一场 | 所有人 |
+| `/nk`（`牛客`） | 牛客全部未开始比赛 | 所有人 |
+| `/最近nk`（`最近牛客`） | 牛客最近一场 | 所有人 |
 | `/cf`（`codeforces`） | Codeforces 全部未开始比赛 | 所有人 |
 | `/最近cf`（`最近Codeforces`） | Codeforces 最近一场 | 所有人 |
 | `/atc`（`atcoder`） | AtCoder 全部未开始比赛 | 所有人 |
@@ -43,7 +43,8 @@ AstrBot 管理面板 → 插件管理 → acmerQQ群机器人：
 | 平台 | 来源 | 说明 |
 | :--- | :--- | :--- |
 | Codeforces | `codeforces.com/api/contest.list` | 官方 API，过滤 `phase=BEFORE` |
-| 牛客 / AtCoder | `ac.nowcoder.com/acm/calendar/contest` | 同一个日历接口，按 `ojName`/名称过滤 |
+| 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历接口 |
+| AtCoder | `atcoder.jp/contests/` | 官网 Upcoming Contests 赛程表 |
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需 Cookie |
 
 所有数据统一转为 `Contest` 模型并缓存 5 分钟；网络超时 10 秒、最多重试 3 次。
@@ -62,8 +63,9 @@ AstrBot 管理面板 → 插件管理 → acmerQQ群机器人：
 - 牛客日历真实接口为 `ac.nowcoder.com/acm/calendar/contest`（文档写的是
   `/acm/contest/calendar`，返回的是页面而非 JSON）；返回字段为
   `contestId/contestName/ojName/link/startTime/endTime`，其中 `startTime`
-  是**毫秒**时间戳，时长需由 `startTime`/`endTime` 计算。AtCoder 与牛客
-  共用此接口已实测确认。
+  是**毫秒**时间戳，时长需由 `startTime`/`endTime` 计算。
+- 原文档称“AtCoder 与牛客共用牛客日历接口”，实测牛客日历对 AtCoder 收录
+  不全（9 月起为空），因此 AtCoder 改为直接解析官网赛程表。
 - 洛谷页面数据不在 HTML DOM 中，而是内嵌在
   `<script id="lentille-context">` 的 JSON（`data.contests.result[]`，
   `startTime` 为**秒**时间戳），因此无需 BeautifulSoup/lxml，直接解析

@@ -78,7 +78,8 @@
 | 平台 | 来源 | 说明 |
 | :--- | :--- | :--- |
 | Codeforces | `codeforces.com/api/contest.list` | 官方 API，`phase=BEFORE` |
-| 牛客 / AtCoder | `ac.nowcoder.com/acm/calendar/contest` | 同一接口，按 `ojName` 过滤，抓当前月+下月 |
+| 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历，抓当前月+下月 |
+| AtCoder | `atcoder.jp/contests/` | 官网 Upcoming Contests 赛程表 |
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需登录 |
 
 - 内存缓存 5 分钟；`/update`（管理员）可强制刷新。
