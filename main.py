@@ -90,7 +90,10 @@ class AcmerGroupBot(Star):
     async def initialize(self) -> None:
         await self.fetcher.initialize()
         await self.scheduler.start()
-        logger.info("acmerQQ群机器人 已启动")
+        logger.info(
+            "acmerQQ群机器人 已启动；若消息指令无响应，请检查 AstrBot "
+            "设置→插件配置→可用插件（plugin_set）是否包含本插件（或设为全部）"
+        )
 
     async def terminate(self) -> None:
         await self.scheduler.stop()
