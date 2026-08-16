@@ -49,7 +49,7 @@ MENU_TEXT = (
     "• 最近atc比赛 / 最近AtCoder比赛 ─ AtCoder 最近一场比赛\n"
     "• lg比赛 / 洛谷比赛 ─ 洛谷全部未开始比赛\n"
     "• 最近lg比赛 / 最近洛谷比赛 ─ 洛谷最近一场比赛\n"
-    "• acmer群管理插件菜单 ─ 显示本菜单\n"
+    "• acm菜单 / acmer群管理插件菜单 ─ 显示本菜单\n"
     "━━━━━━━━━━━━\n"
     "🔑 仅管理员\n"
     "• update / 刷新比赛 ─ 强制刷新全部比赛数据\n"
@@ -411,7 +411,7 @@ class AcmerGroupBot(Star):
             async for result in self._update(event):
                 yield result
             return
-        if message_str in ("acm", "比赛帮助"):
+        if message_str in ("acm菜单", "比赛帮助"):
             yield event.plain_result(MENU_TEXT)
             return
 
