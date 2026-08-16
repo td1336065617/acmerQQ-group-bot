@@ -40,21 +40,41 @@ MENU_TEXT = (
     "acmer群管理插件菜单\n"
     "【所有人可用】\n"
     "acmer激活 - 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
-    "提示：指令可直接发送，也可带 / 前缀（如 nk / /nk）\n"
-    "/nk（牛客）- 牛客全部未开始比赛\n"
-    "/最近nk（最近牛客）- 牛客最近一场\n"
-    "/cf（codeforces）- Codeforces 全部未开始比赛\n"
-    "/最近cf（最近Codeforces）- Codeforces 最近一场\n"
-    "/atc（atcoder）- AtCoder 全部未开始比赛\n"
-    "/最近atc（最近AtCoder）- AtCoder 最近一场\n"
-    "/lg（洛谷）- 洛谷全部未开始比赛\n"
-    "/最近lg（最近洛谷）- 洛谷最近一场\n"
+    "提示：指令为全匹配，发送完整指令才会触发；也可带 / 前缀\n"
+    "nk比赛（牛客比赛）- 牛客全部未开始比赛\n"
+    "最近nk比赛（最近牛客比赛）- 牛客最近一场\n"
+    "cf比赛（Codeforces比赛）- Codeforces 全部未开始比赛\n"
+    "最近cf比赛（最近Codeforces比赛）- Codeforces 最近一场\n"
+    "atc比赛（AtCoder比赛）- AtCoder 全部未开始比赛\n"
+    "最近atc比赛（最近AtCoder比赛）- AtCoder 最近一场\n"
+    "lg比赛（洛谷比赛）- 洛谷全部未开始比赛\n"
+    "最近lg比赛（最近洛谷比赛）- 洛谷最近一场\n"
     "acmer群管理插件菜单 - 显示本菜单\n"
     "【仅管理员】\n"
     "/update（刷新比赛）- 手动刷新全部比赛数据\n"
     "推送配置（早报/提醒/@全体） - 请在 AstrBot WebUI "
     "插件页面的“acmerQQ群机器人”页操作"
 )
+
+# 全匹配指令表：消息必须与指令完全一致才会触发（避免误伤聊天内容）
+QUERY_COMMANDS = {
+    "nk比赛": ("nowcoder", "all"),
+    "牛客比赛": ("nowcoder", "all"),
+    "cf比赛": ("codeforces", "all"),
+    "Codeforces比赛": ("codeforces", "all"),
+    "atc比赛": ("atcoder", "all"),
+    "AtCoder比赛": ("atcoder", "all"),
+    "lg比赛": ("luogu", "all"),
+    "洛谷比赛": ("luogu", "all"),
+    "最近nk比赛": ("nowcoder", "nearest"),
+    "最近牛客比赛": ("nowcoder", "nearest"),
+    "最近cf比赛": ("codeforces", "nearest"),
+    "最近Codeforces比赛": ("codeforces", "nearest"),
+    "最近atc比赛": ("atcoder", "nearest"),
+    "最近AtCoder比赛": ("atcoder", "nearest"),
+    "最近lg比赛": ("luogu", "nearest"),
+    "最近洛谷比赛": ("luogu", "nearest"),
+}
 
 
 class AcmerGroupBot(Star):
@@ -341,44 +361,28 @@ class AcmerGroupBot(Star):
         | filter.EventMessageType.PRIVATE_MESSAGE
     )
     async def on_message(self, event: AstrMessageEvent):
-        """手动前缀分发：与表情包插件一致，无需 @机器人 也能直接触发。"""
+        """全匹配指令分发：无需 @机器人 也能直接触发，且不会误伤聊天内容。"""
         message_str = (event.message_str or "").strip()
         if not message_str:
             return
-        if message_str.startswith("acmer群管理插件菜单"):
+        if message_str == "acmer群管理插件菜单":
             yield event.plain_result(MENU_TEXT)
             return
-        if message_str.startswith("acmer激活"):
+        if message_str == "acmer激活":
             async for result in self._activate_group(event):
                 yield result
             return
-        for prefix, platform, mode in (
-            ("最近nk", "nowcoder", "nearest"),
-            ("最近牛客", "nowcoder", "nearest"),
-            ("最近cf", "codeforces", "nearest"),
-            ("最近Codeforces", "codeforces", "nearest"),
-            ("最近atc", "atcoder", "nearest"),
-            ("最近AtCoder", "atcoder", "nearest"),
-            ("最近lg", "luogu", "nearest"),
-            ("最近洛谷", "luogu", "nearest"),
-            ("nk", "nowcoder", "all"),
-            ("牛客", "nowcoder", "all"),
-            ("cf", "codeforces", "all"),
-            ("codeforces", "codeforces", "all"),
-            ("atc", "atcoder", "all"),
-            ("atcoder", "atcoder", "all"),
-            ("lg", "luogu", "all"),
-            ("洛谷", "luogu", "all"),
-        ):
-            if message_str.startswith(prefix):
-                async for result in self._reply_platform(event, platform, mode):
-                    yield result
-                return
-        if message_str.startswith("update") or message_str.startswith("刷新比赛"):
+        query = QUERY_COMMANDS.get(message_str)
+        if query is not None:
+            platform, mode = query
+            async for result in self._reply_platform(event, platform, mode):
+                yield result
+            return
+        if message_str in ("update", "刷新比赛"):
             async for result in self._update(event):
                 yield result
             return
-        if message_str.startswith("acm") or message_str.startswith("比赛帮助"):
+        if message_str in ("acm", "比赛帮助"):
             yield event.plain_result(MENU_TEXT)
             return
 
