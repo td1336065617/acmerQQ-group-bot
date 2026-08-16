@@ -212,7 +212,11 @@ class AcmerGroupBot(Star):
                 platform_id=group.platform_id or self._qq_platform_id(),
             )
             if sent:
-                logger.info("已向群 %s 发送 @全体成员 通知", group.group_id)
+                logger.info(
+                    "已向群 %s 提交 @全体成员 标记（QQ 官方群聊实际不生效，"
+                    "仅兼容尝试）",
+                    group.group_id,
+                )
                 return True
             logger.warning(
                 "群 %s 发送 @全体成员 失败，自动降级为普通通知", group.group_id
