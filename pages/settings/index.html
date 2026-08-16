@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acmerQQ群机器人</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .card { border: 1px solid rgba(128,128,128,.25); border-radius: 10px; padding: 16px 20px; margin-bottom: 18px; background: rgba(128,128,128,.06); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button { padding: 8px 18px; border: 0; border-radius: 8px; background: #3b82f6; color: #fff; cursor: pointer; font-size: 14px; }
+  button:hover { opacity: .9; }
+  button.secondary { background: #6b7280; }
+  button.danger { background: #dc2626; }
+  input[type=text], input[type=time] { font-size: 14px; padding: 7px 10px; border: 1px solid rgba(128,128,128,.35); border-radius: 8px; background: transparent; color: inherit; }
+  input[type=time] { width: 130px; }
+  #result { display: none; margin-bottom: 18px; padding: 10px 12px; border-radius: 8px; background: rgba(34,197,94,.12); color: #16a34a; white-space: pre-wrap; font-size: 14px; }
+  #result.error { background: rgba(239,68,68,.12); color: #dc2626; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.2); }
+  th { font-weight: 600; }
+  .muted { color: #888; font-size: 13px; }
+  label.check { display: inline-flex; gap: 5px; align-items: center; margin-right: 12px; }
+</style>
+</head>
+<body>
+<h1>acmerQQ群机器人 后台</h1>
+
+<div id="result"></div>
+
+<div class="card">
+  <h2>管理员设置</h2>
+  <div class="row" style="margin-bottom:10px">
+    <input type="text" id="adminInput" placeholder="输入管理员 QQ号 / openid">
+    <button id="btnAddAdmin">添加</button>
+  </div>
+  <table>
+    <thead><tr><th>管理员 ID</th><th>操作</th></tr></thead>
+    <tbody id="adminBody"></tbody>
+  </table>
+  <div class="muted" style="margin-top:8px">管理员可执行 /update 刷新比赛数据；添加/移除后立即保存。</div>
+</div>
+
+<div class="card">
+  <h2>推送设置</h2>
+  <div class="row" style="margin-bottom:10px">
+    <label>每日早报时间</label>
+    <input type="time" id="morningInput">
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <span>推送平台：</span>
+    <label class="check"><input type="checkbox" class="platform-cb" value="nowcoder"> 牛客</label>
+    <label class="check"><input type="checkbox" class="platform-cb" value="codeforces"> Codeforces</label>
+    <label class="check"><input type="checkbox" class="platform-cb" value="atcoder"> AtCoder</label>
+    <label class="check"><input type="checkbox" class="platform-cb" value="luogu"> 洛谷</label>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="reminderInput"> 赛前 15 分钟提醒</label>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="atAllInput"> 通知尝试 @全体成员（无权限时自动降级为普通通知）</label>
+  </div>
+  <div class="row">
+    <button id="btnSaveSettings">保存推送设置</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>群推送配置</h2>
+  <table>
+    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th></tr></thead>
+    <tbody id="groupBody"></tbody>
+  </table>
+  <div class="muted" style="margin-top:8px">机器人收到过消息的群会自动出现在这里；修改后点“保存群配置”。</div>
+  <div class="row" style="margin-top:10px">
+    <button id="btnSaveGroups">保存群配置</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  const A = window.AstrBotPluginPage;
+  const result = document.getElementById('result');
+  const adminBody = document.getElementById('adminBody');
+  const groupBody = document.getElementById('groupBody');
+  let adminUsers = [];
+  let settings = { morning_push_time: '08:00', push_platforms: [], reminder_enabled: true };
+  let groups = [];
+
+  function show(text, isError) {
+    result.style.display = 'block';
+    result.textContent = text;
+    result.className = isError ? 'error' : '';
+  }
+
+  function renderAdmins() {
+    adminBody.innerHTML = '';
+    if (!adminUsers.length) {
+      adminBody.innerHTML = '<tr><td colspan="2" class="muted">暂无管理员，请添加</td></tr>';
+      return;
+    }
+    for (const id of adminUsers) {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td'); td1.textContent = id;
+      const td2 = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'danger';
+      btn.textContent = '移除';
+      btn.onclick = async () => {
+        adminUsers = adminUsers.filter(x => x !== id);
+        renderAdmins();
+        try {
+          await A.apiPost('config', { admin_users: adminUsers });
+          show('管理员已移除并保存');
+        } catch (e) {
+          show('保存失败：' + (e && e.message ? e.message : e), true);
+        }
+      };
+      td2.appendChild(btn);
+      tr.append(td1, td2);
+      adminBody.appendChild(tr);
+    }
+  }
+
+  function renderSettings() {
+    document.getElementById('morningInput').value = settings.morning_push_time || '08:00';
+    document.querySelectorAll('.platform-cb').forEach(cb => {
+      cb.checked = settings.push_platforms.includes(cb.value);
+    });
+    document.getElementById('reminderInput').checked = !!settings.reminder_enabled;
+    document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
+  }
+
+  function renderGroups() {
+    groupBody.innerHTML = '';
+    if (!groups.length) {
+      groupBody.innerHTML = '<tr><td colspan="3" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
+      return;
+    }
+    groups.sort((a, b) => String(a.group_id).localeCompare(String(b.group_id)));
+    for (const g of groups) {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td'); td1.textContent = g.group_id;
+      const td2 = document.createElement('td');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!g.enabled;
+      cb.dataset.gid = g.group_id;
+      cb.className = 'group-enabled';
+      td2.appendChild(cb);
+      const td3 = document.createElement('td');
+      const timeInput = document.createElement('input');
+      timeInput.type = 'time';
+      timeInput.value = g.morning_push_time || '08:00';
+      timeInput.dataset.gid = g.group_id;
+      timeInput.className = 'group-time';
+      td3.appendChild(timeInput);
+      tr.append(td1, td2, td3);
+      groupBody.appendChild(tr);
+    }
+  }
+
+  async function loadConfig() {
+    try {
+      const r = await A.apiGet('config');
+      adminUsers = (r && Array.isArray(r.admin_users) ? r.admin_users : []).slice();
+      settings = (r && r.settings) || settings;
+      groups = (r && Array.isArray(r.groups) ? r.groups : []).map(g => Object.assign({}, g));
+      renderAdmins();
+      renderSettings();
+      renderGroups();
+    } catch (e) {
+      show('加载配置失败：' + (e && e.message ? e.message : e), true);
+    }
+  }
+
+  document.getElementById('btnAddAdmin').onclick = async () => {
+    const input = document.getElementById('adminInput');
+    const value = input.value.trim();
+    if (!value) return;
+    if (!adminUsers.includes(value)) adminUsers.push(value);
+    input.value = '';
+    renderAdmins();
+    try {
+      await A.apiPost('config', { admin_users: adminUsers });
+      show('管理员已添加并保存');
+    } catch (e) {
+      show('保存失败：' + (e && e.message ? e.message : e), true);
+    }
+  };
+  document.getElementById('adminInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('btnAddAdmin').click();
+  });
+
+  document.getElementById('btnSaveSettings').onclick = async () => {
+    const morning = document.getElementById('morningInput').value;
+    if (!morning) { show('请选择早报时间', true); return; }
+    const platforms = [];
+    document.querySelectorAll('.platform-cb').forEach(cb => {
+      if (cb.checked) platforms.push(cb.value);
+    });
+    if (!platforms.length) { show('请至少选择一个推送平台', true); return; }
+    settings = {
+      morning_push_time: morning,
+      push_platforms: platforms,
+      reminder_enabled: document.getElementById('reminderInput').checked,
+      at_all_enabled: document.getElementById('atAllInput').checked
+    };
+    try {
+      await A.apiPost('config', { settings });
+      show('推送设置已保存并生效');
+    } catch (e) {
+      show('保存失败：' + (e && e.message ? e.message : e), true);
+    }
+  };
+
+  document.getElementById('btnSaveGroups').onclick = async () => {
+    const updated = groups.map(g => {
+      const cb = document.querySelector('.group-enabled[data-gid="' + g.group_id + '"]');
+      const timeInput = document.querySelector('.group-time[data-gid="' + g.group_id + '"]');
+      return {
+        group_id: g.group_id,
+        enabled: cb ? cb.checked : !!g.enabled,
+        morning_push_time: timeInput ? timeInput.value : (g.morning_push_time || '08:00'),
+        push_platforms: g.push_platforms || [],
+        reminder_enabled: !!g.reminder_enabled
+      };
+    });
+    try {
+      await A.apiPost('config', { groups: updated });
+      show('群配置已保存并生效');
+    } catch (e) {
+      show('保存失败：' + (e && e.message ? e.message : e), true);
+    }
+  };
+
+  A.ready().then(loadConfig);
+})();
+</script>
+</body>
+</html>

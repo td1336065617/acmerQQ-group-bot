@@ -1,0 +1,12 @@
+name: acmer_qq_group_bot
+display_name: acmerQQ群机器人
+short_desc: ACM 竞赛信息查询与定时推送
+desc: |
+  提供牛客、Codeforces、AtCoder、洛谷比赛查询与定时推送；
+  支持每日早报、赛前 15 分钟提醒与 WebUI 配置。
+  数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
+version: 1.0.1
+author: td1336065617
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - qq_official

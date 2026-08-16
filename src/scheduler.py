@@ -1,0 +1,101 @@
+"""定时推送：每日早报 + 赛前 15 分钟提醒。"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+
+from astrbot.api import logger
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Plain
+
+from src.models import CN_TZ, PLATFORM_LABELS, GroupConfig
+from src.utils import validate_hhmm
+
+TICK_SECONDS = 30
+REMIND_MINUTES = 15
+
+
+class PushScheduler:
+    """后台定时任务：每 30 秒检查一次早报与提醒。"""
+
+    def __init__(self, plugin) -> None:
+        self.plugin = plugin
+        self._task: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._run(), name="acmer-push")
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("acmerQQ群机器人 定时推送任务异常")
+            await asyncio.sleep(TICK_SECONDS)
+
+    async def tick(self) -> None:
+        now = datetime.now(CN_TZ)
+        for group in await self.plugin.get_groups():
+            if not group.enabled:
+                continue
+            try:
+                await self._maybe_morning_push(group, now)
+                if group.reminder_enabled:
+                    await self._maybe_remind(group, now)
+            except Exception:
+                logger.exception("群 %s 定时推送处理失败", group.group_id)
+
+    async def _maybe_morning_push(self, group: GroupConfig, now: datetime) -> None:
+        try:
+            push_time = validate_hhmm(group.morning_push_time)
+        except ValueError:
+            return
+        if now.strftime("%H:%M") != push_time:
+            return
+        date_key = now.strftime("%Y%m%d")
+        sent_key = f"morning_{group.group_id}_{date_key}"
+        if await self.plugin.get_kv_data(sent_key, False):
+            return
+        text = await self.plugin.build_morning_text(group)
+        if text:
+            await self.plugin.send_notification(group, text)
+        await self.plugin.put_kv_data(sent_key, True)
+
+    async def _maybe_remind(self, group: GroupConfig, now: datetime) -> None:
+        reminded = set(await self.plugin.get_kv_data("reminded", []) or [])
+        for platform in group.push_platforms:
+            contests, err = await self.plugin.fetcher.fetch_platform(platform)
+            if err or not contests:
+                continue
+            for contest in contests:
+                delta = (contest.start_time - now).total_seconds()
+                if not 0 < delta <= REMIND_MINUTES * 60:
+                    continue
+                dedupe_key = f"{contest.platform}:{contest.contest_id}"
+                if dedupe_key in reminded:
+                    continue
+                text = (
+                    f"⏰ {PLATFORM_LABELS.get(contest.platform, contest.platform)} "
+                    "比赛即将开始\n"
+                    f"🏷 {contest.name}\n"
+                    f"🕐 {contest.start_cn():%Y-%m-%d %H:%M}（北京时间）\n"
+                    f"🔗 {contest.url}"
+                )
+                await self.plugin.send_notification(group, text)
+                reminded.add(dedupe_key)
+                reminded_list = sorted(reminded)
+                if len(reminded_list) > 2000:
+                    reminded_list = reminded_list[-1000:]
+                await self.plugin.put_kv_data("reminded", reminded_list)
