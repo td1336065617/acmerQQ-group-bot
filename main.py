@@ -40,6 +40,7 @@ MENU_TEXT = (
     "acmer群管理插件菜单\n"
     "【所有人可用】\n"
     "acmer激活 - 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
+    "提示：指令可直接发送，也可带 / 前缀（如 nk / /nk）\n"
     "/nk（牛客）- 牛客全部未开始比赛\n"
     "/最近nk（最近牛客）- 牛客最近一场\n"
     "/cf（codeforces）- Codeforces 全部未开始比赛\n"
@@ -315,48 +316,7 @@ class AcmerGroupBot(Star):
             lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("nk", alias={"牛客"})
-    async def nk(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "nowcoder", "all"):
-            yield result
-
-    @filter.command("cf", alias={"codeforces"})
-    async def cf(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "codeforces", "all"):
-            yield result
-
-    @filter.command("atc", alias={"atcoder"})
-    async def atc(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "atcoder", "all"):
-            yield result
-
-    @filter.command("lg", alias={"洛谷"})
-    async def lg(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "luogu", "all"):
-            yield result
-
-    @filter.command("最近nk", alias={"最近牛客"})
-    async def recent_nk(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "nowcoder", "nearest"):
-            yield result
-
-    @filter.command("最近cf", alias={"最近Codeforces"})
-    async def recent_cf(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "codeforces", "nearest"):
-            yield result
-
-    @filter.command("最近atc", alias={"最近AtCoder"})
-    async def recent_atc(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "atcoder", "nearest"):
-            yield result
-
-    @filter.command("最近lg", alias={"最近洛谷"})
-    async def recent_lg(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "luogu", "nearest"):
-            yield result
-
-    @filter.command("update", alias={"刷新比赛"})
-    async def update(self, event: AstrMessageEvent):
+    async def _update(self, event: AstrMessageEvent):
         if not await self._is_admin(event):
             yield event.plain_result("此指令仅限管理员")
             return
@@ -372,29 +332,52 @@ class AcmerGroupBot(Star):
                 )
         yield event.plain_result("\n".join(parts))
 
-    @filter.command("acm", alias={"比赛帮助"})
-    async def acm_help(self, event: AstrMessageEvent):
-        yield event.plain_result(MENU_TEXT)
-
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE
         | filter.EventMessageType.PRIVATE_MESSAGE
     )
     async def on_message(self, event: AstrMessageEvent):
-        """功能菜单：发送 “acmer群管理插件菜单” 即可查看（无需 @机器人）。"""
+        """手动前缀分发：与表情包插件一致，无需 @机器人 也能直接触发。"""
         message_str = (event.message_str or "").strip()
+        if not message_str:
+            return
         if message_str.startswith("acmer群管理插件菜单"):
             yield event.plain_result(MENU_TEXT)
             return
         if message_str.startswith("acmer激活"):
             async for result in self._activate_group(event):
                 yield result
-
-    @filter.command("acmer激活", alias={"激活"})
-    async def acmer_activate(self, event: AstrMessageEvent):
-        async for result in self._activate_group(event):
-            yield result
+            return
+        for prefix, platform, mode in (
+            ("最近nk", "nowcoder", "nearest"),
+            ("最近牛客", "nowcoder", "nearest"),
+            ("最近cf", "codeforces", "nearest"),
+            ("最近Codeforces", "codeforces", "nearest"),
+            ("最近atc", "atcoder", "nearest"),
+            ("最近AtCoder", "atcoder", "nearest"),
+            ("最近lg", "luogu", "nearest"),
+            ("最近洛谷", "luogu", "nearest"),
+            ("nk", "nowcoder", "all"),
+            ("牛客", "nowcoder", "all"),
+            ("cf", "codeforces", "all"),
+            ("codeforces", "codeforces", "all"),
+            ("atc", "atcoder", "all"),
+            ("atcoder", "atcoder", "all"),
+            ("lg", "luogu", "all"),
+            ("洛谷", "luogu", "all"),
+        ):
+            if message_str.startswith(prefix):
+                async for result in self._reply_platform(event, platform, mode):
+                    yield result
+                return
+        if message_str.startswith("update") or message_str.startswith("刷新比赛"):
+            async for result in self._update(event):
+                yield result
+            return
+        if message_str.startswith("acm") or message_str.startswith("比赛帮助"):
+            yield event.plain_result(MENU_TEXT)
+            return
 
     async def _activate_group(self, event: AstrMessageEvent):
         """重启后激活本群主动推送：本条消息本身会写入 QQ 适配器会话缓存。"""
