@@ -1,5 +1,12 @@
 # 更新日志
 
+## [1.1.5] - 2026-08-16
+
+### 修复
+- `metadata.yaml` 补充 `repo` 仓库地址，修复 WebUI“更新插件”报
+  “does not specify a repository URL or download URL”的问题，
+  现在可以直接在 AstrBot 插件管理页一键更新。
+
 ## [1.1.4] - 2026-08-16
 
 ### 变更
