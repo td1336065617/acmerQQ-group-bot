@@ -310,6 +310,32 @@ class AcmerGroupBot(Star):
             return None
         return "\n".join(lines)
 
+    async def build_test_text(self, group: GroupConfig) -> str:
+        """测试推送内容：优先今日早报，今日无比赛时展示最近一场。"""
+        morning = await self.build_morning_text(group)
+        if morning:
+            return morning
+        settings = await self.get_settings()
+        platforms = [
+            p for p in settings["push_platforms"] if p in group.push_platforms
+        ] or list(DEFAULT_PLATFORMS)
+        best = None
+        for platform in platforms:
+            contests, err = await self.fetcher.fetch_platform(platform)
+            if err or not contests:
+                continue
+            for contest in contests:
+                if not contest.is_upcoming():
+                    continue
+                if best is None or contest.start_time < best.start_time:
+                    best = contest
+        lines = ["🧪 测试推送（今日无比赛，展示最近一场）"]
+        if best is not None:
+            lines.append(best.format_detail())
+        else:
+            lines.append("（当前没有查到未开始的比赛）")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # 指令：比赛查询
     # ------------------------------------------------------------------
@@ -546,9 +572,7 @@ class AcmerGroupBot(Star):
             return error_response(
                 "QQ 主动推送会话未就绪：请先让该群给机器人发一条消息，再点测试推送"
             )
-        text = await self.build_morning_text(group)
-        if not text:
-            return error_response("今天没有可推送的比赛")
+        text = await self.build_test_text(group)
         sent = await self.send_notification(group, text)
         if not sent:
             return error_response("发送失败，请查看 AstrBot 日志")

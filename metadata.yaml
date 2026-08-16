@@ -5,7 +5,7 @@ desc: |
   提供牛客、Codeforces、AtCoder、洛谷比赛查询与定时推送；
   支持每日早报、赛前 15 分钟提醒与 WebUI 配置。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
-version: 1.1.12
+version: 1.1.13
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot
 astrbot_version: ">=4.13.0,<5"
