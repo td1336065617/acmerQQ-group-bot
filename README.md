@@ -3,6 +3,11 @@
 基于 AstrBot 的 ACM 竞赛工具插件：查询牛客 / Codeforces / AtCoder / 洛谷
 最近比赛，并支持每日早报与赛前 15 分钟提醒。
 
+## 文档
+
+- [更新日志](CHANGELOG.md)
+- [配置文档](docs/CONFIG.md)
+
 ## 指令
 
 群聊需 @机器人 后发送，私聊可直接发送；命令前缀遵循 AstrBot 唤醒前缀（默认 `/`）。
