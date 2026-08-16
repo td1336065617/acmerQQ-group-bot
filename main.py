@@ -33,15 +33,21 @@ PLUGIN_NAME = "acmer_qq_group_bot"
 DEFAULT_MORNING_TIME = "08:00"
 # @全体成员 尝试失败后，对该群暂缓重试的时间（秒）
 AT_ALL_BLOCK_SECONDS = 6 * 3600
+# 比赛列表最多展示的条数（防止消息过长）
+MAX_CONTEST_LIST = 30
 
 MENU_TEXT = (
     "acmer群管理插件菜单\n"
     "【所有人可用】\n"
     "acmer激活 - 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
-    "/nc（牛客）- 牛客最近比赛\n"
-    "/cf（codeforces）- Codeforces 最近比赛\n"
-    "/atc（atcoder）- AtCoder 最近比赛\n"
-    "/lg（洛谷）- 洛谷最近比赛\n"
+    "/nc（牛客）- 牛客全部未开始比赛\n"
+    "/最近nc（最近牛客）- 牛客最近一场\n"
+    "/cf（codeforces）- Codeforces 全部未开始比赛\n"
+    "/最近cf（最近Codeforces）- Codeforces 最近一场\n"
+    "/atc（atcoder）- AtCoder 全部未开始比赛\n"
+    "/最近atc（最近AtCoder）- AtCoder 最近一场\n"
+    "/lg（洛谷）- 洛谷全部未开始比赛\n"
+    "/最近lg（最近洛谷）- 洛谷最近一场\n"
     "acmer群管理插件菜单 - 显示本菜单\n"
     "【仅管理员】\n"
     "/update（刷新比赛）- 手动刷新全部比赛数据\n"
@@ -276,7 +282,9 @@ class AcmerGroupBot(Star):
     # ------------------------------------------------------------------
     # 指令：比赛查询
     # ------------------------------------------------------------------
-    async def _reply_platform(self, event: AstrMessageEvent, platform: str):
+    async def _reply_platform(
+        self, event: AstrMessageEvent, platform: str, mode: str = "all"
+    ):
         label = PLATFORM_LABELS.get(platform, platform)
         contests, err = await self.fetcher.fetch_platform(platform)
         if err:
@@ -286,26 +294,61 @@ class AcmerGroupBot(Star):
         if not upcoming:
             yield event.plain_result(f"{label} 近期暂无比赛")
             return
-        yield event.plain_result(upcoming[0].format_detail())
+        if mode == "nearest":
+            yield event.plain_result(upcoming[0].format_detail())
+            return
+        lines = [f"📋 {label} 未开始比赛（共 {len(upcoming)} 场）"]
+        for idx, contest in enumerate(upcoming[:MAX_CONTEST_LIST], start=1):
+            duration = (
+                f" · {contest.duration_minutes} 分钟" if contest.duration_minutes else ""
+            )
+            lines.append(
+                f"{idx}. {contest.name}\n"
+                f"   {contest.start_cn():%m-%d %H:%M}{duration}\n"
+                f"   {contest.url}"
+            )
+        if len(upcoming) > MAX_CONTEST_LIST:
+            lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("nc", alias={"牛客"})
     async def nc(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "nowcoder"):
+        async for result in self._reply_platform(event, "nowcoder", "all"):
             yield result
 
     @filter.command("cf", alias={"codeforces"})
     async def cf(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "codeforces"):
+        async for result in self._reply_platform(event, "codeforces", "all"):
             yield result
 
     @filter.command("atc", alias={"atcoder"})
     async def atc(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "atcoder"):
+        async for result in self._reply_platform(event, "atcoder", "all"):
             yield result
 
     @filter.command("lg", alias={"洛谷"})
     async def lg(self, event: AstrMessageEvent):
-        async for result in self._reply_platform(event, "luogu"):
+        async for result in self._reply_platform(event, "luogu", "all"):
+            yield result
+
+    @filter.command("最近nc", alias={"最近牛客"})
+    async def recent_nc(self, event: AstrMessageEvent):
+        async for result in self._reply_platform(event, "nowcoder", "nearest"):
+            yield result
+
+    @filter.command("最近cf", alias={"最近Codeforces"})
+    async def recent_cf(self, event: AstrMessageEvent):
+        async for result in self._reply_platform(event, "codeforces", "nearest"):
+            yield result
+
+    @filter.command("最近atc", alias={"最近AtCoder"})
+    async def recent_atc(self, event: AstrMessageEvent):
+        async for result in self._reply_platform(event, "atcoder", "nearest"):
+            yield result
+
+    @filter.command("最近lg", alias={"最近洛谷"})
+    async def recent_lg(self, event: AstrMessageEvent):
+        async for result in self._reply_platform(event, "luogu", "nearest"):
             yield result
 
     @filter.command("update", alias={"刷新比赛"})
