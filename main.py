@@ -359,6 +359,14 @@ class AcmerGroupBot(Star):
             str(group_id),
             platform_id=getattr(event.session, "platform_name", None),
         )
+        # 已激活的群：重复发送激活命令不再回复，静默忽略
+        current = next(
+            (g for g in await self.get_groups() if g.group_id == str(group_id)),
+            None,
+        )
+        if current is not None and current.activated:
+            logger.info("群 %s 已处于激活状态，忽略重复激活命令", group_id)
+            return
         ready = self._group_scene_ready(str(group_id))
         if ready:
             raw = await self.get_kv_data("groups", {}) or {}
