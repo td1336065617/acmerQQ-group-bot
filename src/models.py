@@ -54,6 +54,8 @@ class GroupConfig(BaseModel):
     """每个群的推送配置。"""
 
     group_id: str
+    platform_id: Optional[str] = None
+    activated: bool = False
     enabled: bool = True
     morning_push_time: str = "08:00"
     push_platforms: List[str] = Field(default_factory=lambda: list(DEFAULT_PLATFORMS))

@@ -47,6 +47,11 @@
 
 <div class="card">
   <h2>推送设置</h2>
+  <div class="muted" style="margin-bottom:10px">
+    当前 QQ 平台实例 ID：<span id="platformId">-</span>
+    （自动获取，无需填写）。主动推送需要该群在机器人本次运行期间发过消息，
+    否则 QQ 侧可能静默跳过。
+  </div>
   <div class="row" style="margin-bottom:10px">
     <label>每日早报时间</label>
     <input type="time" id="morningInput">
@@ -72,10 +77,11 @@
 <div class="card">
   <h2>群推送配置</h2>
   <table>
-    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th></tr></thead>
+    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th><th>操作</th></tr></thead>
     <tbody id="groupBody"></tbody>
   </table>
-  <div class="muted" style="margin-top:8px">机器人收到过消息的群会自动出现在这里；修改后点“保存群配置”。</div>
+  <div class="muted" style="margin-top:8px">机器人收到过消息的群会自动出现在这里；修改后点“保存群配置”。
+    “测试推送”会立即向该群发送今日比赛早报（发送前请先在群里发一条消息，QQ 主动推送需要会话缓存）。</div>
   <div class="row" style="margin-top:10px">
     <button id="btnSaveGroups">保存群配置</button>
   </div>
@@ -135,10 +141,15 @@
     document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
   }
 
+  function renderPlatformId(id) {
+    const el = document.getElementById('platformId');
+    if (el) el.textContent = id || '未检测到';
+  }
+
   function renderGroups() {
     groupBody.innerHTML = '';
     if (!groups.length) {
-      groupBody.innerHTML = '<tr><td colspan="3" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
+      groupBody.innerHTML = '<tr><td colspan="4" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
       return;
     }
     groups.sort((a, b) => String(a.group_id).localeCompare(String(b.group_id)));
@@ -159,7 +170,20 @@
       timeInput.dataset.gid = g.group_id;
       timeInput.className = 'group-time';
       td3.appendChild(timeInput);
-      tr.append(td1, td2, td3);
+      const td4 = document.createElement('td');
+      const testBtn = document.createElement('button');
+      testBtn.className = 'secondary';
+      testBtn.textContent = '测试推送';
+      testBtn.onclick = async () => {
+        try {
+          const r = await A.apiPost('test-push', { group_id: g.group_id });
+          show((r && r.message) || '测试推送已发送');
+        } catch (e) {
+          show('测试推送失败：' + (e && e.message ? e.message : e), true);
+        }
+      };
+      td4.appendChild(testBtn);
+      tr.append(td1, td2, td3, td4);
       groupBody.appendChild(tr);
     }
   }
@@ -170,6 +194,7 @@
       adminUsers = (r && Array.isArray(r.admin_users) ? r.admin_users : []).slice();
       settings = (r && r.settings) || settings;
       groups = (r && Array.isArray(r.groups) ? r.groups : []).map(g => Object.assign({}, g));
+      renderPlatformId(r && r.platform_id);
       renderAdmins();
       renderSettings();
       renderGroups();

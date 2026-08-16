@@ -64,14 +64,24 @@ class PushScheduler:
             return
         if now.strftime("%H:%M") != push_time:
             return
+        logger.info("群 %s 早报时间到（%s），开始检查今日比赛", group.group_id, push_time)
         date_key = now.strftime("%Y%m%d")
         sent_key = f"morning_{group.group_id}_{date_key}"
         if await self.plugin.get_kv_data(sent_key, False):
+            logger.info("群 %s 今日早报已发送过，跳过", group.group_id)
             return
         text = await self.plugin.build_morning_text(group)
-        if text:
-            await self.plugin.send_notification(group, text)
-        await self.plugin.put_kv_data(sent_key, True)
+        if not text:
+            logger.info("群 %s 今日无比赛，跳过早报", group.group_id)
+            await self.plugin.put_kv_data(sent_key, True)
+            logger.info("群 %s 早报处理完成", group.group_id)
+            return
+        sent = await self.plugin.send_notification(group, text)
+        if sent:
+            await self.plugin.put_kv_data(sent_key, True)
+            logger.info("群 %s 早报处理完成", group.group_id)
+        else:
+            logger.warning("群 %s 早报发送失败，下个周期重试", group.group_id)
 
     async def _maybe_remind(self, group: GroupConfig, now: datetime) -> None:
         reminded = set(await self.plugin.get_kv_data("reminded", []) or [])
@@ -93,9 +103,9 @@ class PushScheduler:
                     f"🕐 {contest.start_cn():%Y-%m-%d %H:%M}（北京时间）\n"
                     f"🔗 {contest.url}"
                 )
-                await self.plugin.send_notification(group, text)
-                reminded.add(dedupe_key)
-                reminded_list = sorted(reminded)
-                if len(reminded_list) > 2000:
-                    reminded_list = reminded_list[-1000:]
-                await self.plugin.put_kv_data("reminded", reminded_list)
+                if await self.plugin.send_notification(group, text):
+                    reminded.add(dedupe_key)
+                    reminded_list = sorted(reminded)
+                    if len(reminded_list) > 2000:
+                        reminded_list = reminded_list[-1000:]
+                    await self.plugin.put_kv_data("reminded", reminded_list)
