@@ -53,7 +53,8 @@ MENU_TEXT = (
     "【仅管理员】\n"
     "/update（刷新比赛）- 手动刷新全部比赛数据\n"
     "推送配置（早报/提醒/@全体） - 请在 AstrBot WebUI "
-    "插件页面的“acmerQQ群机器人”页操作"
+    "插件页面的“acmerQQ群机器人”页操作\n"
+    "开源：https://github.com/td1336065617/acmerQQ-group-bot"
 )
 
 # 全匹配指令表：消息必须与指令完全一致才会触发（避免误伤聊天内容）

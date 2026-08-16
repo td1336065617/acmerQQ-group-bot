@@ -14,3 +14,4 @@ acmer群管理插件菜单 - 显示本菜单
 【仅管理员】
 update（刷新比赛）- 手动刷新全部比赛数据
 推送配置（早报/提醒/@全体） - 请在 AstrBot WebUI 插件页面的“acmerQQ群机器人”页操作
+开源：https://github.com/td1336065617/acmerQQ-group-bot
