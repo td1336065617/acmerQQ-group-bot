@@ -93,7 +93,11 @@ class PushScheduler:
                 delta = (contest.start_time - now).total_seconds()
                 if not 0 < delta <= REMIND_MINUTES * 60:
                     continue
-                dedupe_key = f"{contest.platform}:{contest.contest_id}"
+                # 去重键必须带群 ID：同一场比赛每个群都应收到一次提醒，
+                # 避免第一个群推送后其他群全部被跳过
+                dedupe_key = (
+                    f"{group.group_id}:{contest.platform}:{contest.contest_id}"
+                )
                 if dedupe_key in reminded:
                     continue
                 text = (
