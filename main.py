@@ -392,6 +392,9 @@ class AcmerGroupBot(Star):
     async def on_message(self, event: AstrMessageEvent):
         """全匹配指令分发：无需 @机器人 也能直接触发，且不会误伤聊天内容。"""
         message_str = (event.message_str or "").strip()
+        # QQ 官方指令面板可能自动补上“/”；统一去掉一个前缀后再匹配。
+        if message_str.startswith("/"):
+            message_str = message_str[1:].lstrip()
         if not message_str:
             return
         if message_str == "acmer群管理插件菜单":
