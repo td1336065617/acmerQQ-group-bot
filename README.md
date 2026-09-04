@@ -50,9 +50,11 @@ AstrBot 管理面板 → 插件管理 → acmerQQ群机器人：
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需 Cookie |
 | 线下赛 | [`xcpc.link`](https://www.xcpc.link/)（备用 [`xcpc.ink`](https://www.xcpc.ink/)） | 首页脚本中的 XCPC/ICPC/CCPC 赛程数据，仅保留线下赛事；回复中明确标注实际数据源 |
 
-在线比赛统一转为 `Contest` 模型，线下赛使用带日期/赛站/主办方字段的专用模型，
-所有数据缓存 5 分钟；网络超时 10 秒、最多重试 3 次。线下赛抓取直接使用 HTTP
-请求读取首页脚本，不依赖 Chrome 或其他浏览器。
+在线比赛统一转为 `Contest` 模型，线下赛使用带日期/赛站/主办方字段的专用模型。
+在线平台缓存 5 分钟；线下赛缓存 30 分钟，并持久化到插件 `data/contest_cache.json`，
+插件重载后仍可快速返回。缓存过期时同一平台只允许一个请求实际抓取，网络临时失败
+会使用旧缓存兜底。网络超时 10 秒、最多重试 3 次。线下赛抓取直接使用 HTTP 请求
+读取首页脚本，不依赖 Chrome 或其他浏览器。
 
 ## 已知限制
 

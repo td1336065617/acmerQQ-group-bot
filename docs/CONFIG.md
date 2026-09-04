@@ -90,8 +90,14 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 | 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历，抓当前月+下月 |
 | AtCoder | `atcoder.jp/contests/` | 官网 Upcoming Contests 赛程表 |
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需登录 |
+| 线下赛 | `xcpc.link`（备用 `xcpc.ink`） | 首页脚本中的线下赛程数据 |
 
-- 内存缓存 5 分钟；`/update`（管理员）可强制刷新。
+- 在线平台使用 5 分钟内存缓存；线下赛使用 30 分钟内存缓存，并持久化到插件
+  `data/contest_cache.json`，插件重载后也能复用。
+- 缓存过期时同一平台的并发查询会合并为一次抓取；网络临时失败时，如果存在旧缓存
+  会继续返回旧数据，避免网站短暂波动导致查询失败。
+- `/update`（管理员）可强制刷新全部平台；线下赛首次抓取会并行读取动态 JS chunk，
+  不依赖 Chrome。
 - 网络超时 10 秒，最多重试 3 次；失败返回友好提示并记录日志。
 
 ## 6. 常见问题

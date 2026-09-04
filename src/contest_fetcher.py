@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 
@@ -88,17 +90,38 @@ OFFLINE_PLATFORM = "offline"
 QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 PLATFORM_LABELS.setdefault(OFFLINE_PLATFORM, "线下赛")
 
+# 在线平台数据变化较快，保留原来的短缓存；线下赛程通常按天/周更新，
+# 使用更长缓存并落盘，避免插件重载后第一次查询又重新下载首页和 JS chunk。
+DEFAULT_CACHE_TTL = 5 * 60
+OFFLINE_CACHE_TTL = 30 * 60
+CACHE_VERSION = 1
+CACHE_FILE_NAME = "contest_cache.json"
+OFFLINE_SCRIPT_BATCH_SIZE = 8
+MAX_OFFLINE_SCRIPTS = 32
+
 
 class ContestFetcher:
-    """比赛抓取器，带 5 分钟内存缓存。"""
+    """比赛抓取器，带内存缓存、持久化缓存和并发请求合并。"""
 
-    def __init__(self, cache_ttl: int = 300) -> None:
-        self.cache_ttl = cache_ttl
+    def __init__(
+        self,
+        cache_ttl: int = DEFAULT_CACHE_TTL,
+        offline_cache_ttl: int = OFFLINE_CACHE_TTL,
+        cache_path: Optional[str | Path] = None,
+    ) -> None:
+        self.cache_ttl = max(0, int(cache_ttl))
+        self.offline_cache_ttl = max(0, int(offline_cache_ttl))
         self._cache: Dict[str, Tuple[float, list]] = {}
         self._source_urls: Dict[str, str] = {}
+        self._fetch_locks: Dict[str, asyncio.Lock] = {}
+        self._cache_loaded = False
+        self.cache_path = Path(cache_path) if cache_path else (
+            Path(__file__).resolve().parent.parent / "data" / CACHE_FILE_NAME
+        )
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def initialize(self) -> None:
+        self._load_persistent_cache()
         if self.session is None:
             self.session = aiohttp.ClientSession(
                 headers={"User-Agent": USER_AGENT}
@@ -112,39 +135,225 @@ class ContestFetcher:
     async def fetch_platform(
         self, platform: str, force: bool = False
     ) -> Tuple[list, Optional[str]]:
-        """抓取指定平台，返回 (比赛列表, 错误提示)；失败时列表为空。"""
+        """抓取指定平台，返回 (比赛列表, 错误提示)。
+
+        普通查询优先命中缓存；过期后同一平台只允许一个协程实际抓取，
+        其他并发查询会复用这次结果。网络失败时保留旧缓存作为兜底。
+        """
+        self._load_persistent_cache()
+        request_started = time.time()
         if not force:
             cached = self._cache.get(platform)
-            if cached and time.time() - cached[0] < self.cache_ttl:
+            if cached and self._is_cache_fresh(platform, cached, request_started):
+                self._log_cache_hit(platform, cached[0])
                 return cached[1], None
+
+        lock = self._fetch_locks.get(platform)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._fetch_locks[platform] = lock
+
+        async with lock:
+            # 二次检查很重要：多个群同时触发时，排队中的协程直接复用
+            # 前一个协程刚写入的结果；force 只会绕过本次请求之前的缓存。
+            cached = self._cache.get(platform)
+            if cached and (
+                self._is_cache_fresh(platform, cached)
+                or cached[0] >= request_started
+            ):
+                self._log_cache_hit(platform, cached[0], joined=True)
+                return cached[1], None
+
+            label = PLATFORM_LABELS.get(platform, platform)
+            logger.info("开始抓取比赛数据：%s（缓存已过期或不存在）", label)
+            try:
+                if platform == "codeforces":
+                    contests = await self._fetch_codeforces()
+                elif platform == "nowcoder":
+                    contests = await self._fetch_nowcoder_calendar("nowcoder")
+                elif platform == "atcoder":
+                    contests = await self._fetch_atcoder()
+                elif platform == "luogu":
+                    contests = await self._fetch_luogu()
+                elif platform == OFFLINE_PLATFORM:
+                    contests = await self._fetch_offline()
+                else:
+                    return [], "未知平台"
+            except asyncio.TimeoutError:
+                logger.error("比赛数据抓取超时: %s", platform)
+                error = f"⏰ {label} 数据获取超时，请稍后重试"
+                return self._fallback_to_stale_cache(platform, error)
+            except aiohttp.ClientError as exc:
+                logger.error("比赛数据网络错误(%s): %s", platform, exc)
+                error = f"🌐 {label} 网络连接失败，请检查网络后重试"
+                return self._fallback_to_stale_cache(platform, error)
+            except (ValueError, KeyError, json.JSONDecodeError, re.error) as exc:
+                logger.error("比赛数据解析失败(%s): %s", platform, exc)
+                error = f"🔧 {label} 数据格式有变化，请联系管理员修复"
+                return self._fallback_to_stale_cache(platform, error)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("比赛数据未知错误(%s): %s", platform, exc, exc_info=True)
+                error = f"❌ 获取 {label} 数据失败，请稍后重试"
+                return self._fallback_to_stale_cache(platform, error)
+
+            fetched_at = time.time()
+            self._cache[platform] = (fetched_at, contests)
+            self._save_persistent_cache()
+            logger.info(
+                "比赛数据抓取完成：%s，共 %d 场；缓存有效期 %d 秒",
+                label,
+                len(contests),
+                self._cache_ttl(platform),
+            )
+            return contests, None
+
+    def _cache_ttl(self, platform: str) -> int:
+        return self.offline_cache_ttl if platform == OFFLINE_PLATFORM else self.cache_ttl
+
+    def _is_cache_fresh(
+        self,
+        platform: str,
+        cached: Tuple[float, list],
+        now: Optional[float] = None,
+    ) -> bool:
+        current = time.time() if now is None else now
+        return current - cached[0] < self._cache_ttl(platform)
+
+    def _log_cache_hit(
+        self, platform: str, fetched_at: float, *, joined: bool = False
+    ) -> None:
+        age = max(0.0, time.time() - fetched_at)
         label = PLATFORM_LABELS.get(platform, platform)
+        suffix = "（并发请求复用）" if joined else ""
+        # 线下赛查询频率通常较低，保留 info 日志便于确认是否命中缓存；
+        # 定时推送中的在线平台命中则降为 debug，避免刷屏。
+        if platform == OFFLINE_PLATFORM:
+            logger.info("%s 命中缓存，缓存年龄 %.1f 秒%s", label, age, suffix)
+        else:
+            logger.debug("%s 命中缓存，缓存年龄 %.1f 秒%s", label, age, suffix)
+
+    def _fallback_to_stale_cache(
+        self, platform: str, error: str
+    ) -> Tuple[list, Optional[str]]:
+        cached = self._cache.get(platform)
+        if cached is None:
+            return [], error
+        age = max(0.0, time.time() - cached[0])
+        label = PLATFORM_LABELS.get(platform, platform)
+        logger.warning(
+            "%s 数据刷新失败，使用过期缓存（缓存年龄 %.1f 秒）：%s",
+            label,
+            age,
+            error,
+        )
+        return cached[1], None
+
+    def _load_persistent_cache(self) -> None:
+        """从插件 data 目录加载上次成功抓取的结果。"""
+        if self._cache_loaded:
+            return
+        self._cache_loaded = True
         try:
-            if platform == "codeforces":
-                contests = await self._fetch_codeforces()
-            elif platform == "nowcoder":
-                contests = await self._fetch_nowcoder_calendar("nowcoder")
-            elif platform == "atcoder":
-                contests = await self._fetch_atcoder()
-            elif platform == "luogu":
-                contests = await self._fetch_luogu()
-            elif platform == OFFLINE_PLATFORM:
-                contests = await self._fetch_offline()
-            else:
-                return [], "未知平台"
-        except asyncio.TimeoutError:
-            logger.error("比赛数据抓取超时: %s", platform)
-            return [], f"⏰ {label} 数据获取超时，请稍后重试"
-        except aiohttp.ClientError as exc:
-            logger.error("比赛数据网络错误(%s): %s", platform, exc)
-            return [], f"🌐 {label} 网络连接失败，请检查网络后重试"
-        except (ValueError, KeyError, json.JSONDecodeError, re.error) as exc:
-            logger.error("比赛数据解析失败(%s): %s", platform, exc)
-            return [], f"🔧 {label} 数据格式有变化，请联系管理员修复"
-        except Exception as exc:  # noqa: BLE001
-            logger.error("比赛数据未知错误(%s): %s", platform, exc, exc_info=True)
-            return [], f"❌ 获取 {label} 数据失败，请稍后重试"
-        self._cache[platform] = (time.time(), contests)
-        return contests, None
+            if not self.cache_path.is_file():
+                return
+            with self.cache_path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+            if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
+                logger.info("比赛缓存版本不匹配，忽略旧缓存：%s", self.cache_path)
+                return
+            platforms = payload.get("platforms")
+            if not isinstance(platforms, dict):
+                return
+            for platform, entry in platforms.items():
+                if platform not in QUERY_PLATFORMS or not isinstance(entry, dict):
+                    continue
+                try:
+                    fetched_at = float(entry["fetched_at"])
+                    contests = self._deserialize_contests(
+                        platform, entry.get("contests", [])
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning("比赛缓存条目无效（%s）：%s", platform, exc)
+                    continue
+                self._cache[platform] = (fetched_at, contests)
+                source_url = str(entry.get("source_url") or "")
+                if source_url:
+                    self._source_urls[platform] = source_url
+                logger.info(
+                    "已加载比赛缓存：%s，共 %d 场，缓存年龄 %.1f 秒",
+                    PLATFORM_LABELS.get(platform, platform),
+                    len(contests),
+                    max(0.0, time.time() - fetched_at),
+                )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("读取比赛持久化缓存失败，将重新抓取：%s", exc)
+
+    def _deserialize_contests(self, platform: str, raw: object) -> list:
+        if not isinstance(raw, list):
+            raise ValueError("contests 不是列表")
+        contests = []
+        model = OfflineContest if platform == OFFLINE_PLATFORM else Contest
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if hasattr(model, "model_validate"):
+                contests.append(model.model_validate(item))
+                continue
+            # 兼容旧部署中临时使用的 dataclass OfflineContest。
+            item_copy = dict(item)
+            for field in ("start_date", "end_date"):
+                value = item_copy.get(field)
+                if value and isinstance(value, str):
+                    item_copy[field] = date.fromisoformat(value)
+            contests.append(model(**item_copy))
+        return contests
+
+    @staticmethod
+    def _serialize_contest(contest: object) -> dict:
+        if hasattr(contest, "model_dump"):
+            return contest.model_dump(mode="json")
+        if hasattr(contest, "__dataclass_fields__"):
+            return asdict(contest)
+        raise TypeError(f"不支持的比赛模型：{type(contest)!r}")
+
+    def _save_persistent_cache(self) -> None:
+        """原子写入缓存文件，避免进程中断留下半个 JSON。"""
+        payload = {"version": CACHE_VERSION, "platforms": {}}
+        for platform, (fetched_at, contests) in self._cache.items():
+            try:
+                serialized = [self._serialize_contest(item) for item in contests]
+            except (TypeError, ValueError) as exc:
+                logger.warning("跳过无法序列化的比赛缓存（%s）：%s", platform, exc)
+                continue
+            payload["platforms"][platform] = {
+                "fetched_at": fetched_at,
+                "source_url": self._source_urls.get(platform, ""),
+                "contests": serialized,
+            }
+
+        temp_path = self.cache_path.with_name(f".{self.cache_path.name}.tmp")
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with temp_path.open("w", encoding="utf-8") as file:
+                json.dump(
+                    payload,
+                    file,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=lambda value: (
+                        value.isoformat()
+                        if isinstance(value, (date, datetime))
+                        else str(value)
+                    ),
+                )
+                file.write("\n")
+            os.replace(temp_path, self.cache_path)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("写入比赛持久化缓存失败：%s", exc)
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
     async def fetch_all(
         self, force: bool = False
@@ -388,28 +597,76 @@ class ContestFetcher:
         last_error: Optional[Exception] = None
         # Vite 会把首页组件拆成动态 import 的 chunk；递归读取同源 JS，
         # 这样不依赖浏览器执行 Vue，也能拿到嵌入 chunk 的赛程数组。
-        while pending and len(visited) < 32:
-            script_url = pending.pop(0)
-            if script_url in visited:
-                continue
-            visited.add(script_url)
-            script = ""
+        # 同一层 chunk 并行下载，避免逐个等待网络超时拖慢首次查询。
+        while pending and len(visited) < MAX_OFFLINE_SCRIPTS:
+            batch = []
+            while (
+                pending
+                and len(batch) < OFFLINE_SCRIPT_BATCH_SIZE
+                and len(visited) < MAX_OFFLINE_SCRIPTS
+            ):
+                script_url = pending.pop(0)
+                if script_url in visited:
+                    continue
+                visited.add(script_url)
+                batch.append(script_url)
+
+            async def load_script(script_url: str):
+                try:
+                    return script_url, await fetch_text_with_retry(
+                        self.session, script_url
+                    ), None
+                except Exception as exc:  # noqa: BLE001 -继续尝试其他脚本
+                    return script_url, "", exc
+
+            tasks = [asyncio.create_task(load_script(url)) for url in batch]
             try:
-                script = await fetch_text_with_retry(self.session, script_url)
-                rows = self._parse_xcpc_schedule(script, domain)
-                if rows:
-                    rows.sort(key=lambda item: item.start_date)
-                    return rows
-            except Exception as exc:  # noqa: BLE001 -继续尝试其他脚本
-                last_error = exc
-                # 当前脚本不是赛程 chunk 时继续检查它引用的 JS。
-            for imported in XCPC_SCRIPT_IMPORT_RE.findall(script):
-                imported_url = urljoin(script_url, imported)
-                if imported_url not in visited and imported_url not in pending:
-                    pending.append(imported_url)
+                # 赛程 chunk 找到后立即返回，不必等待统计脚本等无关资源的
+                # 超时/重试；这对首次查询的响应速度影响很明显。
+                for completed in asyncio.as_completed(tasks):
+                    script_url, script, error = await completed
+                    if error is not None:
+                        last_error = error
+                        continue
+                    try:
+                        rows = self._parse_xcpc_schedule(script, domain)
+                        if rows:
+                            rows.sort(key=lambda item: item.start_date)
+                            return rows
+                    except Exception as exc:  # noqa: BLE001 -继续检查其他 chunk
+                        last_error = exc
+                    for imported_url in self._xcpc_import_urls(script, script_url):
+                        if imported_url not in visited and imported_url not in pending:
+                            pending.append(imported_url)
+            finally:
+                unfinished = [task for task in tasks if not task.done()]
+                for task in unfinished:
+                    task.cancel()
+                if unfinished:
+                    await asyncio.gather(*unfinished, return_exceptions=True)
         if last_error:
             raise last_error
         raise ValueError("赛程脚本中未找到线下赛事数据")
+
+    @staticmethod
+    def _xcpc_import_urls(script: str, script_url: str):
+        """只保留同源业务 chunk，跳过 Vercel 统计等无关脚本。"""
+        script_origin = urlparse(script_url).netloc
+        for imported in XCPC_SCRIPT_IMPORT_RE.findall(script):
+            if imported.startswith("${"):
+                continue
+            # Vite 业务 chunk 使用 ./ 或 / 引用；裸的 assets/foo.js 在
+            # /assets/index.js 下会被拼成 /assets/assets/foo.js，通常是无效
+            # 路径，也会额外触发多次重试。
+            if not imported.startswith((".", "/", "http://", "https://")):
+                continue
+            imported_url = urljoin(script_url, imported)
+            parsed = urlparse(imported_url)
+            if parsed.netloc and parsed.netloc != script_origin:
+                continue
+            if parsed.path.startswith("/_vercel/"):
+                continue
+            yield imported_url
 
     @classmethod
     def _parse_xcpc_schedule(
