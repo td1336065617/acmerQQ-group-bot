@@ -105,6 +105,12 @@ ACCOUNT_BIND_USAGE_RE = re.compile(
     r"atc|atcoder)\s*$",
     re.I,
 )
+ACCOUNT_BIND_USAGE_HINTS = {
+    "codeforces": ("绑定cf", "<Codeforces用户名>", "姓氏（Last name）"),
+    "nowcoder": ("绑定牛客", "<牛客用户ID>", "个性签名"),
+    "luogu": ("绑定洛谷", "<洛谷UID>", "个人介绍"),
+    "atcoder": ("绑定atcoder", "<AtCoder用户名>", "Affiliation（所属）"),
+}
 ACCOUNT_CONFIRM_RE = re.compile(
     r"^(?:确认绑定|confirm\s*bind)\s*(cf|codeforces|nk|牛客|nowcoder|"
     r"lg|洛谷|luogu|atc|atcoder)(?:\s+(.+?))?\s*$",
@@ -1895,10 +1901,14 @@ class AcmerGroupBot(Star):
         if bind_usage_match:
             platform = normalize_platform(bind_usage_match.group(1))
             if platform:
+                command, argument_hint, field = ACCOUNT_BIND_USAGE_HINTS.get(
+                    platform,
+                    (f"绑定{platform}", "<账号>", "对应公开资料字段"),
+                )
                 yield event.plain_result(
-                    f"用法：绑定{platform} <用户名、UID或主页链接>\n"
-                    f"例如：绑定{platform} <账号>\n"
-                    "绑定后请按提示把验证码追加到对应公开资料字段，"
+                    f"用法：{command} {argument_hint}\n"
+                    f"请填写账号后再发送，不能只发送“{command}”。\n"
+                    f"绑定后请按提示把验证码追加到【{field}】，"
                     "再发送确认绑定指令。"
                 )
             return
