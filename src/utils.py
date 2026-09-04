@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import unicodedata
 from typing import Any, Optional
 
 from astrbot.api import logger
@@ -54,11 +53,8 @@ def validate_hhmm(value: str) -> str:
 
 
 def normalize_command(value: str) -> str:
-    """规范化聊天指令：兼容全角字符、空白字符并忽略英文大小写。"""
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    # QQ/适配器偶尔会带入不可见格式字符；它们不应影响全匹配指令。
-    text = "".join(char for char in text if unicodedata.category(char) != "Cf")
-    return re.sub(r"\s+", "", text).casefold()
+    """规范化聊天指令：去除首尾空白并忽略英文大小写。"""
+    return str(value or "").strip().casefold()
 
 
 def log_plugin(name: str, message: str) -> None:
