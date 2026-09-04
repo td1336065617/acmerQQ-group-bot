@@ -20,6 +20,8 @@ def test_validate_hhmm():
 
 def test_normalize_command_casefolds_english_only():
     assert normalize_command(" XCPC线下赛 ") == "xcpc线下赛"
+    assert normalize_command("ＸＣＰＣ 线下赛") == "xcpc线下赛"
+    assert normalize_command("X\u200bCPC\n线下赛") == "xcpc线下赛"
     assert normalize_command("AtCoder比赛") == "atcoder比赛"
     assert normalize_command("线下赛") == "线下赛"
 

@@ -98,7 +98,13 @@ MENU_COMMANDS = {
 }
 OFFLINE_COMMANDS = {
     normalize_command(command)
-    for command in ("线下赛", "线下比赛", "XCPC线下赛")
+    for command in (
+        "线下赛",
+        "线下比赛",
+        "XCPC线下赛",
+        "XCPC 线下赛",
+        "XCPC 线下比赛",
+    )
 }
 ACTIVATE_COMMAND = normalize_command("acmer激活")
 UPDATE_COMMANDS = {
