@@ -450,6 +450,13 @@ class AcmerGroupBot(Star):
         )
 
     @staticmethod
+    def _account_bind_command(platform: str) -> str:
+        return ACCOUNT_BIND_USAGE_HINTS.get(
+            platform,
+            (f"绑定{platform}", "<账号>", "对应公开资料字段"),
+        )[0]
+
+    @staticmethod
     def _account_error_text(platform: str, exc: Exception) -> str:
         message = str(exc).strip() or "平台暂时无法访问，请稍后重试"
         if platform == "luogu" and (
@@ -537,31 +544,124 @@ class AcmerGroupBot(Star):
         metric = self._profile_metric(profile)
         if metric is None:
             return
-        await self.account_registry.record_rating(
-            user_id,
-            metric["snapshot_key"],
-            metric["value"],
-        )
+        try:
+            await self.account_registry.record_rating(
+                user_id,
+                metric["snapshot_key"],
+                metric["value"],
+            )
+        except Exception as exc:  # noqa: BLE001 - 快照失败不能阻断资料展示
+            logger.warning(
+                "记录 %s 的 %s Rating 快照失败：%s",
+                user_id,
+                platform_label(profile.platform),
+                exc,
+            )
 
     async def _profile_weekly_delta(self, user_id: str, profile) -> Optional[int]:
         calculator = getattr(
             self.account_fetcher, "rating_delta_for_period", None
         )
-        direct = (
-            calculator(profile, days=7)
-            if callable(calculator)
-            else None
-        )
+        try:
+            direct = (
+                calculator(profile, days=7)
+                if callable(calculator)
+                else None
+            )
+        except Exception as exc:  # noqa: BLE001 - 变化值是可选展示项
+            logger.warning(
+                "计算 %s 的 %s 本周变化失败：%s",
+                user_id,
+                platform_label(profile.platform),
+                exc,
+            )
+            direct = None
         if direct is not None:
             return direct
         metric = self._profile_metric(profile)
         if metric is None:
             return None
-        return await self.account_registry.weekly_delta(
-            user_id,
-            metric["snapshot_key"],
-            days=7,
-        )
+        try:
+            return await self.account_registry.weekly_delta(
+                user_id,
+                metric["snapshot_key"],
+                days=7,
+            )
+        except Exception as exc:  # noqa: BLE001 - 快照失败不影响资料卡
+            logger.warning(
+                "读取 %s 的 %s 本周变化失败：%s",
+                user_id,
+                platform_label(profile.platform),
+                exc,
+            )
+            return None
+
+    async def _render_profile_card(
+        self,
+        profiles,
+        *,
+        display_name: str,
+        weekly_changes,
+        group_ranks,
+    ):
+        """渲染个人资料卡；任何 UI/浏览器异常都回退到文字。"""
+        try:
+            return await asyncio.to_thread(
+                self.account_card_renderer.render_profile,
+                profiles,
+                display_name=display_name,
+                weekly_changes=weekly_changes,
+                group_ranks=group_ranks,
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断账号查询
+            logger.error("个人资料卡渲染失败，改用文字：%s", exc, exc_info=True)
+            return None
+
+    async def _render_ranking_card(
+        self,
+        rows,
+        *,
+        title: str,
+        subtitle: str,
+        metric_label: str,
+        note: str,
+    ):
+        """渲染平台排行卡；失败时交给调用方发送文字。"""
+        try:
+            return await asyncio.to_thread(
+                self.account_card_renderer.render_ranking,
+                rows,
+                title=title,
+                subtitle=subtitle,
+                metric_label=metric_label,
+                note=note,
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断排行查询
+            logger.error("平台排行卡渲染失败，改用文字：%s", exc, exc_info=True)
+            return None
+
+    async def _render_overview_card(
+        self,
+        sections,
+        *,
+        title: str,
+        subtitle: str,
+        metric_label: str,
+        note: str,
+    ):
+        """渲染排行总览卡；失败时交给调用方发送文字。"""
+        try:
+            return await asyncio.to_thread(
+                self.account_card_renderer.render_overview_ranking,
+                sections,
+                title=title,
+                subtitle=subtitle,
+                metric_label=metric_label,
+                note=note,
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断排行查询
+            logger.error("排行总览卡渲染失败，改用文字：%s", exc, exc_info=True)
+            return None
 
     async def _load_group_rank_summary(
         self,
@@ -697,6 +797,10 @@ class AcmerGroupBot(Star):
             return
 
         field = VERIFICATION_FIELD_LABELS.get(platform, "公开资料字段")
+        confirm_command = (
+            self._account_bind_command(platform)
+            .replace("绑定", "确认绑定", 1)
+        )
         group_hint = (
             "\n建议在机器人私聊中完成绑定，避免验证码出现在群消息里。"
             if event.get_group_id()
@@ -705,7 +809,7 @@ class AcmerGroupBot(Star):
         yield event.plain_result(
             f"✅ 已找到 {platform_label(platform)} 账号：{profile.handle}\n"
             f"请在该账号的【{field}】中追加：{token}\n"
-            f"修改完成后发送：确认绑定{platform}{group_hint}\n"
+            f"修改完成后发送：{confirm_command}{group_hint}\n"
             "验证码 10 分钟内有效，验证成功后可以删除。"
         )
 
@@ -716,30 +820,75 @@ class AcmerGroupBot(Star):
         identifier: str = "",
     ):
         user_id = str(event.get_sender_id() or "").strip()
-        pending = await self.account_registry.get_pending(user_id, platform)
+        try:
+            pending = await self.account_registry.get_pending(user_id, platform)
+        except Exception as exc:  # noqa: BLE001 - 绑定状态读取失败要有反馈
+            logger.error(
+                "读取 %s 的 %s 待确认绑定失败：%s",
+                user_id,
+                platform_label(platform),
+                exc,
+                exc_info=True,
+            )
+            yield event.plain_result("⚠️ 绑定状态暂时无法读取，请稍后重试")
+            return
         if pending is None:
             yield event.plain_result(
                 f"没有找到待确认的{platform_label(platform)}绑定请求，"
-                f"请先发送：绑定{platform}<账号>"
+                f"请先发送：{self._account_bind_command(platform)} <账号>"
+            )
+            return
+        pending_platform = str(pending.get("platform") or platform).strip()
+        if pending_platform != platform:
+            logger.warning(
+                "用户 %s 的待确认绑定平台异常：期望 %s，实际 %s",
+                user_id,
+                platform,
+                pending_platform,
+            )
+            try:
+                await self.account_registry.clear_pending(user_id, platform)
+            except Exception:
+                pass
+            yield event.plain_result(
+                "⚠️ 待确认绑定信息已失效，请重新发送绑定指令"
             )
             return
         pending_identifier = str(
             pending.get("platform_user_id") or pending.get("handle") or ""
+        ).strip()
+        normalized_pending = normalize_account_identifier(
+            platform, pending_identifier
         )
+        if not normalized_pending:
+            try:
+                await self.account_registry.clear_pending(user_id, platform)
+            except Exception:
+                pass
+            yield event.plain_result(
+                "⚠️ 待确认账号信息已失效，请重新发送绑定指令"
+            )
+            return
         if identifier:
             normalized = normalize_account_identifier(
                 platform, identifier
             )
-            if normalized and normalized.casefold() != pending_identifier.casefold():
+            if not normalized:
                 yield event.plain_result(
-                    f"待确认账号是 {pending.get('handle') or pending_identifier}，"
+                    f"⚠️ {platform_label(platform)}账号参数格式不正确，"
+                    f"请直接发送确认绑定{platform}，或填写正确的用户名、UID或主页链接"
+                )
+                return
+            if normalized.casefold() != normalized_pending.casefold():
+                yield event.plain_result(
+                    f"待确认账号是 {pending.get('handle') or normalized_pending}，"
                     "如需更换请重新发送绑定指令"
                 )
                 return
         try:
             profile = await self.account_fetcher.get_profile(
                 platform,
-                pending_identifier,
+                normalized_pending,
                 detail=False,
                 force=True,
             )
@@ -751,7 +900,14 @@ class AcmerGroupBot(Star):
             return
 
         if platform == "luogu" and not profile.verification_value.strip():
-            await self.account_registry.clear_pending(user_id, platform)
+            try:
+                await self.account_registry.clear_pending(user_id, platform)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "清理 %s 的洛谷待确认绑定失败：%s",
+                    user_id,
+                    exc,
+                )
             yield event.plain_result(
                 "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
             )
@@ -767,9 +923,11 @@ class AcmerGroupBot(Star):
             )
             return
 
-        group_id = str(event.get_group_id() or "").strip() or str(
-            pending.get("group_id") or ""
-        ).strip()
+        # 绑定开始时记录的群是自动加入排行的归属群。只有私聊发起绑定、
+        # 待确认记录没有群时，才使用确认消息所在的群。
+        pending_group_id = str(pending.get("group_id") or "").strip()
+        event_group_id = str(event.get_group_id() or "").strip()
+        group_id = pending_group_id or event_group_id
         try:
             await self.account_registry.save_binding(
                 user_id,
@@ -787,23 +945,50 @@ class AcmerGroupBot(Star):
             logger.error("保存%s绑定失败：%s", platform_label(platform), exc, exc_info=True)
             yield event.plain_result("⚠️ 绑定保存失败，请稍后重试")
             return
+        if pending_group_id:
+            rank_hint = "已自动加入发起绑定群的竞赛排行。"
+        elif event_group_id:
+            rank_hint = "已自动加入本次确认所在群的竞赛排行。"
+        else:
+            rank_hint = (
+                "这是私聊绑定；在目标群发送一次“我的战绩”即可自动加入该群排行。"
+            )
         yield event.plain_result(
             f"🎉 {platform_label(platform)} 账号 {profile.handle} 绑定成功！\n"
-            "已自动加入当前群的竞赛排行（如在私聊绑定，请在目标群发送一次“我的战绩”）。"
+            + rank_hint
         )
 
     async def _reply_account_unbind(
         self, event: AstrMessageEvent, platform: str
     ):
         user_id = str(event.get_sender_id() or "").strip()
-        removed = await self.account_registry.remove_binding(user_id, platform)
+        try:
+            removed = await self.account_registry.remove_binding(user_id, platform)
+        except Exception as exc:  # noqa: BLE001 - 存储异常要转成用户可见反馈
+            logger.error(
+                "解绑 %s 的 %s 账号失败：%s",
+                user_id,
+                platform_label(platform),
+                exc,
+                exc_info=True,
+            )
+            yield event.plain_result("⚠️ 解绑失败，绑定数据暂时无法读取")
+            return
         if removed:
             self._invalidate_all_rank_cache()
-            remaining = await self.account_registry.get_user_accounts(user_id)
-            if not remaining:
-                await self.account_registry.remove_user_from_all_groups(user_id)
-                suffix = "，并退出所有群排行"
-            else:
+            try:
+                remaining = await self.account_registry.get_user_accounts(user_id)
+                if not remaining:
+                    await self.account_registry.remove_user_from_all_groups(user_id)
+                    suffix = "，并退出所有群排行"
+                else:
+                    suffix = ""
+            except Exception as exc:  # noqa: BLE001 - 解绑已完成，不能误报为失败
+                logger.warning(
+                    "解绑后清理 %s 的群排行状态失败：%s",
+                    user_id,
+                    exc,
+                )
                 suffix = ""
             yield event.plain_result(f"✅ 已解绑 {platform_label(platform)}{suffix}")
         else:
@@ -817,18 +1002,32 @@ class AcmerGroupBot(Star):
         force: bool = False,
     ):
         user_id = str(event.get_sender_id() or "").strip()
-        display_name_changed = await self.account_registry.set_user_display_name(
-            user_id, self._event_display_name(event)
-        )
+        try:
+            display_name_changed = await self.account_registry.set_user_display_name(
+                user_id, self._event_display_name(event)
+            )
+        except Exception as exc:  # noqa: BLE001 - 昵称更新不是查询前置条件
+            logger.warning("更新 %s 的群排行昵称失败：%s", user_id, exc)
+            display_name_changed = False
         if display_name_changed:
             self._invalidate_all_rank_cache()
         if platform:
-            accounts = await self.account_registry.get_user_accounts(user_id)
+            try:
+                accounts = await self.account_registry.get_user_accounts(user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "读取 %s 的绑定账号失败：%s",
+                    user_id,
+                    exc,
+                    exc_info=True,
+                )
+                yield event.plain_result("⚠️ 绑定数据暂时无法读取，请稍后重试")
+                return
             record = accounts.get(platform)
             if not isinstance(record, dict):
                 yield event.plain_result(
                     f"你还没有绑定{platform_label(platform)}账号\n"
-                    f"发送：绑定{platform}<账号>"
+                    f"发送：{self._account_bind_command(platform)} <账号>"
                 )
                 return
             identifier = str(
@@ -847,21 +1046,37 @@ class AcmerGroupBot(Star):
                 await self._record_profile_metric(user_id, profile)
                 delta = await self._profile_weekly_delta(user_id, profile)
                 if group_id:
-                    membership_changed = await self.account_registry.set_group_member(
-                        group_id,
-                        user_id,
-                        True,
-                        preserve_opt_out=True,
-                    )
-                    if membership_changed:
-                        self._invalidate_rank_cache(group_id)
-                group_ranks = await self._load_group_rank_summary(
-                    group_id,
-                    user_id,
-                    [platform],
-                )
-                image_path = await asyncio.to_thread(
-                    self.account_card_renderer.render_profile,
+                    try:
+                        membership_changed = await self.account_registry.set_group_member(
+                            group_id,
+                            user_id,
+                            True,
+                            preserve_opt_out=True,
+                        )
+                        if membership_changed:
+                            self._invalidate_rank_cache(group_id)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "更新 %s 在群 %s 的排行状态失败：%s",
+                            user_id,
+                            group_id,
+                            exc,
+                        )
+                    try:
+                        group_ranks = await self._load_group_rank_summary(
+                            group_id,
+                            user_id,
+                            [platform],
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "读取 %s 在群 %s 的排行失败：%s",
+                            user_id,
+                            group_id,
+                            exc,
+                        )
+                        group_ranks = {}
+                image_path = await self._render_profile_card(
                     [profile],
                     display_name=self._event_display_name(event),
                     weekly_changes={platform: delta},
@@ -883,9 +1098,19 @@ class AcmerGroupBot(Star):
                 yield event.plain_result(self._account_error_text(platform, exc))
             return
 
-        accounts, profiles, errors = await self._load_bound_profiles(
-            user_id, detail=True, force=force
-        )
+        try:
+            accounts, profiles, errors = await self._load_bound_profiles(
+                user_id, detail=True, force=force
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "读取 %s 的绑定资料失败：%s",
+                user_id,
+                exc,
+                exc_info=True,
+            )
+            yield event.plain_result("⚠️ 绑定数据暂时无法读取，请稍后重试")
+            return
         if not accounts:
             yield event.plain_result(
                 "你还没有绑定竞赛平台账号。\n" + self._account_platform_help()
@@ -905,25 +1130,40 @@ class AcmerGroupBot(Star):
         group_id = str(event.get_group_id() or "").strip()
         group_ranks = {}
         if group_id:
-            membership_changed = await self.account_registry.set_group_member(
-                group_id,
-                user_id,
-                True,
-                preserve_opt_out=True,
-            )
-            if membership_changed:
-                self._invalidate_rank_cache(group_id)
-            group_ranks = await self._load_group_rank_summary(
-                group_id,
-                user_id,
-                [profile.platform for profile in profiles],
-            )
+            try:
+                membership_changed = await self.account_registry.set_group_member(
+                    group_id,
+                    user_id,
+                    True,
+                    preserve_opt_out=True,
+                )
+                if membership_changed:
+                    self._invalidate_rank_cache(group_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "更新 %s 在群 %s 的排行状态失败：%s",
+                    user_id,
+                    group_id,
+                    exc,
+                )
+            try:
+                group_ranks = await self._load_group_rank_summary(
+                    group_id,
+                    user_id,
+                    [profile.platform for profile in profiles],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "读取 %s 在群 %s 的排行失败：%s",
+                    user_id,
+                    group_id,
+                    exc,
+                )
         weekly = {
             profile.platform: await self._profile_weekly_delta(user_id, profile)
             for profile in profiles
         }
-        image_path = await asyncio.to_thread(
-            self.account_card_renderer.render_profile,
+        image_path = await self._render_profile_card(
             profiles,
             display_name=self._event_display_name(event),
             weekly_changes=weekly,
@@ -1096,18 +1336,30 @@ class AcmerGroupBot(Star):
             if isinstance(result, Exception):
                 errors.append((user_id, result))
                 continue
-            metric = self._profile_metric(result)
+            try:
+                metric = self._profile_metric(result)
+            except Exception as exc:  # noqa: BLE001 - 跳过异常账号继续排行
+                errors.append((user_id, exc))
+                continue
             if metric is None:
                 continue
             rating_entries.append(
                 (user_id, metric["snapshot_key"], metric["value"])
             )
             key = (str(user_id), metric["snapshot_key"])
-            delta = (
-                delta_calculator(result, days=7)
-                if callable(delta_calculator)
-                else None
-            )
+            try:
+                delta = (
+                    delta_calculator(result, days=7)
+                    if callable(delta_calculator)
+                    else None
+                )
+            except Exception as exc:  # noqa: BLE001 - 变化值不是排行主数据
+                logger.warning(
+                    "计算群排行用户 %s 的本周变化失败：%s",
+                    user_id,
+                    exc,
+                )
+                delta = None
             direct_deltas[key] = delta
             if delta is None:
                 snapshot_requests.append(key)
@@ -1121,14 +1373,24 @@ class AcmerGroupBot(Star):
             None,
         )
         if callable(bulk_recorder):
-            await bulk_recorder(rating_entries)
+            try:
+                await bulk_recorder(rating_entries)
+            except Exception as exc:  # noqa: BLE001 - 快照失败不影响当前排行
+                logger.warning("批量记录群排行 Rating 快照失败：%s", exc)
         else:
             for user_id, snapshot_key, value in rating_entries:
-                await self.account_registry.record_rating(
-                    user_id,
-                    snapshot_key,
-                    value,
-                )
+                try:
+                    await self.account_registry.record_rating(
+                        user_id,
+                        snapshot_key,
+                        value,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "记录群排行用户 %s 的 Rating 快照失败：%s",
+                        user_id,
+                        exc,
+                    )
 
         snapshot_deltas = {}
         bulk_delta_getter = getattr(
@@ -1137,15 +1399,27 @@ class AcmerGroupBot(Star):
             None,
         )
         if snapshot_requests and callable(bulk_delta_getter):
-            snapshot_deltas = await bulk_delta_getter(snapshot_requests)
+            try:
+                snapshot_deltas = await bulk_delta_getter(snapshot_requests)
+            except Exception as exc:  # noqa: BLE001 - 没有变化值也可排行
+                logger.warning("读取群排行历史快照失败：%s", exc)
         elif snapshot_requests:
-            snapshot_deltas = {
-                key: await self.account_registry.weekly_delta(
-                    key[0],
-                    key[1],
-                )
-                for key in snapshot_requests
-            }
+            for key in snapshot_requests:
+                try:
+                    snapshot_deltas[key] = (
+                        await self.account_registry.weekly_delta(
+                            key[0],
+                            key[1],
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "读取群排行用户 %s 的历史快照失败：%s",
+                        key[0],
+                        exc,
+                    )
+        if not isinstance(snapshot_deltas, dict):
+            snapshot_deltas = {}
 
         for user_id, record, result, metric, key in metric_records:
             delta = direct_deltas.get(key)
@@ -1200,20 +1474,45 @@ class AcmerGroupBot(Star):
             yield event.plain_result("群排行设置只能在群聊中使用")
             return
         user_id = str(event.get_sender_id() or "").strip()
-        display_name_changed = await self.account_registry.set_user_display_name(
-            user_id, self._event_display_name(event)
-        )
+        try:
+            display_name_changed = await self.account_registry.set_user_display_name(
+                user_id, self._event_display_name(event)
+            )
+        except Exception as exc:  # noqa: BLE001 - 昵称不是排行设置前置条件
+            logger.warning("更新 %s 的排行昵称失败：%s", user_id, exc)
+            display_name_changed = False
         if display_name_changed:
             self._invalidate_all_rank_cache()
-        accounts = await self.account_registry.get_user_accounts(user_id)
+        try:
+            accounts = await self.account_registry.get_user_accounts(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "读取 %s 的绑定账号失败：%s",
+                user_id,
+                exc,
+                exc_info=True,
+            )
+            yield event.plain_result("⚠️ 绑定数据暂时无法读取，请稍后重试")
+            return
         if enabled and not accounts:
             yield event.plain_result(
                 "你还没有绑定竞赛平台账号，绑定后会自动加入群排行"
             )
             return
-        await self.account_registry.set_group_member(
-            group_id, user_id, enabled
-        )
+        try:
+            await self.account_registry.set_group_member(
+                group_id, user_id, enabled
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "更新 %s 在群 %s 的排行状态失败：%s",
+                user_id,
+                group_id,
+                exc,
+                exc_info=True,
+            )
+            yield event.plain_result("⚠️ 群排行状态保存失败，请稍后重试")
+            return
         self._invalidate_rank_cache(group_id)
         if enabled:
             yield event.plain_result(
@@ -1252,15 +1551,30 @@ class AcmerGroupBot(Star):
         sections = {}
         errors = []
         for platform in platforms:
-            rows, row_errors = await self._collect_rank_rows(
-                group_id, platform, progress=progress
-            )
+            try:
+                rows, row_errors = await self._collect_rank_rows(
+                    group_id, platform, progress=progress
+                )
+            except Exception as exc:  # noqa: BLE001 - 单个平台失败不阻断总览
+                logger.error(
+                    "读取群 %s 的 %s 排行失败：%s",
+                    group_id,
+                    platform_label(platform),
+                    exc,
+                    exc_info=True,
+                )
+                rows, row_errors = [], [("", exc)]
             sections[platform] = rows
             errors.extend((platform, error) for _, error in row_errors)
 
         if mode in ACCOUNT_PLATFORMS:
             rows = sections.get(mode, [])
             if not rows:
+                if any(platform == mode for platform, _ in errors):
+                    yield event.plain_result(
+                        f"⚠️ {platform_label(mode)}排行暂时无法读取，请稍后重试"
+                    )
+                    return
                 yield event.plain_result(
                     f"当前群还没有加入{platform_label(mode)}排行的成员"
                 )
@@ -1299,8 +1613,7 @@ class AcmerGroupBot(Star):
                 note_parts.append("；".join(navigation))
             note = " · ".join(note_parts)
             title = f"本群 {platform_label(mode)} 排行 · 第 {page}/{total_pages} 页"
-            image_path = await asyncio.to_thread(
-                self.account_card_renderer.render_ranking,
+            image_path = await self._render_ranking_card(
                 page_rows,
                 title=title,
                 subtitle=f"当前显示 {start + 1}-{end} / {total} 名成员 · 公开资料排行",
@@ -1321,7 +1634,12 @@ class AcmerGroupBot(Star):
             )
         else:
             if not any(sections.values()):
-                yield event.plain_result("当前群还没有加入排行的成员")
+                if errors:
+                    yield event.plain_result(
+                        "⚠️ 群排行暂时无法读取，请稍后重试"
+                    )
+                else:
+                    yield event.plain_result("当前群还没有加入排行的成员")
                 return
             title = "本群竞赛排行总览" if not progress else "本群本周进步榜"
             metric = "Rating" if not progress else "本周变化"
@@ -1338,8 +1656,7 @@ class AcmerGroupBot(Star):
                 f" · 总览每个平台仅显示前 {RANK_OVERVIEW_SIZE} 名，"
                 "完整榜单请使用对应平台排行指令"
             )
-            image_path = await asyncio.to_thread(
-                self.account_card_renderer.render_overview_ranking,
+            image_path = await self._render_overview_card(
                 overview_sections,
                 title=title,
                 subtitle=f"四平台公开战绩矩阵 · 每个平台前 {RANK_OVERVIEW_SIZE} 名",

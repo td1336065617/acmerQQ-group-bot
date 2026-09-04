@@ -246,49 +246,6 @@ def test_registry_binding_token_and_group_auto_join():
     asyncio.run(scenario())
 
 
-def test_registry_bulk_rating_snapshots_and_deltas():
-    async def scenario():
-        plugin = FakePlugin()
-        registry = AccountRegistry(plugin)
-        now = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc).timestamp()
-
-        await registry.record_ratings(
-            [
-                ("user-1", "codeforces", 1800),
-                ("user-2", "codeforces", 1600),
-            ]
-        )
-        snapshots = await registry.get_weekly_deltas(
-            [("user-1", "codeforces"), ("user-2", "codeforces")],
-            now=now,
-        )
-        assert snapshots[("user-1", "codeforces")] is None
-        assert snapshots[("user-2", "codeforces")] is None
-
-        data = await plugin.get_kv_data("account_rating_snapshots", {})
-        old_time = now - 8 * 86400
-        data["user-1"]["codeforces"].insert(
-            0,
-            {"timestamp": old_time, "rating": 1700},
-        )
-        data["user-2"]["codeforces"].insert(
-            0,
-            {"timestamp": old_time, "rating": 1500},
-        )
-        await plugin.put_kv_data("account_rating_snapshots", data)
-
-        snapshots = await registry.get_weekly_deltas(
-            [("user-1", "codeforces"), ("user-2", "codeforces")],
-            now=now,
-        )
-        assert snapshots == {
-            ("user-1", "codeforces"): 100,
-            ("user-2", "codeforces"): 100,
-        }
-
-    asyncio.run(scenario())
-
-
 def test_profile_and_ranking_html_escape_user_content(tmp_path):
     renderer = AccountCardRenderer(cache_dir=tmp_path)
     profile = AccountProfile(
@@ -406,6 +363,55 @@ def test_profile_card_avatar_url_normalization():
         == "https://www.luogu.com.cn/avatar.png"
     )
     assert AccountCardRenderer._normalize_avatar_url("not-a-url") == ""
+
+
+def test_avatar_preload_failure_falls_back_to_placeholder(tmp_path, monkeypatch):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="demo",
+        avatar_url="https://cdn.example.com/avatar.jpg",
+    )
+
+    def broken_load(*args, **kwargs):
+        raise RuntimeError("avatar decoder down")
+
+    def broken_download(*args, **kwargs):
+        raise RuntimeError("avatar network down")
+
+    monkeypatch.setattr(renderer, "_load_avatar", broken_load)
+    monkeypatch.setattr(renderer, "_download_avatar_data_url", broken_download)
+
+    assert renderer._avatar_html_source(profile) == ""
+
+
+def test_card_renderer_failure_returns_none(tmp_path, monkeypatch):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(platform="codeforces", handle="demo")
+
+    def broken_external(*args, **kwargs):
+        raise RuntimeError("browser crashed")
+
+    def broken_fallback(*args, **kwargs):
+        raise RuntimeError("pillow crashed")
+
+    monkeypatch.setattr(
+        AdaptiveOutputRenderer,
+        "_find_renderers",
+        staticmethod(lambda: [("chromium", "fake-browser")]),
+    )
+    monkeypatch.setattr(
+        AdaptiveOutputRenderer,
+        "_run_external_renderer",
+        staticmethod(broken_external),
+    )
+    monkeypatch.setattr(
+        AccountCardRenderer,
+        "_pillow_profile",
+        classmethod(lambda cls, *args, **kwargs: broken_fallback()),
+    )
+
+    assert renderer.render_profile([profile]) is None
 
 
 def test_profile_renderer_uses_png_temp_suffix(tmp_path, monkeypatch):

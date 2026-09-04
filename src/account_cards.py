@@ -166,27 +166,31 @@ class AccountCardRenderer:
 
     def _avatar_html_source(self, profile: AccountProfile) -> str:
         """预加载头像并内嵌为 data URL，避免截图早于远程图片加载。"""
-        normalized = self._normalize_avatar_url(
-            profile.avatar_url,
-            profile.platform,
-        )
-        if not normalized:
-            return ""
-        image = self._load_avatar(
-            self.avatar_cache_dir,
-            normalized,
-            256,
-            profile.platform,
-        )
-        if image is None:
-            return self._download_avatar_data_url(normalized)
         try:
-            output = io.BytesIO()
-            image.save(output, format="PNG")
-            encoded = base64.b64encode(output.getvalue()).decode("ascii")
-            return f"data:image/png;base64,{encoded}"
-        except (OSError, ValueError):
-            return self._download_avatar_data_url(normalized)
+            normalized = self._normalize_avatar_url(
+                profile.avatar_url,
+                profile.platform,
+            )
+            if not normalized:
+                return ""
+            image = self._load_avatar(
+                self.avatar_cache_dir,
+                normalized,
+                256,
+                profile.platform,
+            )
+            if image is None:
+                return self._download_avatar_data_url(normalized)
+            try:
+                output = io.BytesIO()
+                image.save(output, format="PNG")
+                encoded = base64.b64encode(output.getvalue()).decode("ascii")
+                return f"data:image/png;base64,{encoded}"
+            except (OSError, ValueError):
+                return self._download_avatar_data_url(normalized)
+        except Exception:
+            # 头像只是装饰信息，任何解析/下载异常都应回退到占位图。
+            return ""
 
     @staticmethod
     def _download_avatar_data_url(url: str) -> str:
@@ -217,7 +221,7 @@ class AccountCardRenderer:
                 )
             encoded = base64.b64encode(payload).decode("ascii")
             return f"data:{content_type};base64,{encoded}"
-        except (OSError, ValueError, urllib.error.URLError):
+        except Exception:
             return ""
 
     def render_ranking(
@@ -319,15 +323,25 @@ class AccountCardRenderer:
             except (OSError, UnicodeError):
                 return None
 
-            height = self._estimate_height(source)
-            for kind, executable in AdaptiveOutputRenderer._find_renderers():
-                image_tmp.unlink(missing_ok=True)
-                if kind == "pillow":
-                    success = fallback(*fallback_args, image_tmp)
-                else:
-                    success = AdaptiveOutputRenderer._run_external_renderer(
-                        kind, executable, html_path, image_tmp, height
-                    )
+            try:
+                height = self._estimate_height(source)
+            except Exception:
+                height = PROFILE_MIN_RENDER_HEIGHT
+            try:
+                renderers = AdaptiveOutputRenderer._find_renderers()
+            except Exception:
+                renderers = []
+            for kind, executable in renderers:
+                try:
+                    image_tmp.unlink(missing_ok=True)
+                    if kind == "pillow":
+                        success = fallback(*fallback_args, image_tmp)
+                    else:
+                        success = AdaptiveOutputRenderer._run_external_renderer(
+                            kind, executable, html_path, image_tmp, height
+                        )
+                except Exception:
+                    success = False
                 if success:
                     try:
                         os.replace(image_tmp, image_path)
@@ -335,8 +349,12 @@ class AccountCardRenderer:
                         return None
                     return image_path
 
-            image_tmp.unlink(missing_ok=True)
-            if fallback(*fallback_args, image_tmp):
+            try:
+                image_tmp.unlink(missing_ok=True)
+                fallback_success = fallback(*fallback_args, image_tmp)
+            except Exception:
+                fallback_success = False
+            if fallback_success:
                 try:
                     os.replace(image_tmp, image_path)
                 except OSError:
@@ -562,7 +580,7 @@ class AccountCardRenderer:
                 method=resampling,
                 centering=(0.5, 0.5),
             )
-        except (OSError, ValueError, urllib.error.URLError):
+        except Exception:
             return None
 
     @staticmethod
