@@ -6,7 +6,11 @@ from datetime import date, datetime, timezone
 import pytest
 
 from src.models import Contest, GroupConfig, OfflineContest
-from src.utils import normalize_command, validate_hhmm
+from src.utils import (
+    is_contest_in_recent_window,
+    normalize_command,
+    validate_hhmm,
+)
 
 
 def test_validate_hhmm():
@@ -63,3 +67,51 @@ def test_offline_contest_format():
     assert "赛站/地点：广州" in text
     assert "官方通知：https://example.com/notice" in text
     assert "数据源：XCPC Link（https://www.xcpc.ink/）" in text
+
+
+def test_recent_window_includes_upcoming_and_running_contests():
+    now = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+    upcoming = Contest(
+        platform="codeforces",
+        name="未来比赛",
+        start_time=datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc),
+        duration_minutes=120,
+    )
+    outside = Contest(
+        platform="codeforces",
+        name="范围外比赛",
+        start_time=datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc),
+    )
+    running = Contest(
+        platform="atcoder",
+        name="进行中比赛",
+        start_time=datetime(2026, 9, 4, 11, 0, tzinfo=timezone.utc),
+        duration_minutes=120,
+    )
+    ended = Contest(
+        platform="atcoder",
+        name="已结束比赛",
+        start_time=datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc),
+        duration_minutes=60,
+    )
+
+    assert is_contest_in_recent_window(upcoming, now, 7) is True
+    assert is_contest_in_recent_window(outside, now, 7) is False
+    assert is_contest_in_recent_window(running, now, 7) is True
+    assert is_contest_in_recent_window(ended, now, 7) is False
+
+
+def test_recent_window_supports_date_only_offline_contests():
+    now = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+    within = OfflineContest(
+        name="近期线下赛",
+        start_date=date(2026, 9, 10),
+        source_url="https://www.xcpc.link/",
+    )
+    outside = OfflineContest(
+        name="较远线下赛",
+        start_date=date(2026, 9, 12),
+        source_url="https://www.xcpc.link/",
+    )
+    assert is_contest_in_recent_window(within, now, 7) is True
+    assert is_contest_in_recent_window(outside, now, 7) is False

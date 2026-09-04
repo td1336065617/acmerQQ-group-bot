@@ -34,7 +34,12 @@ from .src.models import (
 )
 from .src.output_renderer import AdaptiveOutputRenderer, text_chunks
 from .src.scheduler import PushScheduler
-from .src.utils import normalize_command, validate_hhmm
+from .src.utils import (
+    contest_start_utc,
+    is_contest_in_recent_window,
+    normalize_command,
+    validate_hhmm,
+)
 
 # 这两个常量在主程序内定义，避免 AstrBot 更新过程中只替换 main.py
 # 时因为旧版 contest_fetcher.py 尚未同步而无法加载插件。
@@ -51,6 +56,10 @@ MIN_MAX_PLAIN_TEXT_CHARS = 200
 MAX_MAX_PLAIN_TEXT_CHARS = 10000
 MIN_MAX_PLAIN_TEXT_LINES = 10
 MAX_MAX_PLAIN_TEXT_LINES = 200
+# “最近比赛”查询窗口：默认查看未来 7 天内开赛/仍在进行的比赛。
+DEFAULT_RECENT_CONTEST_DAYS = 7
+MIN_RECENT_CONTEST_DAYS = 1
+MAX_RECENT_CONTEST_DAYS = 30
 # @全体成员 尝试失败后，对该群暂缓重试的时间（秒）
 AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 比赛列表最多展示的条数（防止消息过长）
@@ -61,6 +70,7 @@ MENU_TEXT = (
     "━━━━━━━━━━━━\n"
     "👥 所有人可用\n"
     "• acmer激活 ─ 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
+    "• 最近比赛 ─ 汇总所有平台未来 N 天内及进行中的比赛（N 可在 WebUI 设置）\n"
     "• nk比赛 / 牛客比赛 ─ 牛客全部未开始比赛\n"
     "• 最近nk比赛 / 最近牛客比赛 ─ 牛客最近一场比赛\n"
     "• cf比赛 / Codeforces比赛 ─ Codeforces 全部未开始比赛\n"
@@ -113,6 +123,9 @@ OFFLINE_COMMANDS = {
 ACTIVATE_COMMAND = normalize_command("acmer激活")
 UPDATE_COMMANDS = {
     normalize_command(command) for command in ("update", "刷新比赛")
+}
+RECENT_ALL_COMMANDS = {
+    normalize_command(command) for command in ("最近比赛", "近期比赛")
 }
 
 
@@ -254,6 +267,12 @@ class AcmerGroupBot(Star):
                 DEFAULT_MAX_PLAIN_TEXT_LINES,
                 MIN_MAX_PLAIN_TEXT_LINES,
                 MAX_MAX_PLAIN_TEXT_LINES,
+            ),
+            "recent_contest_days": self._read_bounded_int(
+                raw.get("recent_contest_days"),
+                DEFAULT_RECENT_CONTEST_DAYS,
+                MIN_RECENT_CONTEST_DAYS,
+                MAX_RECENT_CONTEST_DAYS,
             ),
         }
         # 每次读取配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
@@ -615,6 +634,131 @@ class AcmerGroupBot(Star):
         async for result in self._adaptive_results(event, "\n".join(lines)):
             yield result
 
+    @staticmethod
+    def _format_recent_contest(
+        index: int, platform: str, contest: object
+    ) -> List[str]:
+        """格式化跨平台近期比赛的一条记录。"""
+        label = PLATFORM_LABELS.get(platform, platform)
+        name = str(getattr(contest, "name", "") or "未命名比赛")
+        lines = [f"{index}. [{label}] {name}"]
+
+        date_text = getattr(contest, "date_text", None)
+        if callable(date_text):
+            try:
+                lines.append(f"   日期：{date_text()}")
+            except Exception:
+                pass
+        else:
+            start = contest_start_utc(contest)
+            if start is not None:
+                lines.append(
+                    f"   时间：{start.astimezone(CN_TZ):%Y-%m-%d %H:%M}"
+                    "（北京时间）"
+                )
+            duration = getattr(contest, "duration_minutes", 0) or 0
+            try:
+                duration = int(duration)
+            except (TypeError, ValueError):
+                duration = 0
+            if duration > 0:
+                lines.append(f"   时长：{duration} 分钟")
+            url = str(getattr(contest, "url", "") or "").strip()
+            if url:
+                lines.append(f"   链接：{url}")
+
+        venue = str(getattr(contest, "venue", "") or "").strip()
+        if venue:
+            lines.append(f"   赛站/地点：{venue}")
+        organizer = str(getattr(contest, "organizer", "") or "").strip()
+        if organizer:
+            lines.append(f"   主办方：{organizer}")
+        official_url = str(getattr(contest, "official_url", "") or "").strip()
+        if official_url:
+            lines.append(f"   官方通知：{official_url}")
+        return lines
+
+    async def _reply_recent_all(self, event: AstrMessageEvent):
+        """汇总所有平台未来指定天数内开赛或仍在进行的比赛。"""
+        settings = await self.get_settings()
+        days = settings["recent_contest_days"]
+        now = datetime.now(timezone.utc)
+        platforms = [
+            platform
+            for platform in QUERY_PLATFORMS
+            if platform != OFFLINE_PLATFORM
+            or hasattr(self.fetcher, "_fetch_offline")
+        ]
+
+        async def fetch_one(platform: str):
+            try:
+                result = await self.fetcher.fetch_platform(platform)
+                if (
+                    not isinstance(result, tuple)
+                    or len(result) != 2
+                    or not isinstance(result[0], list)
+                ):
+                    raise ValueError("抓取结果格式异常")
+                return result
+            except Exception as exc:  # noqa: BLE001 - 单个平台失败不影响汇总
+                label = PLATFORM_LABELS.get(platform, platform)
+                logger.warning("汇总近期比赛获取%s失败：%s", label, exc)
+                return [], f"获取失败：{exc}"
+
+        results = await asyncio.gather(
+            *(fetch_one(platform) for platform in platforms)
+        )
+        entries = []
+        errors = []
+        offline_included = OFFLINE_PLATFORM in platforms
+        for platform, (contests, error) in zip(platforms, results):
+            label = PLATFORM_LABELS.get(platform, platform)
+            if error:
+                errors.append(f"{label}：{error}")
+            for contest in contests:
+                start = contest_start_utc(contest)
+                if start is None or not is_contest_in_recent_window(
+                    contest, now, days
+                ):
+                    continue
+                entries.append((start, platform, contest))
+
+        entries.sort(
+            key=lambda item: (
+                item[0],
+                PLATFORM_LABELS.get(item[1], item[1]),
+                str(getattr(item[2], "name", "") or ""),
+            )
+        )
+        lines = [
+            f"📅 最近比赛（未来 {days} 天内及进行中，共 {len(entries)} 场）"
+        ]
+        if offline_included:
+            source_getter = getattr(self.fetcher, "source_text", None)
+            try:
+                source = (
+                    source_getter(OFFLINE_PLATFORM)
+                    if callable(source_getter)
+                    else ""
+                )
+            except Exception:
+                source = ""
+            source = source or "https://www.xcpc.link/（备用：https://www.xcpc.ink/）"
+            lines.append(f"📚 线下赛数据源：XCPC Link（{source}）")
+        if errors:
+            lines.append("⚠️ 部分平台获取失败：" + "；".join(errors))
+        if not entries:
+            lines.append("（当前时间范围内暂无比赛）")
+        else:
+            for index, (_, platform, contest) in enumerate(
+                entries[:MAX_CONTEST_LIST], start=1
+            ):
+                lines.extend(self._format_recent_contest(index, platform, contest))
+        if len(entries) > MAX_CONTEST_LIST:
+            lines.append(f"…共 {len(entries)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
+        async for result in self._adaptive_results(event, "\n".join(lines)):
+            yield result
+
     async def _update(self, event: AstrMessageEvent):
         if not await self._is_admin(event):
             async for result in self._adaptive_results(event, "此指令仅限管理员"):
@@ -652,6 +796,10 @@ class AcmerGroupBot(Star):
             return
         if message_str in MENU_COMMANDS:
             async for result in self._adaptive_results(event, MENU_TEXT):
+                yield result
+            return
+        if message_str in RECENT_ALL_COMMANDS:
+            async for result in self._reply_recent_all(event):
                 yield result
             return
         if message_str == ACTIVATE_COMMAND:
@@ -791,6 +939,14 @@ class AcmerGroupBot(Star):
                     MIN_MAX_PLAIN_TEXT_LINES,
                     MAX_MAX_PLAIN_TEXT_LINES,
                 )
+                recent_contest_days = self._validate_bounded_int(
+                    settings.get(
+                        "recent_contest_days", current["recent_contest_days"]
+                    ),
+                    "最近比赛查询天数",
+                    MIN_RECENT_CONTEST_DAYS,
+                    MAX_RECENT_CONTEST_DAYS,
+                )
                 await self.put_kv_data(
                     "settings",
                     {
@@ -808,6 +964,7 @@ class AcmerGroupBot(Star):
                         ),
                         "max_plain_text_chars": max_plain_text_chars,
                         "max_plain_text_lines": max_plain_text_lines,
+                        "recent_contest_days": recent_contest_days,
                     },
                 )
                 # 保存成功后立即更新当前实例，无需等待下一次消息或重启插件。

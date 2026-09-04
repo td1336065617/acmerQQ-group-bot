@@ -71,6 +71,12 @@
     <label class="check"><input type="checkbox" id="atAllInput"> 通知尝试 @全体成员（注意：QQ 官方群聊不支持，即使机器人是群管理员也不会生效，建议关闭）</label>
   </div>
   <div class="row" style="margin-bottom:10px">
+    <label for="recentDaysInput">最近比赛查询范围</label>
+    <input type="number" id="recentDaysInput" min="1" max="30" step="1" inputmode="numeric">
+    <span>天</span>
+    <span class="muted">默认 7 天，范围 1～30 天；包含正在进行的比赛</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
     <label for="maxCharsInput">文字转图片最大字符数</label>
     <input type="number" id="maxCharsInput" min="200" max="10000" step="1" inputmode="numeric">
     <span class="muted">默认 1800，范围 200～10000</span>
@@ -114,6 +120,7 @@
     push_platforms: [],
     reminder_enabled: true,
     at_all_enabled: false,
+    recent_contest_days: 7,
     max_plain_text_chars: 1800,
     max_plain_text_lines: 36
   };
@@ -161,6 +168,7 @@
     });
     document.getElementById('reminderInput').checked = !!settings.reminder_enabled;
     document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
+    document.getElementById('recentDaysInput').value = settings.recent_contest_days || 7;
     document.getElementById('maxCharsInput').value = settings.max_plain_text_chars || 1800;
     document.getElementById('maxLinesInput').value = settings.max_plain_text_lines || 36;
   }
@@ -253,6 +261,11 @@
       if (cb.checked) platforms.push(cb.value);
     });
     if (!platforms.length) { show('请至少选择一个推送平台', true); return; }
+    const recentDays = Number(document.getElementById('recentDaysInput').value);
+    if (!Number.isInteger(recentDays) || recentDays < 1 || recentDays > 30) {
+      show('最近比赛查询范围应为 1～30 的整数', true);
+      return;
+    }
     const maxChars = Number(document.getElementById('maxCharsInput').value);
     const maxLines = Number(document.getElementById('maxLinesInput').value);
     if (!Number.isInteger(maxChars) || maxChars < 200 || maxChars > 10000) {
@@ -268,6 +281,7 @@
       push_platforms: platforms,
       reminder_enabled: document.getElementById('reminderInput').checked,
       at_all_enabled: document.getElementById('atAllInput').checked,
+      recent_contest_days: recentDays,
       max_plain_text_chars: maxChars,
       max_plain_text_lines: maxLines
     };
