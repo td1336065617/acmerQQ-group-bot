@@ -388,6 +388,54 @@ def test_profile_renderer_uses_png_temp_suffix(tmp_path, monkeypatch):
     assert seen_suffixes == [".png"]
 
 
+def test_ranking_card_height_covers_wrapped_rows_and_notes(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    rows = [
+        {
+            "display_name": "用户" + "长昵称" * 12,
+            "handle": "contest_user_" + "long_handle_" * 8,
+            "value": 3000,
+            "display_value": "3000",
+            "metric_label": "Rating",
+            "delta": 20,
+        }
+    ] * 30
+    note = "共 30 名成员 · 当前显示第 1-30 名 · 下一页：群cf排行 2"
+
+    assert renderer._ranking_row_height(rows[0]) > 104
+    assert renderer._ranking_height(rows, note=note) > 3500
+    assert renderer._estimate_height(
+        {"kind": "ranking", "rows": rows, "note": note}
+    ) == renderer._ranking_height(rows, note=note)
+
+
+def test_overview_card_height_is_based_on_sections_and_note(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    sections = {
+        platform: [
+            {
+                "display_name": f"用户{i}",
+                "handle": f"user{i}",
+                "value": 3000 - i,
+                "display_value": str(3000 - i),
+                "delta": i,
+            }
+            for i in range(5)
+        ]
+        for platform in ("codeforces", "nowcoder", "atcoder", "luogu")
+    }
+    height = renderer._estimate_height(
+        {
+            "kind": "overview",
+            "sections": sections,
+            "note": "各平台分开排行，完整榜单请使用对应平台排行指令",
+        }
+    )
+
+    assert height > 1200
+    assert height < 1800
+
+
 def test_registry_bulk_rating_snapshots_and_deltas():
     async def scenario():
         plugin = FakePlugin()

@@ -14,7 +14,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 2
+CARD_FORMAT_VERSION = 3
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -22,6 +22,23 @@ PROFILE_MIN_RENDER_HEIGHT = 500
 PROFILE_PAGE_OVERHEAD = 245
 PROFILE_CARD_BASE_HEIGHT = 270
 PROFILE_GRID_GAP = 18
+RANKING_PAGE_START = 215
+RANKING_LIST_OVERHEAD = 21
+RANKING_ROW_HEIGHT = 104
+RANKING_NOTE_MARGIN = 18
+RANKING_NOTE_PADDING = 28
+RANKING_NOTE_LINE_HEIGHT = 24
+RANKING_FOOTER_OVERHEAD = 44
+RANKING_PAGE_BOTTOM = 62
+RANKING_HEIGHT_SAFETY = 24
+RANKING_MIN_RENDER_HEIGHT = 520
+OVERVIEW_PAGE_START = 215
+OVERVIEW_SECTION_BASE = 74
+OVERVIEW_ROW_HEIGHT = 65
+OVERVIEW_EMPTY_SECTION_HEIGHT = 106
+OVERVIEW_GRID_GAP = 24
+OVERVIEW_HEIGHT_SAFETY = 16
+OVERVIEW_MIN_RENDER_HEIGHT = 520
 
 PLATFORM_COLORS = {
     "codeforces": ("#ff557a", "#ff9a5a"),
@@ -239,14 +256,15 @@ class AccountCardRenderer:
     @staticmethod
     def _estimate_height(source: Dict[str, Any]) -> int:
         if source.get("kind") == "ranking":
-            rows = len(source.get("rows") or [])
-            return max(MIN_CARD_HEIGHT, min(MAX_CARD_HEIGHT, 470 + rows * 88))
+            return AccountCardRenderer._ranking_height(
+                source.get("rows") or [],
+                note=str(source.get("note") or ""),
+            )
         if source.get("kind") == "overview":
             sections = source.get("sections") or {}
-            rows = sum(max(1, min(5, len(value))) for value in sections.values())
-            return max(
-                MIN_CARD_HEIGHT,
-                min(MAX_CARD_HEIGHT, 620 + rows * 74),
+            return AccountCardRenderer._overview_height(
+                sections,
+                note=str(source.get("note") or ""),
             )
         return AccountCardRenderer._profile_height(
             source.get("profiles") or []
@@ -348,6 +366,107 @@ class AccountCardRenderer:
         return max(
             PROFILE_MIN_RENDER_HEIGHT,
             min(MAX_CARD_HEIGHT, PROFILE_PAGE_OVERHEAD + grid_height),
+        )
+
+    @staticmethod
+    def _ranking_text_width(value: object) -> int:
+        """估算排行昵称/账号在固定列中的混排宽度。"""
+        text = str(value or "")
+        return sum(2 if not char.isascii() else 1 for char in text)
+
+    @classmethod
+    def _ranking_row_height(cls, row: object) -> int:
+        """估算排行行高，避免长昵称换行后挤压下一行。"""
+        if not isinstance(row, dict):
+            return RANKING_ROW_HEIGHT
+        display_name = cls._ranking_text_width(
+            row.get("display_name") or row.get("qq_name") or "未知用户"
+        )
+        handle = cls._ranking_text_width(row.get("handle") or "未绑定")
+        # 当前 HTML 中 rank-user 可用宽度约 616px；对应字体下分别按
+        # 55/82 个中英文混排单位估算换行。
+        name_lines = max(1, (display_name + 54) // 55)
+        handle_lines = max(1, (handle + 81) // 82)
+        user_height = name_lines * 30 + 5 + handle_lines * 21
+        return max(RANKING_ROW_HEIGHT, user_height + 40 + 1)
+
+    @classmethod
+    def _ranking_height(
+        cls,
+        rows: Iterable[object],
+        *,
+        note: str = "",
+    ) -> int:
+        """按排行行数、长文本和备注估算截图高度。"""
+        row_list = list(rows)
+        rows_height = sum(cls._ranking_row_height(row) for row in row_list)
+        list_height = RANKING_LIST_OVERHEAD + rows_height
+        note_height = 0
+        if note:
+            note_width = cls._ranking_text_width(note)
+            note_lines = max(1, (note_width + 127) // 128)
+            note_height = (
+                RANKING_NOTE_MARGIN
+                + RANKING_NOTE_PADDING
+                + note_lines * RANKING_NOTE_LINE_HEIGHT
+            )
+        height = (
+            RANKING_PAGE_START
+            + list_height
+            + note_height
+            + RANKING_FOOTER_OVERHEAD
+            + RANKING_PAGE_BOTTOM
+            + RANKING_HEIGHT_SAFETY
+        )
+        return max(
+            RANKING_MIN_RENDER_HEIGHT,
+            min(MAX_CARD_HEIGHT, height),
+        )
+
+    @classmethod
+    def _overview_height(
+        cls,
+        sections: Dict[str, List[Dict[str, Any]]],
+        *,
+        note: str = "",
+    ) -> int:
+        """按总览分区和行数估算截图高度，避免使用固定大画布。"""
+        section_heights = []
+        for rows in sections.values():
+            count = min(5, len(rows))
+            section_heights.append(
+                OVERVIEW_EMPTY_SECTION_HEIGHT
+                if count == 0
+                else OVERVIEW_SECTION_BASE + count * OVERVIEW_ROW_HEIGHT
+            )
+        if not section_heights:
+            grid_height = OVERVIEW_EMPTY_SECTION_HEIGHT
+        else:
+            grid_height = 0
+            for offset in range(0, len(section_heights), 2):
+                grid_height += max(section_heights[offset : offset + 2])
+            grid_height += max(0, (len(section_heights) + 1) // 2 - 1) * OVERVIEW_GRID_GAP
+
+        note_height = 0
+        if note:
+            note_width = cls._ranking_text_width(note)
+            note_lines = max(1, (note_width + 127) // 128)
+            note_height = (
+                RANKING_NOTE_MARGIN
+                + RANKING_NOTE_PADDING
+                + note_lines * RANKING_NOTE_LINE_HEIGHT
+            )
+        height = (
+            OVERVIEW_PAGE_START
+            + grid_height
+            + note_height
+            + RANKING_FOOTER_OVERHEAD
+            + RANKING_PAGE_BOTTOM
+            + OVERVIEW_HEIGHT_SAFETY
+        )
+        return max(
+            OVERVIEW_MIN_RENDER_HEIGHT,
+            min(MAX_CARD_HEIGHT, height),
         )
 
     @classmethod
