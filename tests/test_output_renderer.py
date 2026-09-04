@@ -31,6 +31,8 @@ def test_html_escapes_and_keeps_structure(tmp_path: Path):
     assert 'class="line item"' in html
     assert 'class="line detail"' in html
     assert 'class="line source"' in html
+    assert "PINK PEARL" in html
+    assert "#e467a5" in html
 
 
 def test_render_reuses_same_content(tmp_path: Path, monkeypatch):

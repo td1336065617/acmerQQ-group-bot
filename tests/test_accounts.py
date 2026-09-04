@@ -86,6 +86,8 @@ def test_public_profile_parsers():
         {
             "handle": "demo",
             "lastName": "ACM-TOKEN",
+            "avatar": "https://userpic.codeforces.org/1/avatar/demo.jpg",
+            "titlePhoto": "https://userpic.codeforces.org/1/title/demo.jpg",
             "rating": 1800,
             "rank": "expert",
             "maxRating": 1900,
@@ -95,6 +97,10 @@ def test_public_profile_parsers():
     assert cf_profile.handle == "demo"
     assert cf_profile.verification_value == "ACM-TOKEN"
     assert cf_profile.rating == 1800
+    assert (
+        cf_profile.avatar_url
+        == "https://userpic.codeforces.org/1/avatar/demo.jpg"
+    )
 
     nowcoder_history = AccountFetcher._parse_nowcoder_history(
         [
@@ -125,6 +131,12 @@ def test_public_profile_parsers():
     assert AccountFetcher._atcoder_table_value(atcoder_html, "Rated Matches") == "8"
     atcoder_history = AccountFetcher._parse_atcoder_history_html(atcoder_html)
     assert atcoder_history[0]["delta"] == 34
+    assert (
+        AccountFetcher._extract_atcoder_avatar(
+            "<img class='avatar' src='//img.atcoder.jp/assets/icon/avatar.png'>"
+        )
+        == "//img.atcoder.jp/assets/icon/avatar.png"
+    )
 
     luogu_payload = {
         "data": {
@@ -307,8 +319,8 @@ def test_profile_and_ranking_html_escape_user_content(tmp_path):
     assert "&lt;demo&gt;" in profile_html
     assert "&lt;用户&gt;" in profile_html
     assert "&lt;demo&gt;" in ranking_html
-    assert "ACM // NEURAL CONTEST NETWORK" in profile_html
-    assert "ACM // NEURAL CONTEST NETWORK" in ranking_html
+    assert "ELYSIAN // PINK PEARL ARCHIVE" in profile_html
+    assert "ELYSIAN // PINK PEARL ARCHIVE" in ranking_html
 
 
 def test_profile_card_height_and_single_layout_are_adaptive(tmp_path):

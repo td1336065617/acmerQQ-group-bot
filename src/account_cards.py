@@ -1,10 +1,12 @@
-"""账号战绩卡与群排行卡：二次元科幻风格 HTML/PNG 渲染。"""
+"""账号战绩卡与群排行卡：樱粉珍珠、冰蓝花瓣主题的 HTML/PNG 渲染。"""
 from __future__ import annotations
 
 import hashlib
 import html
 import io
+import base64
 import json
+import mimetypes
 import os
 import threading
 import urllib.error
@@ -18,7 +20,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 5
+CARD_FORMAT_VERSION = 7
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -47,10 +49,10 @@ OVERVIEW_HEIGHT_SAFETY = 16
 OVERVIEW_MIN_RENDER_HEIGHT = 520
 
 PLATFORM_COLORS = {
-    "codeforces": ("#ff557a", "#ff9a5a"),
-    "nowcoder": ("#43d7ff", "#4f8cff"),
-    "luogu": ("#b276ff", "#ff63c8"),
-    "atcoder": ("#62e58b", "#15b981"),
+    "codeforces": ("#df6c9e", "#f4a7c6"),
+    "nowcoder": ("#63bfd7", "#b4eaf1"),
+    "luogu": ("#c985c7", "#efa8d1"),
+    "atcoder": ("#76c9b6", "#b9eddf"),
 }
 
 
@@ -117,11 +119,23 @@ class AccountCardRenderer:
     ) -> Optional[Path]:
         profile_list = list(profiles)
         rank_data = group_ranks or {}
+        avatar_sources = [
+            self._avatar_html_source(profile)
+            for profile in profile_list
+        ]
         source = {
             "kind": "profile",
             "display_name": display_name,
             "weekly_changes": weekly_changes or {},
             "group_ranks": rank_data,
+            "avatar_sources": [
+                (
+                    hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+                    if value.startswith("data:image/")
+                    else value
+                )
+                for value in avatar_sources
+            ],
             "profiles": [
                 {
                     key: value
@@ -136,6 +150,7 @@ class AccountCardRenderer:
             display_name=display_name,
             weekly_changes=weekly_changes or {},
             group_ranks=rank_data,
+            avatar_sources=avatar_sources,
         )
         fallback = self._pillow_profile
         return self._render(
@@ -148,6 +163,62 @@ class AccountCardRenderer:
             rank_data,
             self.avatar_cache_dir,
         )
+
+    def _avatar_html_source(self, profile: AccountProfile) -> str:
+        """预加载头像并内嵌为 data URL，避免截图早于远程图片加载。"""
+        normalized = self._normalize_avatar_url(
+            profile.avatar_url,
+            profile.platform,
+        )
+        if not normalized:
+            return ""
+        image = self._load_avatar(
+            self.avatar_cache_dir,
+            normalized,
+            256,
+            profile.platform,
+        )
+        if image is None:
+            return self._download_avatar_data_url(normalized)
+        try:
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+            encoded = base64.b64encode(output.getvalue()).decode("ascii")
+            return f"data:image/png;base64,{encoded}"
+        except (OSError, ValueError):
+            return self._download_avatar_data_url(normalized)
+
+    @staticmethod
+    def _download_avatar_data_url(url: str) -> str:
+        """无 Pillow 时也预下载头像，避免浏览器截图抢跑。"""
+        if url.startswith("data:image/"):
+            return url
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 ACM-QQ-Group-Bot "
+                        "avatar-renderer"
+                    )
+                },
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = response.read(5 * 1024 * 1024 + 1)
+                content_type = str(
+                    response.headers.get("Content-Type") or ""
+                ).split(";", 1)[0].strip().lower()
+            if len(payload) > 5 * 1024 * 1024:
+                return ""
+            if not content_type.startswith("image/"):
+                content_type = (
+                    mimetypes.guess_type(urlparse(url).path)[0]
+                    or "image/png"
+                )
+            encoded = base64.b64encode(payload).decode("ascii")
+            return f"data:{content_type};base64,{encoded}"
+        except (OSError, ValueError, urllib.error.URLError):
+            return ""
 
     def render_ranking(
         self,
@@ -623,12 +694,14 @@ class AccountCardRenderer:
         display_name: str,
         weekly_changes: Dict[str, Optional[int]],
         group_ranks: Optional[Dict[str, Dict[str, Any]]] = None,
+        avatar_sources: Optional[List[str]] = None,
     ) -> str:
         rank_data = group_ranks or {}
+        image_sources = avatar_sources or []
         cards = []
-        for profile in profiles:
+        for index, profile in enumerate(profiles):
             start, end = PLATFORM_COLORS.get(
-                profile.platform, ("#55e6ff", "#a855f7")
+                profile.platform, ("#df6c9e", "#f4a7c6")
             )
             delta = (
                 weekly_changes.get(profile.platform)
@@ -691,6 +764,8 @@ class AccountCardRenderer:
                 profile.avatar_url,
                 profile.platform,
             )
+            if index < len(image_sources) and image_sources[index]:
+                avatar_url = image_sources[index]
             avatar_initial = _escape(platform_label(profile.platform)[:1])
             avatar_image = (
                 f'<img src="{_escape(avatar_url)}" alt="" '
@@ -813,7 +888,7 @@ class AccountCardRenderer:
         blocks = []
         for platform, rows in sections.items():
             start, end = PLATFORM_COLORS.get(
-                platform, ("#55e6ff", "#a855f7")
+                platform, ("#df6c9e", "#f4a7c6")
             )
             rendered = []
             for index, row in enumerate(rows[:5], start=1):
@@ -874,87 +949,97 @@ class AccountCardRenderer:
     * {{ box-sizing: border-box; }}
     html, body {{ margin:0; padding:0; min-height:100%; }}
     body {{
-      color:#e7f8ff;
+      color:#4c315b;
       font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;
       background:
-        radial-gradient(circle at 12% 8%, rgba(48,220,255,.22), transparent 29%),
-        radial-gradient(circle at 88% 16%, rgba(212,70,255,.2), transparent 28%),
-        linear-gradient(135deg,#090d24 0%,#11143a 52%,#180d32 100%);
+        radial-gradient(circle at 8% 12%, rgba(255,190,224,.34), transparent 28%),
+        radial-gradient(circle at 92% 18%, rgba(165,225,255,.28), transparent 26%),
+        linear-gradient(135deg,#24142f 0%,#382044 48%,#211837 100%);
     }}
     .page {{ width:{CARD_WIDTH}px; margin:0 auto; padding:58px 70px 62px; position:relative; overflow:hidden; }}
     .page:before {{ content:""; position:absolute; inset:0; opacity:.2; pointer-events:none;
-      background-image:linear-gradient(rgba(101,229,255,.15) 1px,transparent 1px),
-        linear-gradient(90deg,rgba(101,229,255,.15) 1px,transparent 1px);
-      background-size:42px 42px; mask-image:linear-gradient(to bottom,black,transparent 86%); }}
-    .orb {{ position:absolute; border-radius:50%; filter:blur(3px); opacity:.55; }}
-    .orb.one {{ width:210px; height:210px; right:-80px; top:160px; background:#b33cff; box-shadow:0 0 80px #a42cff; }}
-    .orb.two {{ width:150px; height:150px; left:-60px; bottom:120px; background:#18d8ff; box-shadow:0 0 70px #18d8ff; }}
-    .header {{ position:relative; margin-bottom:30px; }}
-    .eyebrow {{ color:#63eaff; letter-spacing:4px; font-size:15px; font-weight:700; }}
-    h1 {{ margin:8px 0 5px; font-size:44px; letter-spacing:2px; color:#fff; text-shadow:0 0 20px rgba(86,231,255,.55); }}
-    .subtitle {{ color:#a8c8e5; font-size:20px; }}
+      background-image:linear-gradient(120deg,transparent 0 46%,rgba(255,255,255,.18) 47%,transparent 48%),
+        linear-gradient(60deg,transparent 0 72%,rgba(255,192,226,.12) 73%,transparent 74%);
+      background-size:180px 180px,220px 220px; mask-image:linear-gradient(to bottom,black,transparent 90%); }}
+    .page:after {{ content:""; position:absolute; width:360px; height:360px; right:-170px; top:76px;
+      border:1px solid rgba(255,214,239,.3); border-radius:50%; box-shadow:0 0 0 18px rgba(255,214,239,.06),
+      0 0 0 42px rgba(164,221,255,.05); transform:rotate(28deg); pointer-events:none; }}
+    .orb {{ position:absolute; border-radius:50%; filter:blur(4px); opacity:.48; }}
+    .orb.one {{ width:220px; height:220px; right:-88px; top:130px; background:#f58cba; box-shadow:0 0 90px #ed78b1; }}
+    .orb.two {{ width:170px; height:170px; left:-70px; bottom:100px; background:#8edff4; box-shadow:0 0 80px #71d7ef; }}
+    .petal {{ position:absolute; width:34px; height:78px; border-radius:70% 30% 70% 30%; background:linear-gradient(145deg,rgba(255,240,249,.82),rgba(244,128,188,.28)); border:1px solid rgba(255,233,246,.5); transform:rotate(28deg); opacity:.48; pointer-events:none; }}
+    .petal.a {{ right:160px; top:92px; }}
+    .petal.b {{ right:108px; top:180px; transform:rotate(112deg) scale(.78); }}
+    .petal.c {{ left:120px; bottom:140px; transform:rotate(-34deg) scale(.7); }}
+    .crystal {{ position:absolute; width:18px; height:18px; border:1px solid rgba(193,237,255,.72); background:rgba(160,227,248,.2); transform:rotate(45deg); box-shadow:0 0 18px rgba(155,225,255,.65); pointer-events:none; }}
+    .crystal.a {{ right:250px; top:218px; }}
+    .crystal.b {{ left:210px; bottom:92px; transform:rotate(45deg) scale(.65); }}
+    .header {{ position:relative; margin-bottom:30px; z-index:1; }}
+    .eyebrow {{ color:#ffd2e9; letter-spacing:4px; font-size:15px; font-weight:800; text-shadow:0 0 16px rgba(255,170,216,.45); }}
+    h1 {{ margin:8px 0 5px; font-size:44px; letter-spacing:2px; color:#fff8fc; text-shadow:0 3px 20px rgba(255,137,195,.45); }}
+    .subtitle {{ color:#f2d8e8; font-size:20px; }}
     .profile-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; }}
-    .platform-card, .ranking-list, .empty-card {{ position:relative; background:rgba(10,17,45,.82); border:1px solid rgba(121,226,255,.3);
-      border-radius:22px; box-shadow:0 18px 42px rgba(0,0,0,.28), inset 0 0 28px rgba(74,157,255,.06); }}
+    .platform-card, .ranking-list, .empty-card {{ position:relative; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92));
+      border:1px solid rgba(255,211,235,.9); border-radius:22px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .platform-card {{ padding:26px 30px 24px; overflow:hidden; }}
     .platform-card:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:6px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 20px var(--accent); }}
     .platform-head {{ display:flex; justify-content:space-between; align-items:center; }}
-    .platform-tag {{ color:var(--accent); font-size:20px; font-weight:800; letter-spacing:1px; }}
-    .verified {{ color:#7f9bb7; font-size:12px; letter-spacing:1px; }}
-    .handle {{ margin-top:13px; font-size:28px; font-weight:800; color:#fff; overflow-wrap:anywhere; }}
+    .platform-tag {{ color:var(--accent); font-size:20px; font-weight:900; letter-spacing:1px; }}
+    .verified {{ color:#ae7d9c; font-size:12px; letter-spacing:1px; }}
+    .handle {{ margin-top:13px; font-size:28px; font-weight:900; color:#4b2b5c; overflow-wrap:anywhere; }}
     .rating-row {{ display:flex; align-items:baseline; gap:16px; margin:13px 0 19px; }}
     .rating {{ font-size:48px; line-height:1; font-weight:900; color:var(--accent); text-shadow:0 0 18px color-mix(in srgb,var(--accent),transparent 45%); }}
-    .rating-label {{ color:#8faac3; font-size:14px; letter-spacing:1px; }}
-    .rank {{ color:#c8d8e9; font-size:18px; }}
+    .rating-label {{ color:#9d718d; font-size:14px; letter-spacing:1px; }}
+    .rank {{ color:#6f4b71; font-size:18px; }}
     .stats {{ display:grid; grid-template-columns:1fr 1fr; gap:10px 18px; }}
-    .stat {{ display:flex; justify-content:space-between; gap:10px; color:#7895b2; font-size:15px; border-bottom:1px dashed rgba(142,203,231,.18); padding-bottom:7px; }}
-    .stat b {{ color:#e8f8ff; font-size:17px; text-align:right; }}
-    .trend {{ margin-top:16px; color:#a8c8e5; font-size:17px; }}
+    .stat {{ display:flex; justify-content:space-between; gap:10px; color:#a27692; font-size:15px; border-bottom:1px dashed rgba(180,113,157,.26); padding-bottom:7px; }}
+    .stat b {{ color:#4f315e; font-size:17px; text-align:right; }}
+    .trend {{ margin-top:16px; color:#8d6382; font-size:17px; }}
     .trend.positive, .rank-delta.positive {{ color:#61f0ad; }}
     .trend.negative, .rank-delta.negative {{ color:#ff7899; }}
-    .extra {{ margin-top:13px; color:#8faac3; font-size:15px; overflow-wrap:anywhere; }}
-    .recent {{ margin-top:13px; color:#b7d5eb; font-size:15px; overflow-wrap:anywhere; }}
+    .extra {{ margin-top:13px; color:#9a718c; font-size:15px; overflow-wrap:anywhere; }}
+    .recent {{ margin-top:13px; color:#80617d; font-size:15px; overflow-wrap:anywhere; }}
     .profile-main {{ position:relative; }}
     .identity-line {{ display:flex; align-items:center; gap:14px; min-width:0; }}
     .identity-copy {{ min-width:0; flex:1; }}
-    .avatar-wrap {{ position:relative; flex:0 0 76px; width:76px; height:76px; aspect-ratio:1 / 1; overflow:hidden; border-radius:18px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 0 24px color-mix(in srgb,var(--accent),transparent 58%); }}
-    .avatar-wrap:after {{ content:""; position:absolute; inset:0; border:1px solid rgba(255,255,255,.35); border-radius:inherit; pointer-events:none; }}
+    .avatar-wrap {{ position:relative; flex:0 0 76px; width:76px; height:76px; aspect-ratio:1 / 1; overflow:hidden; border-radius:18px; background:linear-gradient(135deg,var(--accent),#fff1fa 72%); box-shadow:0 0 24px color-mix(in srgb,var(--accent),transparent 58%); }}
+    .avatar-wrap:after {{ content:""; position:absolute; inset:0; border:2px solid rgba(255,255,255,.72); border-radius:inherit; pointer-events:none; }}
     .avatar-wrap img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; display:block; transform:scale(1.02); }}
-    .avatar-fallback {{ position:absolute; inset:0; display:grid; place-items:center; color:#fff; font-size:32px; font-weight:900; text-shadow:0 2px 8px rgba(0,0,0,.35); }}
-    .group-rank {{ flex:1 1 210px; min-width:0; color:#63eaff; font-size:14px; overflow-wrap:anywhere; }}
-    .group-rank b {{ color:#fff; font-size:17px; }}
-    .group-rank.muted {{ color:#8faac3; }}
+    .avatar-fallback {{ position:absolute; inset:0; display:grid; place-items:center; color:#fff; font-size:32px; font-weight:900; text-shadow:0 2px 8px rgba(91,35,89,.35); }}
+    .group-rank {{ flex:1 1 210px; min-width:0; color:#d34f93; font-size:14px; overflow-wrap:anywhere; }}
+    .group-rank b {{ color:#6b315f; font-size:17px; }}
+    .group-rank.muted {{ color:#a17a95; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
     .profile-meta > .trend,
     .profile-meta > .recent,
     .profile-meta > .extra {{ flex:1 1 210px; min-width:0; margin-top:0; }}
     .ranking-list {{ position:relative; overflow:hidden; padding:10px 24px; }}
-    .rank-row {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:20px 8px; border-bottom:1px solid rgba(142,203,231,.15); }}
+    .rank-row {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:20px 8px; border-bottom:1px solid rgba(184,113,157,.2); }}
     .rank-row:last-child {{ border-bottom:0; }}
-    .rank-no {{ color:#62eaff; font-size:28px; font-weight:900; }}
-    .rank-user b {{ display:block; color:#fff; font-size:21px; }}
-    .rank-user span {{ display:block; color:#8ea9c2; margin-top:5px; font-size:15px; overflow-wrap:anywhere; }}
+    .rank-no {{ color:#d34f93; font-size:28px; font-weight:900; }}
+    .rank-user b {{ display:block; color:#4b2b5c; font-size:21px; }}
+    .rank-user span {{ display:block; color:#9a718c; margin-top:5px; font-size:15px; overflow-wrap:anywhere; }}
     .rank-value {{ text-align:right; }}
-    .rank-value strong {{ display:block; color:#fff; font-size:27px; }}
-    .rank-value small {{ color:#7e9bb7; font-size:13px; }}
+    .rank-value strong {{ display:block; color:#4b2b5c; font-size:27px; }}
+    .rank-value small {{ color:#a17a95; font-size:13px; }}
     .rank-delta {{ text-align:right; font-size:19px; font-weight:800; }}
     .overview-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start; }}
-    .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:rgba(10,17,45,.82); border:1px solid rgba(121,226,255,.3); border-radius:20px; box-shadow:0 18px 42px rgba(0,0,0,.28), inset 0 0 28px rgba(74,157,255,.06); }}
+    .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92)); border:1px solid rgba(255,211,235,.9); border-radius:20px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .mini-section:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 18px var(--accent); }}
     .mini-section h2 {{ margin:0 0 8px; color:var(--accent); font-size:22px; }}
-    .mini-row {{ display:grid; grid-template-columns:48px 1fr 90px 72px; align-items:center; gap:8px; min-height:65px; border-bottom:1px solid rgba(142,203,231,.13); }}
+    .mini-row {{ display:grid; grid-template-columns:48px 1fr 90px 72px; align-items:center; gap:8px; min-height:65px; border-bottom:1px solid rgba(184,113,157,.18); }}
     .mini-row:last-child {{ border-bottom:0; }}
-    .mini-no {{ color:#63eaff; font-size:18px; font-weight:800; }}
-    .mini-user b {{ display:block; color:#fff; font-size:16px; overflow-wrap:anywhere; }}
-    .mini-user small {{ display:block; color:#8ea9c2; margin-top:3px; font-size:12px; overflow-wrap:anywhere; }}
-    .mini-value {{ color:#fff; font-size:20px; text-align:right; }}
-    .mini-delta {{ color:#a8c8e5; font-size:14px; text-align:right; }}
+    .mini-no {{ color:#d34f93; font-size:18px; font-weight:800; }}
+    .mini-user b {{ display:block; color:#4b2b5c; font-size:16px; overflow-wrap:anywhere; }}
+    .mini-user small {{ display:block; color:#9a718c; margin-top:3px; font-size:12px; overflow-wrap:anywhere; }}
+    .mini-value {{ color:#4b2b5c; font-size:20px; text-align:right; }}
+    .mini-delta {{ color:#9a718c; font-size:14px; text-align:right; }}
     .mini-delta.positive {{ color:#61f0ad; }}
     .mini-delta.negative {{ color:#ff7899; }}
-    .mini-empty {{ color:#9ab4ce; padding:20px 0; }}
-    .rank-note {{ position:relative; margin-top:18px; padding:14px 18px; color:#b1cae2; background:rgba(35,56,105,.38); border-radius:12px; font-size:16px; }}
-    .empty-card {{ padding:48px; color:#9ab4ce; font-size:20px; text-align:center; }}
-    .card-footer {{ position:relative; margin-top:24px; color:#718ba8; font-size:14px; letter-spacing:.4px; }}
+    .mini-empty {{ color:#a17a95; padding:20px 0; }}
+    .rank-note {{ position:relative; margin-top:18px; padding:14px 18px; color:#7b5b78; background:linear-gradient(110deg,rgba(255,220,239,.78),rgba(207,239,255,.58)); border:1px solid rgba(255,213,235,.7); border-radius:12px; font-size:16px; }}
+    .empty-card {{ padding:48px; color:#a17a95; font-size:20px; text-align:center; }}
+    .card-footer {{ position:relative; margin-top:24px; color:#e6bfd7; font-size:14px; letter-spacing:.4px; }}
     .profile-document.page {{ padding:40px 70px 36px; }}
     .profile-document .header {{ margin-bottom:20px; }}
     .profile-document h1 {{ margin:6px 0 4px; font-size:38px; }}
@@ -1007,8 +1092,10 @@ class AccountCardRenderer:
 <body>
   <main class="page {_escape(page_class)}">
     <span class="orb one"></span><span class="orb two"></span>
+    <span class="petal a"></span><span class="petal b"></span><span class="petal c"></span>
+    <span class="crystal a"></span><span class="crystal b"></span>
     <header class="header">
-      <div class="eyebrow">ACM // NEURAL CONTEST NETWORK</div>
+      <div class="eyebrow">ELYSIAN // PINK PEARL ARCHIVE</div>
       <h1>{_escape(title)}</h1>
       <div class="subtitle">{_escape(subtitle)}</div>
     </header>
@@ -1125,12 +1212,37 @@ class AccountCardRenderer:
         image = PILImage.new(
             "RGB",
             (CARD_WIDTH, min(MAX_CARD_HEIGHT, height)),
-            "#0d1230",
+            "#2a193b",
         )
         draw = ImageDraw.Draw(image)
-        draw.text((70, 54), "ACM // NEURAL CONTEST NETWORK", font=body_font, fill="#63eaff")
-        draw.text((70, 86), "ACM 竞赛战绩卡", font=title_font, fill="#ffffff")
-        draw.text((70, 140), f"{display_name} · 账号同步完成", font=subtitle_font, fill="#a8c8e5")
+        draw.ellipse(
+            (CARD_WIDTH - 260, -90, CARD_WIDTH + 20, 190),
+            outline="#f3a9cb",
+            width=2,
+        )
+        draw.ellipse(
+            (CARD_WIDTH - 232, -62, CARD_WIDTH - 8, 162),
+            outline="#b6e7f0",
+            width=2,
+        )
+        draw.text(
+            (70, 54),
+            "ELYSIAN // PINK PEARL ARCHIVE",
+            font=body_font,
+            fill="#ffd5e8",
+        )
+        draw.text(
+            (70, 86),
+            "ACM 竞赛战绩卡",
+            font=title_font,
+            fill="#fff7fb",
+        )
+        draw.text(
+            (70, 140),
+            f"{display_name} · 账号同步完成",
+            font=subtitle_font,
+            fill="#f1d7e7",
+        )
         start_y = 205
         card_w = card_width
         row_y = start_y
@@ -1142,11 +1254,14 @@ class AccountCardRenderer:
             x = 70 + col * (card_w + card_gap)
             y = row_y
             card_h = card_rows[row]
-            accent = PLATFORM_COLORS.get(profile.platform, ("#55e6ff", "#a855f7"))[0]
+            accent = PLATFORM_COLORS.get(
+                profile.platform,
+                ("#df6c9e", "#f4a7c6"),
+            )[0]
             draw.rounded_rectangle(
                 (x, y, x + card_w, y + card_h),
                 radius=18,
-                fill="#111b42",
+                fill="#fff5fb",
                 outline=accent,
                 width=2,
             )
@@ -1210,7 +1325,7 @@ class AccountCardRenderer:
                 ),
                 profile.handle,
                 font=handle_font,
-                fill="#ffffff",
+                fill="#51315d",
             )
             primary_label, primary_value = _primary_metric(profile)
             draw.text(
@@ -1223,13 +1338,13 @@ class AccountCardRenderer:
                 (x + (310 if single else 270), y + (180 if single else 120)),
                 primary_label,
                 font=body_font,
-                fill="#8faac3",
+                fill="#a27692",
             )
             draw.text(
                 (x + (420 if single else 370), y + (180 if single else 120)),
                 profile.rank_text or profile.color or "未评级",
                 font=body_font,
-                fill="#c8d8e9",
+                fill="#765477",
             )
             details = [
                 f"最高 Rating：{_format_number(profile.max_rating)}",
@@ -1252,7 +1367,7 @@ class AccountCardRenderer:
                     ),
                     value,
                     font=body_font,
-                    fill="#a8d8e5",
+                    fill="#8d6683",
                 )
             detail_rows = (len(details) + columns - 1) // columns
             meta_y = int(detail_top + detail_rows * 27 + 7)
@@ -1262,7 +1377,7 @@ class AccountCardRenderer:
                     (x + 25, meta_y),
                     f"最近：{recent.get('name')} {_format_delta(recent.get('delta'))}",
                     font=body_font,
-                    fill="#b7d5eb",
+                    fill="#80617d",
                 )
                 meta_y += 23
             extra_values = [
@@ -1283,7 +1398,7 @@ class AccountCardRenderer:
                     (x + 25, meta_y),
                     extras,
                     font=body_font,
-                    fill="#8faac3",
+                    fill="#9a718c",
                 )
                 meta_y += 23
             rank_info = group_ranks.get(profile.platform)
@@ -1300,13 +1415,13 @@ class AccountCardRenderer:
                     (x + 25, meta_y),
                     rank_text,
                     font=body_font,
-                    fill="#63eaff" if rank is not None else "#8faac3",
+                    fill="#d34f93" if rank is not None else "#9a718c",
                 )
         draw.text(
             (70, image.height - 42),
             f"生成时间：{_updated_text()} · 仅展示平台公开资料",
             font=body_font,
-            fill="#718ba8",
+            fill="#e3b9d2",
         )
         try:
             image.save(image_path, format="PNG")
@@ -1336,23 +1451,69 @@ class AccountCardRenderer:
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
         height = max(MIN_CARD_HEIGHT, min(MAX_CARD_HEIGHT, 450 + len(rows) * 82))
-        image = PILImage.new("RGB", (CARD_WIDTH, height), "#0d1230")
+        image = PILImage.new("RGB", (CARD_WIDTH, height), "#2a193b")
         draw = ImageDraw.Draw(image)
-        draw.text((70, 54), "ACM // GROUP RANKING MATRIX", font=body_font, fill="#63eaff")
-        draw.text((70, 88), title, font=title_font, fill="#ffffff")
-        draw.text((70, 140), subtitle, font=subtitle_font, fill="#a8c8e5")
+        draw.ellipse(
+            (CARD_WIDTH - 260, -90, CARD_WIDTH + 20, 190),
+            outline="#f3a9cb",
+            width=2,
+        )
+        draw.ellipse(
+            (CARD_WIDTH - 232, -62, CARD_WIDTH - 8, 162),
+            outline="#b6e7f0",
+            width=2,
+        )
+        draw.text(
+            (70, 54),
+            "ELYSIAN // PINK PEARL ARCHIVE",
+            font=body_font,
+            fill="#ffd5e8",
+        )
+        draw.text((70, 88), title, font=title_font, fill="#fff7fb")
+        draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
         y = 205
         for index, row in enumerate(rows, start=1):
-            draw.rounded_rectangle((70, y, CARD_WIDTH - 70, y + 64), radius=12, fill="#111b42", outline="#294a75", width=1)
-            draw.text((95, y + 16), f"{index:02d}", font=value_font, fill="#63eaff")
-            draw.text((185, y + 11), str(row.get("display_name") or row.get("qq_name") or "未知用户"), font=body_font, fill="#ffffff")
-            draw.text((185, y + 38), str(row.get("handle") or "未绑定"), font=subtitle_font, fill="#8faac3")
-            draw.text((850, y + 14), _format_number(row.get("display_value", row.get("value"))), font=value_font, fill="#ffffff")
+            draw.rounded_rectangle(
+                (70, y, CARD_WIDTH - 70, y + 64),
+                radius=12,
+                fill="#fff5fb",
+                outline="#efc5dc",
+                width=1,
+            )
+            draw.text((95, y + 16), f"{index:02d}", font=value_font, fill="#d34f93")
+            draw.text(
+                (185, y + 11),
+                str(row.get("display_name") or row.get("qq_name") or "未知用户"),
+                font=body_font,
+                fill="#51315d",
+            )
+            draw.text(
+                (185, y + 38),
+                str(row.get("handle") or "未绑定"),
+                font=subtitle_font,
+                fill="#9a718c",
+            )
+            draw.text(
+                (850, y + 14),
+                _format_number(row.get("display_value", row.get("value"))),
+                font=value_font,
+                fill="#51315d",
+            )
             draw.text((1040, y + 21), _format_delta(row.get("delta")), font=body_font, fill="#61f0ad" if (row.get("delta") or 0) >= 0 else "#ff7899")
             y += 82
         if note:
-            draw.text((70, min(y, image.height - 100)), note, font=subtitle_font, fill="#b1cae2")
-        draw.text((70, image.height - 42), f"生成时间：{_updated_text()} · 只展示已加入群排行成员", font=subtitle_font, fill="#718ba8")
+            draw.text(
+                (70, min(y, image.height - 100)),
+                note,
+                font=subtitle_font,
+                fill="#80617d",
+            )
+        draw.text(
+            (70, image.height - 42),
+            f"生成时间：{_updated_text()} · 只展示已加入群排行成员",
+            font=subtitle_font,
+            fill="#e3b9d2",
+        )
         try:
             image.save(image_path, format="PNG")
         except OSError:
@@ -1387,12 +1548,27 @@ class AccountCardRenderer:
         image = PILImage.new(
             "RGB",
             (CARD_WIDTH, min(MAX_CARD_HEIGHT, height)),
-            "#0d1230",
+            "#2a193b",
         )
         draw = ImageDraw.Draw(image)
-        draw.text((70, 54), "ACM // GROUP RANKING MATRIX", font=body_font, fill="#63eaff")
-        draw.text((70, 88), title, font=title_font, fill="#ffffff")
-        draw.text((70, 140), subtitle, font=subtitle_font, fill="#a8c8e5")
+        draw.ellipse(
+            (CARD_WIDTH - 260, -90, CARD_WIDTH + 20, 190),
+            outline="#f3a9cb",
+            width=2,
+        )
+        draw.ellipse(
+            (CARD_WIDTH - 232, -62, CARD_WIDTH - 8, 162),
+            outline="#b6e7f0",
+            width=2,
+        )
+        draw.text(
+            (70, 54),
+            "ELYSIAN // PINK PEARL ARCHIVE",
+            font=body_font,
+            fill="#ffd5e8",
+        )
+        draw.text((70, 88), title, font=title_font, fill="#fff7fb")
+        draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
         columns = 2
         section_w = (CARD_WIDTH - 140 - 24) // columns
         for index, (platform, rows_data) in enumerate(items):
@@ -1400,30 +1576,48 @@ class AccountCardRenderer:
             row_index = index // columns
             x = 70 + col * (section_w + 24)
             y = row_tops[row_index]
-            accent = PLATFORM_COLORS.get(platform, ("#55e6ff", "#a855f7"))[0]
+            accent = PLATFORM_COLORS.get(
+                platform,
+                ("#df6c9e", "#f4a7c6"),
+            )[0]
             section_h = section_heights[index]
             draw.rounded_rectangle(
                 (x, y, x + section_w, y + section_h),
                 radius=16,
-                fill="#111b42",
+                fill="#fff5fb",
                 outline=accent,
                 width=2,
             )
             draw.text((x + 20, y + 14), platform_label(platform), font=value_font, fill=accent)
             row_y = y + 55
             for rank, item in enumerate(rows_data[:5], start=1):
-                draw.text((x + 20, row_y), f"{rank:02d}", font=body_font, fill="#63eaff")
-                draw.text((x + 75, row_y), str(item.get("display_name") or item.get("qq_name") or "未知用户"), font=body_font, fill="#ffffff")
-                draw.text((x + section_w - 145, row_y), _format_number(item.get("display_value", item.get("value"))), font=value_font, fill="#ffffff")
+                draw.text((x + 20, row_y), f"{rank:02d}", font=body_font, fill="#d34f93")
+                draw.text(
+                    (x + 75, row_y),
+                    str(item.get("display_name") or item.get("qq_name") or "未知用户"),
+                    font=body_font,
+                    fill="#51315d",
+                )
+                draw.text(
+                    (x + section_w - 145, row_y),
+                    _format_number(item.get("display_value", item.get("value"))),
+                    font=value_font,
+                    fill="#51315d",
+                )
                 row_y += 70
         if note:
             draw.text(
                 (70, max(205, image.height - 112)),
                 note,
                 font=subtitle_font,
-                fill="#b1cae2",
+                fill="#80617d",
             )
-        draw.text((70, image.height - 42), f"生成时间：{_updated_text()} · {metric_label}", font=subtitle_font, fill="#718ba8")
+        draw.text(
+            (70, image.height - 42),
+            f"生成时间：{_updated_text()} · {metric_label}",
+            font=subtitle_font,
+            fill="#e3b9d2",
+        )
         try:
             image.save(image_path, format="PNG")
         except OSError:

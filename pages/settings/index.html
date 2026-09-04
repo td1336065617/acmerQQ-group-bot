@@ -6,26 +6,93 @@
 <title>acmerQQ群机器人</title>
 <script src="/api/plugin/page/bridge-sdk.js"></script>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; padding: 24px; }
-  h1 { font-size: 20px; margin: 0 0 16px; }
-  h2 { font-size: 16px; margin: 0 0 10px; }
-  .card { border: 1px solid rgba(128,128,128,.25); border-radius: 10px; padding: 16px 20px; margin-bottom: 18px; background: rgba(128,128,128,.06); }
+  :root {
+    color-scheme: light;
+    --ely-deep: #2a193b;
+    --ely-plum: #51315d;
+    --ely-pink: #d34f93;
+    --ely-pink-soft: #f5c5dd;
+    --ely-ice: #8edff4;
+    --ely-pearl: rgba(255, 252, 255, .94);
+    --ely-line: rgba(211, 128, 174, .32);
+  }
+  * { box-sizing: border-box; }
+  body {
+    position: relative;
+    max-width: 1180px;
+    min-height: 100vh;
+    font-family: "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
+    margin: 0 auto;
+    padding: 34px 28px 48px;
+    color: var(--ely-plum);
+    background:
+      radial-gradient(circle at 8% 8%, rgba(255, 183, 220, .28), transparent 25%),
+      radial-gradient(circle at 94% 16%, rgba(151, 226, 247, .24), transparent 24%),
+      linear-gradient(135deg, #29193a 0%, #4b274f 54%, #203b4a 100%);
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    width: 360px;
+    height: 360px;
+    right: -180px;
+    top: 90px;
+    border: 1px solid rgba(255, 218, 239, .34);
+    border-radius: 50%;
+    box-shadow: 0 0 0 18px rgba(255, 218, 239, .07),
+                0 0 0 42px rgba(164, 228, 248, .05);
+    pointer-events: none;
+  }
+  body::after {
+    content: "✿";
+    position: fixed;
+    right: 62px;
+    top: 108px;
+    color: rgba(255, 229, 243, .65);
+    font-size: 54px;
+    transform: rotate(16deg);
+    pointer-events: none;
+  }
+  h1 { position: relative; z-index: 1; font-size: 27px; letter-spacing: 1px; color: #fff8fc; margin: 0 0 20px; text-shadow: 0 3px 18px rgba(243, 132, 190, .42); }
+  h2 { font-size: 18px; letter-spacing: .4px; color: var(--ely-plum); margin: 0 0 12px; }
+  .card {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(255, 213, 235, .9);
+    border-radius: 18px;
+    padding: 20px 22px;
+    margin-bottom: 18px;
+    background: linear-gradient(145deg, var(--ely-pearl), rgba(255, 231, 245, .91));
+    box-shadow: 0 16px 34px rgba(22, 8, 36, .24), inset 0 0 24px rgba(255, 255, 255, .65);
+  }
+  .card::before {
+    content: "";
+    position: absolute;
+    left: 22px;
+    right: 22px;
+    top: 0;
+    height: 3px;
+    border-radius: 99px;
+    background: linear-gradient(90deg, var(--ely-pink), var(--ely-ice), var(--ely-pink));
+    opacity: .75;
+  }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  button { padding: 8px 18px; border: 0; border-radius: 8px; background: #3b82f6; color: #fff; cursor: pointer; font-size: 14px; }
+  button { padding: 8px 18px; border: 1px solid rgba(255,255,255,.42); border-radius: 999px; background: linear-gradient(135deg, #d34f93, #e98ab8); color: #fff; cursor: pointer; font-size: 14px; box-shadow: 0 6px 14px rgba(184, 66, 126, .2); }
   button:hover { opacity: .9; }
-  button.secondary { background: #6b7280; }
-  button.danger { background: #dc2626; }
-  input[type=text], input[type=time], input[type=number] { font-size: 14px; padding: 7px 10px; border: 1px solid rgba(128,128,128,.35); border-radius: 8px; background: transparent; color: inherit; }
+  button.secondary { background: linear-gradient(135deg, #70bfd4, #a5e5ef); color: #2f5260; }
+  button.danger { background: linear-gradient(135deg, #b84477, #dc6b9d); }
+  input[type=text], input[type=time], input[type=number] { font-size: 14px; padding: 8px 11px; border: 1px solid var(--ely-line); border-radius: 10px; background: rgba(255,255,255,.76); color: var(--ely-plum); outline: none; }
+  input[type=text]:focus, input[type=time]:focus, input[type=number]:focus { border-color: var(--ely-pink); box-shadow: 0 0 0 3px rgba(211,79,147,.12); }
   input[type=time] { width: 130px; }
   input[type=number] { width: 130px; }
-  #result { display: none; margin-bottom: 18px; padding: 10px 12px; border-radius: 8px; background: rgba(34,197,94,.12); color: #16a34a; white-space: pre-wrap; font-size: 14px; }
-  #result.error { background: rgba(239,68,68,.12); color: #dc2626; }
+  #result { display: none; margin-bottom: 18px; padding: 12px 15px; border: 1px solid rgba(127, 212, 181, .46); border-radius: 12px; background: rgba(227, 255, 245, .92); color: #25755a; white-space: pre-wrap; font-size: 14px; }
+  #result.error { border-color: rgba(211, 79, 147, .42); background: rgba(255, 231, 243, .94); color: #a43c70; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.2); }
-  th { font-weight: 600; }
-  .muted { color: #888; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid rgba(180, 113, 157, .2); }
+  th { font-weight: 800; color: #8b527b; }
+  .muted { color: #9a718c; font-size: 13px; }
   label.check { display: inline-flex; gap: 5px; align-items: center; margin-right: 12px; }
+  input[type=checkbox] { accent-color: var(--ely-pink); }
 </style>
 </head>
 <body>

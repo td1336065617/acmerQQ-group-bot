@@ -486,7 +486,8 @@ class AccountFetcher:
             city=str(user.get("city") or ""),
             color=cls._codeforces_color(str(user.get("rank") or "")),
             contribution=_parse_int(user.get("contribution")),
-            avatar_url=str(user.get("titlePhoto") or user.get("avatar") or ""),
+            # titlePhoto 是横向头图，头像卡片应优先使用 avatar。
+            avatar_url=str(user.get("avatar") or user.get("titlePhoto") or ""),
             source_url="https://codeforces.com/api/user.info",
         )
 
@@ -767,6 +768,11 @@ class AccountFetcher:
             or user.get("description")
             or ""
         )
+        avatar_value = (
+            user.get("avatar")
+            or user.get("avatarUrl")
+            or f"https://cdn.luogu.com.cn/upload/usericon/{uid}.png"
+        )
         profile = AccountProfile(
             platform="luogu",
             handle=handle,
@@ -790,7 +796,7 @@ class AccountFetcher:
             ),
             school=str(user.get("school") or ""),
             color=str(user.get("color") or ""),
-            avatar_url=str(user.get("avatar") or user.get("avatarUrl") or ""),
+            avatar_url=str(avatar_value),
             source_url=source_url,
             extra={
                 "ccf_level": str(user.get("ccfLevel") or ""),
@@ -845,6 +851,7 @@ class AccountFetcher:
         rank_cell = self._atcoder_table_value(text, "Rank")
         rated_cell = self._atcoder_table_value(text, "Rated Matches")
         affiliation = self._atcoder_table_value(text, "Affiliation")
+        avatar = self._extract_atcoder_avatar(text)
         rating_text = _clean_text(rating_cell)
         highest_text = _clean_text(highest_cell)
         rating = _parse_int(rating_text)
@@ -885,10 +892,21 @@ class AccountFetcher:
                 if history and isinstance(history[0].get("delta"), int)
                 else None
             ),
+            avatar_url=avatar,
             source_url=profile_url,
         )
         return profile
 
+    @staticmethod
+    def _extract_atcoder_avatar(text: str) -> str:
+        """读取 AtCoder 用户页中 class=avatar 的公开头像。"""
+        match = re.search(
+            r"<img\b(?=[^>]*\bclass\s*=\s*['\"][^'\"]*\bavatar\b[^'\"]*['\"])"
+            r"[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]",
+            text,
+            re.I | re.S,
+        )
+        return _clean_text(match.group(1)) if match else ""
     @staticmethod
     def _atcoder_table_value(text: str, label: str) -> str:
         for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", text, re.I | re.S):

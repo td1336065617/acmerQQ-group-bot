@@ -21,7 +21,7 @@ MAX_TEXT_CHUNK = 1500
 RENDER_WIDTH = 1200
 MIN_RENDER_HEIGHT = 420
 MAX_RENDER_HEIGHT = 16000
-RENDER_FORMAT_VERSION = 1
+RENDER_FORMAT_VERSION = 2
 
 _ITEM_RE = re.compile(r"^\s*\d+[.、]\s*")
 
@@ -70,7 +70,8 @@ class AdaptiveOutputRenderer:
         html_path = self.cache_dir / f"response-{digest}.html"
         image_path = self.cache_dir / f"response-{digest}.png"
         html_tmp = self.cache_dir / f".response-{digest}.html.tmp"
-        image_tmp = self.cache_dir / f".response-{digest}.png.tmp"
+        # Chromium 根据后缀判断截图格式，临时文件也保留 .png 后缀。
+        image_tmp = self.cache_dir / f".response-{digest}.tmp.png"
 
         # 同一进程内可能同时有多个群触发长列表，避免两个线程同时覆盖
         # 同一份临时文件，也避免重复启动浏览器。
@@ -151,19 +152,30 @@ class AdaptiveOutputRenderer:
   <title>ACM 比赛信息</title>
   <style>
     * {{ box-sizing: border-box; }}
-    html, body {{ margin: 0; padding: 0; background: #edf2f7; }}
-    body {{ color: #1f2937; font-family: "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }}
-    .page {{ width: {RENDER_WIDTH}px; margin: 0 auto; padding: 42px 56px 52px; }}
-    .title {{ color: #0f766e; font-size: 36px; font-weight: 800; line-height: 1.35; margin-bottom: 24px; }}
-    .panel {{ padding: 25px 30px 28px; background: #fff; border: 1px solid #dbe4ee; border-radius: 18px; box-shadow: 0 7px 20px rgba(15, 23, 42, .06); }}
+    html, body {{ margin: 0; padding: 0; background: #21162d; }}
+    body {{ color: #563b65; font-family: "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }}
+    .page {{ width: {RENDER_WIDTH}px; margin: 0 auto; padding: 42px 56px 52px; position:relative; overflow:hidden;
+      background:
+        radial-gradient(circle at 92% 8%, rgba(255,177,218,.26), transparent 24%),
+        radial-gradient(circle at 6% 90%, rgba(145,223,247,.2), transparent 25%),
+        linear-gradient(135deg,#281936 0%,#49264d 55%,#203a4a 100%); }}
+    .page:before {{ content:""; position:absolute; width:240px; height:240px; right:-120px; top:38px; border:1px solid rgba(255,215,237,.42); border-radius:50%;
+      box-shadow:0 0 0 18px rgba(255,215,237,.07),0 0 0 42px rgba(162,225,248,.05); pointer-events:none; }}
+    .page:after {{ content:"✿"; position:absolute; right:82px; top:78px; color:rgba(255,225,241,.62); font-size:52px; transform:rotate(14deg); pointer-events:none; }}
+    .title {{ color: #fff7fb; font-size: 36px; font-weight: 900; line-height: 1.35; margin-bottom: 24px; letter-spacing:1px;
+      text-shadow:0 3px 18px rgba(243,132,190,.42); }}
+    .title:before {{ content:"✦ PINK PEARL CONTEST GARDEN ✦"; display:block; margin-bottom:6px; color:#ffd5e8; font-size:14px; line-height:1.4; letter-spacing:3px; }}
+    .panel {{ position:relative; padding: 25px 30px 28px; background:linear-gradient(145deg,rgba(255,252,255,.98),rgba(255,231,245,.94)); border: 1px solid rgba(255,211,235,.95); border-radius: 18px;
+      box-shadow: 0 14px 28px rgba(28,10,44,.24), inset 0 0 24px rgba(255,255,255,.7); }}
+    .panel:before {{ content:""; position:absolute; left:24px; right:24px; top:0; height:3px; border-radius:99px; background:linear-gradient(90deg,#e467a5,#b9eaf8,#e467a5); opacity:.78; }}
     .line {{ white-space: pre-wrap; overflow-wrap: anywhere; font-size: 20px; line-height: 1.55; padding: 4px 0; }}
     .title + .panel {{ padding-top: 22px; }}
-    .item {{ color: #0f766e; font-weight: 650; }}
-    .detail {{ color: #475569; font-size: 18px; }}
-    .section {{ color: #334155; font-weight: 700; margin-top: 12px; }}
-    .source {{ color: #64748b; font-size: 16px; margin-bottom: 8px; }}
-    .divider {{ color: #94a3b8; font-size: 17px; }}
-    .normal {{ color: #334155; }}
+    .item {{ color: #c44786; font-weight: 750; }}
+    .detail {{ color: #705276; font-size: 18px; }}
+    .section {{ color: #71466f; font-weight: 800; margin-top: 12px; }}
+    .source {{ color: #6c93a8; font-size: 16px; margin-bottom: 8px; }}
+    .divider {{ color: #bd83a7; font-size: 17px; }}
+    .normal {{ color: #563b65; }}
     .blank {{ height: 10px; }}
   </style>
 </head>
@@ -187,7 +199,7 @@ class AdaptiveOutputRenderer:
             rows += max(1, (width + 52) // 53)
             if cls._line_kind(line, index) in {"section", "source"}:
                 rows += 1
-        return max(MIN_RENDER_HEIGHT, min(MAX_RENDER_HEIGHT, 125 + rows * 36))
+        return max(MIN_RENDER_HEIGHT, min(MAX_RENDER_HEIGHT, 155 + rows * 36))
 
     @staticmethod
     def _find_renderers() -> List[Tuple[str, str]]:
@@ -378,7 +390,7 @@ class AdaptiveOutputRenderer:
         for index, line in enumerate(lines[1:], start=1):
             kind = cls._line_kind(line, index)
             if kind == "blank":
-                body_rows.append((kind, " ", body_font, "#334155"))
+                body_rows.append((kind, " ", body_font, "#705276"))
                 continue
             font = (
                 source_font
@@ -388,32 +400,49 @@ class AdaptiveOutputRenderer:
                 else body_font
             )
             color = {
-                "item": "#0f766e",
-                "section": "#334155",
-                "source": "#64748b",
-                "divider": "#94a3b8",
-            }.get(kind, "#334155")
+                "item": "#c44786",
+                "section": "#71466f",
+                "source": "#6c93a8",
+                "divider": "#bd83a7",
+            }.get(kind, "#563b65")
             for wrapped in wrap(line, font, inner_width):
                 body_rows.append((kind, wrapped, font, color))
 
+        eyebrow_height = line_height(source_font)
         title_height = line_height(title_font)
         body_height = sum(line_height(font) + 4 for _, _, font, _ in body_rows)
         image_height = max(
             MIN_RENDER_HEIGHT,
-            min(MAX_RENDER_HEIGHT, 42 + title_height + 30 + body_height + 58),
+            min(
+                MAX_RENDER_HEIGHT,
+                42
+                + eyebrow_height
+                + 8
+                + title_height
+                + 30
+                + body_height
+                + 58,
+            ),
         )
-        image = PILImage.new("RGB", (RENDER_WIDTH, image_height), "#edf2f7")
+        image = PILImage.new("RGB", (RENDER_WIDTH, image_height), "#fff4fa")
         draw = ImageDraw.Draw(image)
-        draw.text((56, 42), title, font=title_font, fill="#0f766e")
+        draw.text((56, 42), "ELYSIAN // PINK PEARL ARCHIVE", font=source_font, fill="#c44786")
+        title_y = 42 + eyebrow_height + 8
+        draw.text((56, title_y), title, font=title_font, fill="#7a456f")
 
-        panel_top = 42 + title_height + 22
+        panel_top = title_y + title_height + 22
         panel_bottom = image_height - 32
         draw.rounded_rectangle(
             (56, panel_top, RENDER_WIDTH - 56, panel_bottom),
             radius=18,
-            fill="#ffffff",
-            outline="#dbe4ee",
+            fill="#fffdfd",
+            outline="#f0c9dc",
             width=1,
+        )
+        draw.line(
+            (82, panel_top + 2, RENDER_WIDTH - 82, panel_top + 2),
+            fill="#e467a5",
+            width=3,
         )
         y = panel_top + 25
         for _, value, font, color in body_rows:
