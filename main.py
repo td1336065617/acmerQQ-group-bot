@@ -265,6 +265,9 @@ class AcmerGroupBot(Star):
         # 群排行结果短缓存：同一群多人同时查看时只执行一次资料汇总。
         self._rank_cache = {}
         self._rank_cache_locks = {}
+        self._rank_fetch_semaphore = asyncio.Semaphore(
+            RANK_FETCH_CONCURRENCY
+        )
         try:
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/config",
@@ -548,6 +551,53 @@ class AcmerGroupBot(Star):
             days=7,
         )
 
+    async def _load_group_rank_summary(
+        self,
+        group_id: str,
+        user_id: str,
+        platforms,
+    ) -> dict:
+        """读取当前用户在群内各平台的名次；复用群排行短缓存。"""
+        gid = str(group_id or "").strip()
+        uid = str(user_id or "").strip()
+        platform_list = list(
+            dict.fromkeys(
+                platform
+                for platform in platforms
+                if platform in ACCOUNT_PLATFORMS
+            )
+        )
+        if not gid or not uid or not platform_list:
+            return {}
+
+        results = await asyncio.gather(
+            *(
+                self._collect_rank_rows(gid, platform, progress=False)
+                for platform in platform_list
+            ),
+            return_exceptions=True,
+        )
+        summary = {}
+        for platform, result in zip(platform_list, results):
+            if isinstance(result, Exception):
+                summary[platform] = {"unavailable": True}
+                continue
+            rows, errors = result
+            rank = next(
+                (
+                    index
+                    for index, row in enumerate(rows, start=1)
+                    if str(row.get("user_id") or "") == uid
+                ),
+                None,
+            )
+            summary[platform] = {
+                "rank": rank,
+                "total": len(rows),
+                "unavailable": bool(errors) and rank is None,
+            }
+        return summary
+
     @classmethod
     def _format_account_text(
         cls,
@@ -556,8 +606,10 @@ class AcmerGroupBot(Star):
         weekly_changes=None,
         *,
         title: str = "📊 我的竞赛战绩",
+        group_ranks=None,
     ) -> str:
         weekly_changes = weekly_changes or {}
+        group_ranks = group_ranks or {}
         lines = [title]
         for profile in profiles:
             label = platform_label(profile.platform)
@@ -579,6 +631,17 @@ class AcmerGroupBot(Star):
                 f"参赛：{profile.contest_count or '—'}｜"
                 f"本周变化：{_format_signed_number(delta)}"
             )
+            rank_info = group_ranks.get(profile.platform)
+            if isinstance(rank_info, dict):
+                if rank_info.get("rank") is not None:
+                    lines.append(
+                        f"  本群排行：第 {rank_info['rank']} / "
+                        f"{rank_info.get('total') or '—'} 名"
+                    )
+                elif rank_info.get("unavailable"):
+                    lines.append("  本群排行：暂时无法计算")
+                else:
+                    lines.append("  本群排行：未进入榜单")
             if profile.profile_url:
                 lines.append(f"  {profile.profile_url}")
         for platform, exc in errors:
@@ -759,6 +822,8 @@ class AcmerGroupBot(Star):
             identifier = str(
                 record.get("platform_user_id") or record.get("handle") or ""
             )
+            group_id = str(event.get_group_id() or "").strip()
+            group_ranks = {}
             try:
                 profile = await self.account_fetcher.get_profile(
                     platform,
@@ -769,11 +834,26 @@ class AcmerGroupBot(Star):
                 )
                 await self._record_profile_metric(user_id, profile)
                 delta = await self._profile_weekly_delta(user_id, profile)
+                if group_id:
+                    membership_changed = await self.account_registry.set_group_member(
+                        group_id,
+                        user_id,
+                        True,
+                        preserve_opt_out=True,
+                    )
+                    if membership_changed:
+                        self._invalidate_rank_cache(group_id)
+                group_ranks = await self._load_group_rank_summary(
+                    group_id,
+                    user_id,
+                    [platform],
+                )
                 image_path = await asyncio.to_thread(
                     self.account_card_renderer.render_profile,
                     [profile],
                     display_name=self._event_display_name(event),
                     weekly_changes={platform: delta},
+                    group_ranks=group_ranks,
                 )
                 if image_path is not None and image_path.is_file():
                     yield event.image_result(str(image_path))
@@ -783,6 +863,7 @@ class AcmerGroupBot(Star):
                         self._format_account_text(
                             [profile], [], {platform: delta},
                             title=f"📊 {platform_label(platform)}战绩",
+                            group_ranks=group_ranks,
                         ),
                     ):
                         yield result
@@ -810,14 +891,21 @@ class AcmerGroupBot(Star):
             )
             return
         group_id = str(event.get_group_id() or "").strip()
+        group_ranks = {}
         if group_id:
-            await self.account_registry.set_group_member(
+            membership_changed = await self.account_registry.set_group_member(
                 group_id,
                 user_id,
                 True,
                 preserve_opt_out=True,
             )
-            self._invalidate_rank_cache(group_id)
+            if membership_changed:
+                self._invalidate_rank_cache(group_id)
+            group_ranks = await self._load_group_rank_summary(
+                group_id,
+                user_id,
+                [profile.platform for profile in profiles],
+            )
         weekly = {
             profile.platform: await self._profile_weekly_delta(user_id, profile)
             for profile in profiles
@@ -827,6 +915,7 @@ class AcmerGroupBot(Star):
             profiles,
             display_name=self._event_display_name(event),
             weekly_changes=weekly,
+            group_ranks=group_ranks,
         )
         if image_path is not None and image_path.is_file():
             yield event.image_result(str(image_path))
@@ -838,7 +927,12 @@ class AcmerGroupBot(Star):
             return
         async for result in self._adaptive_results(
             event,
-            self._format_account_text(profiles, errors, weekly),
+            self._format_account_text(
+                profiles,
+                errors,
+                weekly,
+                group_ranks=group_ranks,
+            ),
         ):
             yield result
 
@@ -948,7 +1042,10 @@ class AcmerGroupBot(Star):
                 logger.warning("Codeforces 批量读取失败，改为逐账号读取：%s", exc)
 
         if not resolved:
-            semaphore = asyncio.Semaphore(RANK_FETCH_CONCURRENCY)
+            semaphore = getattr(self, "_rank_fetch_semaphore", None)
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(RANK_FETCH_CONCURRENCY)
+                self._rank_fetch_semaphore = semaphore
 
             async def fetch_one(item):
                 async with semaphore:

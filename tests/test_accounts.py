@@ -356,6 +356,46 @@ def test_profile_card_height_and_single_layout_are_adaptive(tmp_path):
     assert 'class="profile-meta"' in profile_html
 
 
+def test_profile_card_includes_square_avatar_and_group_rank(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="demo",
+        rating=1800,
+        avatar_url="//cdn.example.com/avatar.jpg",
+    )
+    profile_html = renderer._profile_html(
+        [profile],
+        display_name="测试用户",
+        weekly_changes={"codeforces": 20},
+        group_ranks={"codeforces": {"rank": 12, "total": 2000}},
+    )
+
+    assert 'class="avatar-wrap"' in profile_html
+    assert "https://cdn.example.com/avatar.jpg" in profile_html
+    assert "object-fit:cover" in profile_html
+    assert "aspect-ratio:1 / 1" in profile_html
+    assert "本群排行：第" in profile_html
+
+
+def test_profile_card_avatar_url_normalization():
+    assert (
+        AccountCardRenderer._normalize_avatar_url(
+            "//cdn.example.com/avatar.jpg",
+            "codeforces",
+        )
+        == "https://cdn.example.com/avatar.jpg"
+    )
+    assert (
+        AccountCardRenderer._normalize_avatar_url(
+            "/avatar.png",
+            "luogu",
+        )
+        == "https://www.luogu.com.cn/avatar.png"
+    )
+    assert AccountCardRenderer._normalize_avatar_url("not-a-url") == ""
+
+
 def test_profile_renderer_uses_png_temp_suffix(tmp_path, monkeypatch):
     renderer = AccountCardRenderer(cache_dir=tmp_path)
     profile = AccountProfile(

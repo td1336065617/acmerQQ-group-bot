@@ -196,7 +196,7 @@ class AccountRegistry:
         enabled: bool,
         *,
         preserve_opt_out: bool = False,
-    ) -> None:
+    ) -> bool:
         data = await self._get(GROUP_RANK_KEY, {})
         if not isinstance(data, dict):
             data = {}
@@ -211,12 +211,19 @@ class AccountRegistry:
             and isinstance(existing, dict)
             and not bool(existing.get("enabled", False))
         ):
-            return
+            return False
+        enabled_value = bool(enabled)
+        if (
+            isinstance(existing, dict)
+            and bool(existing.get("enabled", False)) == enabled_value
+        ):
+            return False
         group[key] = {
-            "enabled": bool(enabled),
+            "enabled": enabled_value,
             "updated_at": time.time(),
         }
         await self._put(GROUP_RANK_KEY, data)
+        return True
 
     async def get_group_member_ids(self, group_id: str) -> List[str]:
         data = await self._get(GROUP_RANK_KEY, {})

@@ -3,24 +3,30 @@ from __future__ import annotations
 
 import hashlib
 import html
+import io
 import json
 import os
 import threading
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 4
+CARD_FORMAT_VERSION = 5
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
 PROFILE_MIN_RENDER_HEIGHT = 500
 PROFILE_PAGE_OVERHEAD = 245
 PROFILE_CARD_BASE_HEIGHT = 270
+PROFILE_CARD_COMPACT_HEIGHT = 308
+PROFILE_CARD_MULTI_HEIGHT = 351
 PROFILE_GRID_GAP = 18
 RANKING_PAGE_START = 215
 RANKING_LIST_OVERHEAD = 21
@@ -98,6 +104,7 @@ class AccountCardRenderer:
             / "data"
             / "account_cards"
         ).expanduser().resolve()
+        self.avatar_cache_dir = self.cache_dir / "avatars"
         self._lock = threading.Lock()
 
     def render_profile(
@@ -106,12 +113,15 @@ class AccountCardRenderer:
         *,
         display_name: str = "ACM 选手",
         weekly_changes: Optional[Dict[str, Optional[int]]] = None,
+        group_ranks: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Optional[Path]:
         profile_list = list(profiles)
+        rank_data = group_ranks or {}
         source = {
             "kind": "profile",
             "display_name": display_name,
             "weekly_changes": weekly_changes or {},
+            "group_ranks": rank_data,
             "profiles": [
                 {
                     key: value
@@ -125,9 +135,19 @@ class AccountCardRenderer:
             profile_list,
             display_name=display_name,
             weekly_changes=weekly_changes or {},
+            group_ranks=rank_data,
         )
         fallback = self._pillow_profile
-        return self._render(body, source, fallback, profile_list, display_name, weekly_changes or {})
+        return self._render(
+            body,
+            source,
+            fallback,
+            profile_list,
+            display_name,
+            weekly_changes or {},
+            rank_data,
+            self.avatar_cache_dir,
+        )
 
     def render_ranking(
         self,
@@ -267,7 +287,8 @@ class AccountCardRenderer:
                 note=str(source.get("note") or ""),
             )
         return AccountCardRenderer._profile_height(
-            source.get("profiles") or []
+            source.get("profiles") or [],
+            group_ranks=source.get("group_ranks") or {},
         )
 
     @staticmethod
@@ -285,6 +306,7 @@ class AccountCardRenderer:
         profile: object,
         *,
         compact: bool = False,
+        has_group_rank: bool = False,
     ) -> int:
         """估算单个平台卡片高度，和 CSS 的主要换行点保持一致。"""
         if isinstance(profile, AccountProfile):
@@ -310,7 +332,14 @@ class AccountCardRenderer:
         else:
             return PROFILE_CARD_BASE_HEIGHT
 
-        height = 222 if compact else PROFILE_CARD_BASE_HEIGHT
+        height = (
+            PROFILE_CARD_COMPACT_HEIGHT
+            if compact
+            else PROFILE_CARD_MULTI_HEIGHT
+        )
+        # 多平台卡的排行信息通常会在窄卡片中换到下一行；单平台卡可横向容纳。
+        if has_group_rank and not compact:
+            height += 33
         if values["solved_count"] is not None:
             height += 28
 
@@ -337,16 +366,21 @@ class AccountCardRenderer:
             else {}
         )
         if latest.get("name"):
-            height += 30
             latest_width = cls._text_width(latest.get("name"))
             if latest_width > 84:
                 height += min(30, ((latest_width - 1) // 84) * 24)
         return height
 
     @classmethod
-    def _profile_height(cls, profiles: Iterable[object]) -> int:
+    def _profile_height(
+        cls,
+        profiles: Iterable[object],
+        *,
+        group_ranks: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> int:
         """按卡片数量和内容估算截图高度，避免固定模板留下大块空白。"""
         profile_list = list(profiles)
+        rank_data = group_ranks or {}
         if not profile_list:
             grid_height = 96
         else:
@@ -358,6 +392,20 @@ class AccountCardRenderer:
                         cls._profile_card_height(
                             item,
                             compact=len(profile_list) == 1,
+                            has_group_rank=(
+                                (
+                                    str(
+                                        item.get("platform") or ""
+                                    )
+                                    if isinstance(item, dict)
+                                    else (
+                                        item.platform
+                                        if isinstance(item, AccountProfile)
+                                        else ""
+                                    )
+                                )
+                                in rank_data
+                            )
                         )
                         for item in row
                     )
@@ -367,6 +415,84 @@ class AccountCardRenderer:
             PROFILE_MIN_RENDER_HEIGHT,
             min(MAX_CARD_HEIGHT, PROFILE_PAGE_OVERHEAD + grid_height),
         )
+
+    @staticmethod
+    def _normalize_avatar_url(
+        value: object,
+        platform: str = "",
+    ) -> str:
+        """规范化公开头像 URL，兼容协议相对地址和平台相对地址。"""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("//"):
+            return "https:" + text
+        if text.startswith("/"):
+            bases = {
+                "codeforces": "https://codeforces.com",
+                "nowcoder": "https://ac.nowcoder.com",
+                "luogu": "https://www.luogu.com.cn",
+                "atcoder": "https://atcoder.jp",
+            }
+            base = bases.get(platform)
+            return f"{base}{text}" if base else ""
+        parsed = urlparse(text)
+        return text if parsed.scheme in {"http", "https", "data"} else ""
+
+    @staticmethod
+    def _load_avatar(
+        cache_dir: str | Path,
+        url: object,
+        size: int,
+        platform: str = "",
+    ):
+        """下载并裁剪头像为正方形；失败时返回 None。"""
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            return None
+        normalized = AccountCardRenderer._normalize_avatar_url(
+            url,
+            platform,
+        )
+        if not normalized or not normalized.startswith(("http://", "https://")):
+            return None
+        avatar_cache_dir = Path(cache_dir)
+        cache_path = avatar_cache_dir / (
+            hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+            + ".png"
+        )
+        try:
+            if cache_path.is_file() and cache_path.stat().st_size > 0:
+                with Image.open(cache_path) as cached:
+                    image = cached.convert("RGB")
+            else:
+                request = urllib.request.Request(
+                    normalized,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 ACM-QQ-Group-Bot "
+                            "avatar-renderer"
+                        )
+                    },
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    payload = response.read(5 * 1024 * 1024 + 1)
+                if len(payload) > 5 * 1024 * 1024:
+                    return None
+                with Image.open(io.BytesIO(payload)) as source:
+                    image = source.convert("RGB")
+                avatar_cache_dir.mkdir(parents=True, exist_ok=True)
+                image.save(cache_path, format="PNG")
+            resampling = getattr(Image, "Resampling", Image).LANCZOS
+            return ImageOps.fit(
+                image,
+                (int(size), int(size)),
+                method=resampling,
+                centering=(0.5, 0.5),
+            )
+        except (OSError, ValueError, urllib.error.URLError):
+            return None
 
     @staticmethod
     def _ranking_text_width(value: object) -> int:
@@ -496,7 +622,9 @@ class AccountCardRenderer:
         *,
         display_name: str,
         weekly_changes: Dict[str, Optional[int]],
+        group_ranks: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
+        rank_data = group_ranks or {}
         cards = []
         for profile in profiles:
             start, end = PLATFORM_COLORS.get(
@@ -541,6 +669,35 @@ class AccountCardRenderer:
                     f'<div class="recent">最近：{_escape(latest.get("name"))}'
                     f' · {_escape(_format_delta(latest.get("delta")))}</div>'
                 )
+            rank_info = rank_data.get(profile.platform)
+            group_rank_text = ""
+            if isinstance(rank_info, dict):
+                rank = rank_info.get("rank")
+                total = rank_info.get("total")
+                if rank is not None and total:
+                    group_rank_text = (
+                        f'<div class="group-rank">本群排行：第 '
+                        f'<b>{_escape(rank)}</b> / {_escape(total)} 名</div>'
+                    )
+                elif rank_info.get("unavailable"):
+                    group_rank_text = (
+                        '<div class="group-rank muted">本群排行：暂时无法计算</div>'
+                    )
+                else:
+                    group_rank_text = (
+                        '<div class="group-rank muted">本群排行：未进入榜单</div>'
+                    )
+            avatar_url = cls._normalize_avatar_url(
+                profile.avatar_url,
+                profile.platform,
+            )
+            avatar_initial = _escape(platform_label(profile.platform)[:1])
+            avatar_image = (
+                f'<img src="{_escape(avatar_url)}" alt="" '
+                'onerror="this.style.display=\'none\'">'
+                if avatar_url
+                else ""
+            )
             cards.append(
                 f"""
                 <article class="platform-card" style="--accent:{_escape(start)};--accent2:{_escape(end)}">
@@ -549,7 +706,15 @@ class AccountCardRenderer:
                     <span class="verified">◆ VERIFIED</span>
                   </div>
                   <div class="profile-main">
-                    <div class="handle">{_escape(profile.handle)}</div>
+                    <div class="identity-line">
+                      <div class="avatar-wrap">
+                        <span class="avatar-fallback">{avatar_initial}</span>
+                        {avatar_image}
+                      </div>
+                      <div class="identity-copy">
+                        <div class="handle">{_escape(profile.handle)}</div>
+                      </div>
+                    </div>
                     <div class="rating-row">
                       <span class="rating">{_escape(primary_value)}</span>
                       <span class="rating-label">{_escape(primary_label)}</span>
@@ -561,6 +726,7 @@ class AccountCardRenderer:
                     <div class="trend {delta_class}">本次变化：{_escape(_format_delta(delta))}</div>
                     {latest_text}
                     {f'<div class="extra">{_escape(extras)}</div>' if extras else ""}
+                    {group_rank_text}
                   </div>
                 </article>
                 """
@@ -749,6 +915,15 @@ class AccountCardRenderer:
     .extra {{ margin-top:13px; color:#8faac3; font-size:15px; overflow-wrap:anywhere; }}
     .recent {{ margin-top:13px; color:#b7d5eb; font-size:15px; overflow-wrap:anywhere; }}
     .profile-main {{ position:relative; }}
+    .identity-line {{ display:flex; align-items:center; gap:14px; min-width:0; }}
+    .identity-copy {{ min-width:0; flex:1; }}
+    .avatar-wrap {{ position:relative; flex:0 0 76px; width:76px; height:76px; aspect-ratio:1 / 1; overflow:hidden; border-radius:18px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 0 24px color-mix(in srgb,var(--accent),transparent 58%); }}
+    .avatar-wrap:after {{ content:""; position:absolute; inset:0; border:1px solid rgba(255,255,255,.35); border-radius:inherit; pointer-events:none; }}
+    .avatar-wrap img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; display:block; transform:scale(1.02); }}
+    .avatar-fallback {{ position:absolute; inset:0; display:grid; place-items:center; color:#fff; font-size:32px; font-weight:900; text-shadow:0 2px 8px rgba(0,0,0,.35); }}
+    .group-rank {{ flex:1 1 210px; min-width:0; color:#63eaff; font-size:14px; overflow-wrap:anywhere; }}
+    .group-rank b {{ color:#fff; font-size:17px; }}
+    .group-rank.muted {{ color:#8faac3; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
     .profile-meta > .trend,
     .profile-meta > .recent,
@@ -811,6 +986,10 @@ class AccountCardRenderer:
     .profile-document .platform-tag {{ font-size:18px; }}
     .profile-document .verified {{ font-size:11px; }}
     .profile-document .handle {{ margin-top:8px; font-size:25px; line-height:1.2; }}
+    .profile-document .avatar-wrap {{ flex-basis:90px; width:90px; height:90px; border-radius:21px; }}
+    .profile-document .profile-grid.profile-single .avatar-wrap {{ flex-basis:124px; width:124px; height:124px; border-radius:26px; }}
+    .profile-document .avatar-fallback {{ font-size:34px; }}
+    .profile-document .profile-grid.profile-single .avatar-fallback {{ font-size:48px; }}
     .profile-document .rating-row {{ gap:12px; margin:10px 0 14px; }}
     .profile-document .rating {{ font-size:42px; }}
     .profile-document .rating-label {{ font-size:13px; }}
@@ -860,6 +1039,8 @@ class AccountCardRenderer:
         profiles: List[AccountProfile],
         display_name: str,
         weekly_changes: Dict[str, Optional[int]],
+        group_ranks: Dict[str, Dict[str, Any]],
+        avatar_cache_dir: str | Path,
         image_path: Path,
     ) -> bool:
         try:
@@ -878,6 +1059,35 @@ class AccountCardRenderer:
         single = len(profiles) == 1
         card_gap = 18
         card_width = CARD_WIDTH - 140 if single else (CARD_WIDTH - 140 - card_gap) // 2
+
+        def meta_count(profile: AccountProfile) -> int:
+            count = 1  # 本次变化
+            if (
+                profile.recent_contests
+                and isinstance(profile.recent_contests[0], dict)
+                and profile.recent_contests[0].get("name")
+            ):
+                count += 1
+            extra_values = [
+                profile.school,
+                profile.organization,
+                profile.country,
+            ]
+            if profile.platform == "luogu":
+                extra_values.extend(
+                    value
+                    for value in (
+                        profile.extra.get("ccf_level"),
+                        profile.extra.get("xcpc_level"),
+                    )
+                    if str(value or "").strip()
+                )
+            if any(str(value or "").strip() for value in extra_values):
+                count += 1
+            if profile.platform in group_ranks:
+                count += 1
+            return count
+
         card_rows = []
         for offset in range(0, len(profiles), 2):
             row_profiles = profiles[offset : offset + 2]
@@ -885,7 +1095,24 @@ class AccountCardRenderer:
                 max(
                     270 if single else 300,
                     max(
-                        cls._profile_card_height(profile, compact=single)
+                        cls._profile_card_height(
+                            profile,
+                            compact=single,
+                            has_group_rank=profile.platform in group_ranks,
+                        )
+                        for profile in row_profiles
+                    ),
+                    max(
+                        cls._profile_card_height(
+                            profile,
+                            compact=single,
+                            has_group_rank=profile.platform in group_ranks,
+                        )
+                        + (
+                            max(0, meta_count(profile) - 2) * 23
+                            if single
+                            else 0
+                        )
                         for profile in row_profiles
                     ),
                 )
@@ -929,27 +1156,77 @@ class AccountCardRenderer:
                 font=platform_font,
                 fill=accent,
             )
+            avatar_size = 96 if single else 64
+            avatar_x = x + 25 if single else x + card_w - 25 - avatar_size
+            avatar_y = y + 54 if single else y + 18
+            avatar = cls._load_avatar(
+                avatar_cache_dir,
+                profile.avatar_url,
+                avatar_size,
+                profile.platform,
+            )
+            if avatar is not None:
+                avatar_mask = PILImage.new(
+                    "L",
+                    (avatar_size, avatar_size),
+                    0,
+                )
+                ImageDraw.Draw(avatar_mask).rounded_rectangle(
+                    (0, 0, avatar_size - 1, avatar_size - 1),
+                    radius=16,
+                    fill=255,
+                )
+                image.paste(avatar, (avatar_x, avatar_y), avatar_mask)
+            else:
+                draw.rounded_rectangle(
+                    (
+                        avatar_x,
+                        avatar_y,
+                        avatar_x + avatar_size,
+                        avatar_y + avatar_size,
+                    ),
+                    radius=16,
+                    fill=accent,
+                    outline="#ffffff",
+                    width=1,
+                )
+            initial = platform_label(profile.platform)[:1] or "A"
+            if avatar is None:
+                draw.text(
+                    (
+                        avatar_x + avatar_size // 2 - 12,
+                        avatar_y + avatar_size // 2 - 18,
+                    ),
+                    initial,
+                    font=platform_font,
+                    fill="#ffffff",
+                ),
             draw.text(
-                (x + 25, y + 56),
+                (
+                    x + 25 + avatar_size + 14
+                    if single
+                    else x + 25,
+                    y + (66 if single else 56),
+                ),
                 profile.handle,
                 font=handle_font,
                 fill="#ffffff",
             )
             primary_label, primary_value = _primary_metric(profile)
             draw.text(
-                (x + 25, y + 100),
+                (x + 25, y + (160 if single else 100)),
                 primary_value,
                 font=rating_font,
                 fill=accent,
             )
             draw.text(
-                (x + (310 if single else 270), y + 120),
+                (x + (310 if single else 270), y + (180 if single else 120)),
                 primary_label,
                 font=body_font,
                 fill="#8faac3",
             )
             draw.text(
-                (x + (420 if single else 370), y + 120),
+                (x + (420 if single else 370), y + (180 if single else 120)),
                 profile.rank_text or profile.color or "未评级",
                 font=body_font,
                 fill="#c8d8e9",
@@ -964,7 +1241,7 @@ class AccountCardRenderer:
                 details.append(f"通过题数：{_format_number(profile.solved_count)}")
             columns = 4 if single else 2
             detail_width = (card_w - 50) / columns
-            detail_top = y + 164
+            detail_top = y + (220 if single else 164)
             for line_index, value in enumerate(details):
                 detail_col = line_index % columns
                 detail_row = line_index // columns
@@ -1007,6 +1284,23 @@ class AccountCardRenderer:
                     extras,
                     font=body_font,
                     fill="#8faac3",
+                )
+                meta_y += 23
+            rank_info = group_ranks.get(profile.platform)
+            if isinstance(rank_info, dict):
+                rank = rank_info.get("rank")
+                total = rank_info.get("total")
+                if rank is not None and total:
+                    rank_text = f"本群排行：第 {rank} / {total} 名"
+                elif rank_info.get("unavailable"):
+                    rank_text = "本群排行：暂时无法计算"
+                else:
+                    rank_text = "本群排行：未进入榜单"
+                draw.text(
+                    (x + 25, meta_y),
+                    rank_text,
+                    font=body_font,
+                    fill="#63eaff" if rank is not None else "#8faac3",
                 )
         draw.text(
             (70, image.height - 42),
