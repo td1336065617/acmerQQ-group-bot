@@ -100,6 +100,11 @@ ACCOUNT_BIND_RE = re.compile(
     r"atc|atcoder)\s+(.+?)\s*$",
     re.I,
 )
+ACCOUNT_BIND_USAGE_RE = re.compile(
+    r"^(?:绑定|bind)\s*(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|luogu|"
+    r"atc|atcoder)\s*$",
+    re.I,
+)
 ACCOUNT_CONFIRM_RE = re.compile(
     r"^(?:确认绑定|confirm\s*bind)\s*(cf|codeforces|nk|牛客|nowcoder|"
     r"lg|洛谷|luogu|atc|atcoder)(?:\s+(.+?))?\s*$",
@@ -1885,6 +1890,17 @@ class AcmerGroupBot(Star):
                     event, platform, bind_match.group(2)
                 ):
                     yield result
+            return
+        bind_usage_match = ACCOUNT_BIND_USAGE_RE.match(raw_message)
+        if bind_usage_match:
+            platform = normalize_platform(bind_usage_match.group(1))
+            if platform:
+                yield event.plain_result(
+                    f"用法：绑定{platform} <用户名、UID或主页链接>\n"
+                    f"例如：绑定{platform} <账号>\n"
+                    "绑定后请按提示把验证码追加到对应公开资料字段，"
+                    "再发送确认绑定指令。"
+                )
             return
         confirm_match = ACCOUNT_CONFIRM_RE.match(raw_message)
         if confirm_match:
