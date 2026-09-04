@@ -8,8 +8,8 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Plain
 
-from src.models import CN_TZ, PLATFORM_LABELS, GroupConfig
-from src.utils import validate_hhmm
+from .models import CN_TZ, PLATFORM_LABELS, GroupConfig
+from .utils import validate_hhmm
 
 TICK_SECONDS = 30
 REMIND_MINUTES = 15

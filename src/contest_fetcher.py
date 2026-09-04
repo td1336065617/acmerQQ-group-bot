@@ -14,9 +14,9 @@ import aiohttp
 
 from astrbot.api import logger
 
-from src.models import CN_TZ, Contest, DEFAULT_PLATFORMS, PLATFORM_LABELS
+from .models import CN_TZ, Contest, DEFAULT_PLATFORMS, PLATFORM_LABELS
 try:
-    from src.models import OfflineContest
+    from .models import OfflineContest
 except ImportError:  # 兼容旧版本文件未同步完成的临时状态
     @dataclass
     class OfflineContest:  # type: ignore[no-redef]
@@ -62,7 +62,7 @@ except ImportError:  # 兼容旧版本文件未同步完成的临时状态
             lines.append(f"📚 数据源：XCPC Link（{self.source_url}）")
             return "\n".join(lines)
 
-from src.utils import LENTILLE_RE, USER_AGENT, fetch_text_with_retry
+from .utils import LENTILLE_RE, USER_AGENT, fetch_text_with_retry
 
 CF_API_URL = "https://codeforces.com/api/contest.list"
 NC_CALENDAR_URL = "https://ac.nowcoder.com/acm/calendar/contest"

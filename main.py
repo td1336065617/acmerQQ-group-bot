@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-# AstrBot 加载插件时不会自动把插件根目录加入 sys.path，这里手动加入，
-# 否则 `from src...` 子包导入会报 No module named 'src'
+# AstrBot 按 `data.plugins.<插件目录>.main` 加载插件，使用相对导入可避免
+# 不同插件/旧版本之间共享顶层 `src` 模块缓存。
 _PLUGIN_ROOT = str(Path(__file__).resolve().parent)
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
@@ -24,15 +24,15 @@ from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
-from src.contest_fetcher import ContestFetcher
-from src.models import (
+from .src.contest_fetcher import ContestFetcher
+from .src.models import (
     CN_TZ,
     DEFAULT_PLATFORMS,
     PLATFORM_LABELS,
     GroupConfig,
 )
-from src.scheduler import PushScheduler
-from src.utils import validate_hhmm
+from .src.scheduler import PushScheduler
+from .src.utils import validate_hhmm
 
 # 这两个常量在主程序内定义，避免 AstrBot 更新过程中只替换 main.py
 # 时因为旧版 contest_fetcher.py 尚未同步而无法加载插件。
