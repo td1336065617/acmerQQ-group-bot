@@ -1,7 +1,7 @@
 # acmerQQ群机器人
 
 基于 AstrBot 的 ACM 竞赛工具插件：查询牛客 / Codeforces / AtCoder / 洛谷
-最近比赛，并支持每日早报与赛前 15 分钟提醒。
+最近比赛、XCPC 线下赛程查询，并支持每日早报与赛前 15 分钟提醒。
 
 ## 文档
 
@@ -24,6 +24,7 @@
 | `最近atc比赛`（`最近AtCoder比赛`） | AtCoder 最近一场 | 所有人 |
 | `lg比赛`（`洛谷比赛`） | 洛谷全部未开始比赛 | 所有人 |
 | `最近lg比赛`（`最近洛谷比赛`） | 洛谷最近一场 | 所有人 |
+| `线下赛`（`线下比赛`、`XCPC线下赛`） | XCPC Link 已收录线下比赛赛程 | 所有人 |
 | `update`（`刷新比赛`） | 强制刷新全部平台数据 | 管理员 |
 | `acmer激活`（`/激活`） | 首次激活本群主动推送（重启后任意群消息自动恢复） | 所有人 |
 | `acmer群管理插件菜单` | 功能菜单（`/acm菜单`、`比赛帮助` 仍可用） | 所有人 |
@@ -47,8 +48,11 @@ AstrBot 管理面板 → 插件管理 → acmerQQ群机器人：
 | 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历接口 |
 | AtCoder | `atcoder.jp/contests/` | 官网 Upcoming Contests 赛程表 |
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需 Cookie |
+| 线下赛 | [`xcpc.link`](https://www.xcpc.link/)（备用 [`xcpc.ink`](https://www.xcpc.ink/)） | 首页脚本中的 XCPC/ICPC/CCPC 赛程数据，仅保留线下赛事；回复中明确标注实际数据源 |
 
-所有数据统一转为 `Contest` 模型并缓存 5 分钟；网络超时 10 秒、最多重试 3 次。
+在线比赛统一转为 `Contest` 模型，线下赛使用带日期/赛站/主办方字段的专用模型，
+所有数据缓存 5 分钟；网络超时 10 秒、最多重试 3 次。线下赛抓取直接使用 HTTP
+请求读取首页脚本，不依赖 Chrome 或其他浏览器。
 
 ## 已知限制
 

@@ -1,11 +1,11 @@
 """离线单测：模型与工具函数。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
-from src.models import Contest, GroupConfig
+from src.models import Contest, GroupConfig, OfflineContest
 from src.utils import validate_hhmm
 
 
@@ -40,3 +40,20 @@ def test_group_config_defaults():
     assert g.morning_push_time == "08:00"
     assert "nowcoder" in g.push_platforms
     assert g.reminder_enabled is True
+
+
+def test_offline_contest_format():
+    contest = OfflineContest(
+        name="CCPC 广州站",
+        start_date=date(2026, 10, 3),
+        end_date=date(2026, 10, 4),
+        venue="广州",
+        organizer="某大学",
+        official_url="https://example.com/notice",
+        source_url="https://www.xcpc.ink/",
+    )
+    text = contest.format_detail()
+    assert "2026-10-03 至 2026-10-04" in text
+    assert "赛站/地点：广州" in text
+    assert "官方通知：https://example.com/notice" in text
+    assert "数据源：XCPC Link（https://www.xcpc.ink/）" in text

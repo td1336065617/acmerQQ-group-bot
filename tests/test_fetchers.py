@@ -23,7 +23,13 @@ async def _main():
         print(f"[{platform}] total={len(contests)} upcoming={len(upcoming)}")
         if upcoming:
             first = upcoming[0]
-            print("   first:", first.name, first.start_cn().strftime("%Y-%m-%d %H:%M"))
+            if hasattr(first, "start_cn"):
+                started = first.start_cn().strftime("%Y-%m-%d %H:%M")
+            else:
+                started = first.date_text()
+            print("   first:", first.name, started)
+        if platform == "offline":
+            print("   source:", fetcher.source_url(platform))
 
 
 if __name__ == "__main__":

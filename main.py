@@ -25,7 +25,14 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
 from src.contest_fetcher import ContestFetcher
-from src.models import CN_TZ, DEFAULT_PLATFORMS, PLATFORM_LABELS, GroupConfig
+from src.models import (
+    CN_TZ,
+    DEFAULT_PLATFORMS,
+    OFFLINE_PLATFORM,
+    PLATFORM_LABELS,
+    QUERY_PLATFORMS,
+    GroupConfig,
+)
 from src.scheduler import PushScheduler
 from src.utils import validate_hhmm
 
@@ -49,6 +56,7 @@ MENU_TEXT = (
     "• 最近atc比赛 / 最近AtCoder比赛 ─ AtCoder 最近一场比赛\n"
     "• lg比赛 / 洛谷比赛 ─ 洛谷全部未开始比赛\n"
     "• 最近lg比赛 / 最近洛谷比赛 ─ 洛谷最近一场比赛\n"
+    "• 线下赛 ─ XCPC Link 线下比赛赛程\n"
     "• acm菜单 / acmer群管理插件菜单 ─ 显示本菜单\n"
     "━━━━━━━━━━━━\n"
     "🔑 仅管理员\n"
@@ -368,12 +376,46 @@ class AcmerGroupBot(Star):
             lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
         yield event.plain_result("\n".join(lines))
 
+    async def _reply_offline(self, event: AstrMessageEvent):
+        """查询 XCPC Link 线下赛程，并明确展示数据源。"""
+        contests, err = await self.fetcher.fetch_platform(OFFLINE_PLATFORM)
+        source_text = self.fetcher.source_text(OFFLINE_PLATFORM)
+        if err:
+            yield event.plain_result(
+                f"{err}\n📚 数据源：XCPC Link（{source_text}）"
+            )
+            return
+        upcoming = [contest for contest in contests if contest.is_upcoming()]
+        if not upcoming:
+            yield event.plain_result(
+                "🏟 线下赛近期暂无已收录赛事\n"
+                f"📚 数据源：XCPC Link（{source_text}）"
+            )
+            return
+
+        lines = [
+            f"🏟 线下赛（共 {len(upcoming)} 场）",
+            f"📚 数据源：XCPC Link（{source_text}）",
+        ]
+        for index, contest in enumerate(upcoming[:MAX_CONTEST_LIST], start=1):
+            lines.append(f"{index}. {contest.name}")
+            lines.append(f"   日期：{contest.date_text()}")
+            if contest.venue:
+                lines.append(f"   赛站/地点：{contest.venue}")
+            if contest.organizer:
+                lines.append(f"   主办方：{contest.organizer}")
+            if contest.official_url:
+                lines.append(f"   官方通知：{contest.official_url}")
+        if len(upcoming) > MAX_CONTEST_LIST:
+            lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
+        yield event.plain_result("\n".join(lines))
+
     async def _update(self, event: AstrMessageEvent):
         if not await self._is_admin(event):
             yield event.plain_result("此指令仅限管理员")
             return
         parts = ["🔄 比赛数据刷新完成"]
-        for platform in DEFAULT_PLATFORMS:
+        for platform in QUERY_PLATFORMS:
             contests, err = await self.fetcher.fetch_platform(platform, force=True)
             label = PLATFORM_LABELS.get(platform, platform)
             if err:
@@ -408,6 +450,10 @@ class AcmerGroupBot(Star):
         if query is not None:
             platform, mode = query
             async for result in self._reply_platform(event, platform, mode):
+                yield result
+            return
+        if message_str in ("线下赛", "线下比赛", "XCPC线下赛"):
+            async for result in self._reply_offline(event):
                 yield result
             return
         if message_str in ("update", "刷新比赛"):
