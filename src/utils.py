@@ -52,5 +52,10 @@ def validate_hhmm(value: str) -> str:
     return text
 
 
+def normalize_command(value: str) -> str:
+    """规范化聊天指令：去除首尾空白并忽略英文大小写。"""
+    return str(value or "").strip().casefold()
+
+
 def log_plugin(name: str, message: str) -> None:
     logger.info("[%s] %s", name, message)

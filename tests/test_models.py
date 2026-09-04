@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from src.models import Contest, GroupConfig, OfflineContest
-from src.utils import validate_hhmm
+from src.utils import normalize_command, validate_hhmm
 
 
 def test_validate_hhmm():
@@ -16,6 +16,12 @@ def test_validate_hhmm():
         validate_hhmm("8:00")
     with pytest.raises(ValueError):
         validate_hhmm("24:00")
+
+
+def test_normalize_command_casefolds_english_only():
+    assert normalize_command(" XCPC线下赛 ") == "xcpc线下赛"
+    assert normalize_command("AtCoder比赛") == "atcoder比赛"
+    assert normalize_command("线下赛") == "线下赛"
 
 
 def test_contest_format():

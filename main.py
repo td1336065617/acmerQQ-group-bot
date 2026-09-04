@@ -32,7 +32,7 @@ from .src.models import (
     GroupConfig,
 )
 from .src.scheduler import PushScheduler
-from .src.utils import validate_hhmm
+from .src.utils import normalize_command, validate_hhmm
 
 # 这两个常量在主程序内定义，避免 AstrBot 更新过程中只替换 main.py
 # 时因为旧版 contest_fetcher.py 尚未同步而无法加载插件。
@@ -75,19 +75,34 @@ QUERY_COMMANDS = {
     "nk比赛": ("nowcoder", "all"),
     "牛客比赛": ("nowcoder", "all"),
     "cf比赛": ("codeforces", "all"),
-    "Codeforces比赛": ("codeforces", "all"),
+    "codeforces比赛": ("codeforces", "all"),
     "atc比赛": ("atcoder", "all"),
-    "AtCoder比赛": ("atcoder", "all"),
+    "atcoder比赛": ("atcoder", "all"),
     "lg比赛": ("luogu", "all"),
     "洛谷比赛": ("luogu", "all"),
     "最近nk比赛": ("nowcoder", "nearest"),
     "最近牛客比赛": ("nowcoder", "nearest"),
     "最近cf比赛": ("codeforces", "nearest"),
-    "最近Codeforces比赛": ("codeforces", "nearest"),
+    "最近codeforces比赛": ("codeforces", "nearest"),
     "最近atc比赛": ("atcoder", "nearest"),
-    "最近AtCoder比赛": ("atcoder", "nearest"),
+    "最近atcoder比赛": ("atcoder", "nearest"),
     "最近lg比赛": ("luogu", "nearest"),
     "最近洛谷比赛": ("luogu", "nearest"),
+}
+QUERY_COMMANDS = {
+    normalize_command(command): value for command, value in QUERY_COMMANDS.items()
+}
+MENU_COMMANDS = {
+    normalize_command(command)
+    for command in ("acmer群管理插件菜单", "acm菜单", "比赛帮助")
+}
+OFFLINE_COMMANDS = {
+    normalize_command(command)
+    for command in ("线下赛", "线下比赛", "XCPC线下赛")
+}
+ACTIVATE_COMMAND = normalize_command("acmer激活")
+UPDATE_COMMANDS = {
+    normalize_command(command) for command in ("update", "刷新比赛")
 }
 
 
@@ -445,16 +460,16 @@ class AcmerGroupBot(Star):
     )
     async def on_message(self, event: AstrMessageEvent):
         """全匹配指令分发：无需 @机器人 也能直接触发，且不会误伤聊天内容。"""
-        message_str = (event.message_str or "").strip()
+        message_str = normalize_command(event.message_str)
         # QQ 官方指令面板可能自动补上“/”；统一去掉一个前缀后再匹配。
         if message_str.startswith("/"):
-            message_str = message_str[1:].lstrip()
+            message_str = normalize_command(message_str[1:])
         if not message_str:
             return
-        if message_str == "acmer群管理插件菜单":
+        if message_str in MENU_COMMANDS:
             yield event.plain_result(MENU_TEXT)
             return
-        if message_str == "acmer激活":
+        if message_str == ACTIVATE_COMMAND:
             async for result in self._activate_group(event):
                 yield result
             return
@@ -464,16 +479,13 @@ class AcmerGroupBot(Star):
             async for result in self._reply_platform(event, platform, mode):
                 yield result
             return
-        if message_str in ("线下赛", "线下比赛", "XCPC线下赛"):
+        if message_str in OFFLINE_COMMANDS:
             async for result in self._reply_offline(event):
                 yield result
             return
-        if message_str in ("update", "刷新比赛"):
+        if message_str in UPDATE_COMMANDS:
             async for result in self._update(event):
                 yield result
-            return
-        if message_str in ("acm菜单", "比赛帮助"):
-            yield event.plain_result(MENU_TEXT)
             return
 
     async def _activate_group(self, event: AstrMessageEvent):
