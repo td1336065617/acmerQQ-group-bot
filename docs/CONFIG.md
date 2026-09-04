@@ -11,7 +11,7 @@
 | 键 | 内容 |
 | :--- | :--- |
 | `admin_users` | 管理员 openid 列表 |
-| `settings` | 全局推送设置（早报时间/平台/提醒/@全体） |
+| `settings` | 全局推送设置（早报时间/平台/提醒/@全体/转图阈值） |
 | `groups` | 各群配置（自动注册） |
 | `reminded` | 已提醒的比赛去重记录 |
 | `morning_<群ID>_<日期>` | 当日早报是否已发送 |
@@ -26,6 +26,8 @@
 | 推送平台 `settings.push_platforms` | 牛客/CF/AtCoder/洛谷 | 早报与提醒默认平台 |
 | 赛前提醒 `settings.reminder_enabled` | 开 | 开始前 15 分钟提醒 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知带 `<@everyone>`，失败自动降级 |
+| 文字转图片最大字符数 `settings.max_plain_text_chars` | `1800` | 文字超过此字符数时转图，范围 200～10000 |
+| 文字转图片最大行数 `settings.max_plain_text_lines` | `36` | 文字超过此行数时转图，范围 10～200 |
 | 群启用 `groups[].enabled` | 开 | 是否向该群推送 |
 | 群早报时间 `groups[].morning_push_time` | `08:00` | 覆盖全局时间 |
 | 群推送平台 `groups[].push_platforms` | 全部 | 早报取“全局 ∩ 群”平台 |
@@ -104,6 +106,9 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 
 - 菜单、比赛列表、线下赛列表、刷新结果、早报和提醒会按长度自动选择输出方式：
   短内容发送文字，长内容写入 HTML 后转为 PNG 图片发送。
+- “短/长”的判断由 WebUI“推送设置”中的 `max_plain_text_chars` 和
+  `max_plain_text_lines` 控制；两个条件只要超过一个就转图。保存设置后立即生效，
+  不需要重启插件。
 - 图片缓存于插件 `data/output_cache/`；相同内容直接复用，内容变化后才重新生成。
 - 转图支持 Chromium/Chrome、Firefox、`wkhtmltoimage`；没有浏览器时使用 Pillow。
   如果运行环境没有可用渲染器，则自动拆分为多条文字，不会丢失结果。

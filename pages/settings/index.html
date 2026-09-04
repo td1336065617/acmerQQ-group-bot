@@ -16,8 +16,9 @@
   button:hover { opacity: .9; }
   button.secondary { background: #6b7280; }
   button.danger { background: #dc2626; }
-  input[type=text], input[type=time] { font-size: 14px; padding: 7px 10px; border: 1px solid rgba(128,128,128,.35); border-radius: 8px; background: transparent; color: inherit; }
+  input[type=text], input[type=time], input[type=number] { font-size: 14px; padding: 7px 10px; border: 1px solid rgba(128,128,128,.35); border-radius: 8px; background: transparent; color: inherit; }
   input[type=time] { width: 130px; }
+  input[type=number] { width: 130px; }
   #result { display: none; margin-bottom: 18px; padding: 10px 12px; border-radius: 8px; background: rgba(34,197,94,.12); color: #16a34a; white-space: pre-wrap; font-size: 14px; }
   #result.error { background: rgba(239,68,68,.12); color: #dc2626; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -69,6 +70,20 @@
   <div class="row" style="margin-bottom:10px">
     <label class="check"><input type="checkbox" id="atAllInput"> 通知尝试 @全体成员（注意：QQ 官方群聊不支持，即使机器人是群管理员也不会生效，建议关闭）</label>
   </div>
+  <div class="row" style="margin-bottom:10px">
+    <label for="maxCharsInput">文字转图片最大字符数</label>
+    <input type="number" id="maxCharsInput" min="200" max="10000" step="1" inputmode="numeric">
+    <span class="muted">默认 1800，范围 200～10000</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label for="maxLinesInput">文字转图片最大行数</label>
+    <input type="number" id="maxLinesInput" min="10" max="200" step="1" inputmode="numeric">
+    <span class="muted">默认 36，范围 10～200</span>
+  </div>
+  <div class="muted" style="margin-bottom:10px">
+    内容未超过字符数和行数两个阈值时发送文字；超过任一阈值后才生成 HTML 并转为图片。
+    保存后立即生效，转图失败会自动回退为文字分片。
+  </div>
   <div class="row">
     <button id="btnSaveSettings">保存推送设置</button>
   </div>
@@ -94,7 +109,14 @@
   const adminBody = document.getElementById('adminBody');
   const groupBody = document.getElementById('groupBody');
   let adminUsers = [];
-  let settings = { morning_push_time: '08:00', push_platforms: [], reminder_enabled: true };
+  let settings = {
+    morning_push_time: '08:00',
+    push_platforms: [],
+    reminder_enabled: true,
+    at_all_enabled: false,
+    max_plain_text_chars: 1800,
+    max_plain_text_lines: 36
+  };
   let groups = [];
 
   function show(text, isError) {
@@ -139,6 +161,8 @@
     });
     document.getElementById('reminderInput').checked = !!settings.reminder_enabled;
     document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
+    document.getElementById('maxCharsInput').value = settings.max_plain_text_chars || 1800;
+    document.getElementById('maxLinesInput').value = settings.max_plain_text_lines || 36;
   }
 
   function renderPlatformId(id) {
@@ -229,11 +253,23 @@
       if (cb.checked) platforms.push(cb.value);
     });
     if (!platforms.length) { show('请至少选择一个推送平台', true); return; }
+    const maxChars = Number(document.getElementById('maxCharsInput').value);
+    const maxLines = Number(document.getElementById('maxLinesInput').value);
+    if (!Number.isInteger(maxChars) || maxChars < 200 || maxChars > 10000) {
+      show('文字转图片最大字符数应为 200～10000 的整数', true);
+      return;
+    }
+    if (!Number.isInteger(maxLines) || maxLines < 10 || maxLines > 200) {
+      show('文字转图片最大行数应为 10～200 的整数', true);
+      return;
+    }
     settings = {
       morning_push_time: morning,
       push_platforms: platforms,
       reminder_enabled: document.getElementById('reminderInput').checked,
-      at_all_enabled: document.getElementById('atAllInput').checked
+      at_all_enabled: document.getElementById('atAllInput').checked,
+      max_plain_text_chars: maxChars,
+      max_plain_text_lines: maxLines
     };
     try {
       await A.apiPost('config', { settings });

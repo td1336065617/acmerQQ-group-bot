@@ -41,9 +41,15 @@ class AdaptiveOutputRenderer:
             if cache_dir is not None
             else Path(__file__).resolve().parent.parent / "data" / "output_cache"
         ).expanduser().resolve()
+        self.max_chars = 1
+        self.max_lines = 1
+        self.configure(max_chars, max_lines)
+        self._render_lock = threading.Lock()
+
+    def configure(self, max_chars: int, max_lines: int) -> None:
+        """更新文字直发阈值；配置由调用方负责校验业务范围。"""
         self.max_chars = max(1, int(max_chars))
         self.max_lines = max(1, int(max_lines))
-        self._render_lock = threading.Lock()
 
     def needs_image(self, text: str) -> bool:
         value = str(text or "").strip()

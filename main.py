@@ -43,6 +43,14 @@ QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 
 PLUGIN_NAME = "acmer_qq_group_bot"
 DEFAULT_MORNING_TIME = "08:00"
+# 文字转图片阈值：可在 WebUI 中调整。这里保留默认值，保证旧配置/旧数据库
+# 没有新增字段时行为与此前版本一致。
+DEFAULT_MAX_PLAIN_TEXT_CHARS = 1800
+DEFAULT_MAX_PLAIN_TEXT_LINES = 36
+MIN_MAX_PLAIN_TEXT_CHARS = 200
+MAX_MAX_PLAIN_TEXT_CHARS = 10000
+MIN_MAX_PLAIN_TEXT_LINES = 10
+MAX_MAX_PLAIN_TEXT_LINES = 200
 # @全体成员 尝试失败后，对该群暂缓重试的时间（秒）
 AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 比赛列表最多展示的条数（防止消息过长）
@@ -68,7 +76,7 @@ MENU_TEXT = (
     "• update / 刷新比赛 ─ 强制刷新全部比赛数据\n"
     "━━━━━━━━━━━━\n"
     "提示：指令为全匹配，发送完整指令才会触发；也可带 / 前缀（如 /nk比赛）\n"
-    "⚙️ 推送配置（早报/提醒/@全体）：WebUI acmerQQ群机器人 页\n"
+    "⚙️ 推送配置（早报/提醒/@全体/长消息转图）：WebUI acmerQQ群机器人 页\n"
     "🔗 开源：https://github.com/td1336065617/acmerQQ-group-bot"
 )
 
@@ -164,22 +172,93 @@ class AcmerGroupBot(Star):
     async def _is_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in await self._get_admins()
 
+    @staticmethod
+    def _read_bounded_int(
+        value: object, default: int, minimum: int, maximum: int
+    ) -> int:
+        """读取后台整数配置；缺失、类型错误或越界时使用默认值。"""
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, float) and not value.is_integer():
+            return default
+        try:
+            parsed = int(value)
+        except (OverflowError, TypeError, ValueError):
+            return default
+        return parsed if minimum <= parsed <= maximum else default
+
+    @staticmethod
+    def _validate_bounded_int(
+        value: object,
+        field_name: str,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        """严格校验 WebUI 提交的整数配置，并返回规范化整数。"""
+        if isinstance(value, bool) or (
+            isinstance(value, float) and not value.is_integer()
+        ):
+            raise ValueError(f"{field_name} 必须是整数")
+        try:
+            parsed = int(value)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} 必须是整数") from exc
+        if not minimum <= parsed <= maximum:
+            raise ValueError(
+                f"{field_name} 应在 {minimum} 到 {maximum} 之间"
+            )
+        return parsed
+
+    def _configure_output_renderer(self, settings: dict) -> None:
+        renderer = getattr(self, "output_renderer", None)
+        if renderer is None:
+            return
+        max_chars = settings["max_plain_text_chars"]
+        max_lines = settings["max_plain_text_lines"]
+        configure = getattr(renderer, "configure", None)
+        if callable(configure):
+            configure(max_chars, max_lines)
+        else:
+            # 兼容插件文件分批更新时暂时加载到的旧版渲染器。
+            renderer.max_chars = max(1, int(max_chars))
+            renderer.max_lines = max(1, int(max_lines))
+
     async def get_settings(self) -> dict:
         raw = await self.get_kv_data("settings", {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
         try:
             morning = validate_hhmm(
                 raw.get("morning_push_time", DEFAULT_MORNING_TIME)
             )
         except ValueError:
             morning = DEFAULT_MORNING_TIME
-        platforms = raw.get("push_platforms") or list(DEFAULT_PLATFORMS)
+        raw_platforms = raw.get("push_platforms")
+        if not isinstance(raw_platforms, list):
+            raw_platforms = list(DEFAULT_PLATFORMS)
+        platforms = raw_platforms or list(DEFAULT_PLATFORMS)
         platforms = [p for p in DEFAULT_PLATFORMS if p in platforms]
-        return {
+        settings = {
             "morning_push_time": morning,
             "push_platforms": platforms or list(DEFAULT_PLATFORMS),
             "reminder_enabled": bool(raw.get("reminder_enabled", True)),
             "at_all_enabled": bool(raw.get("at_all_enabled", False)),
+            "max_plain_text_chars": self._read_bounded_int(
+                raw.get("max_plain_text_chars"),
+                DEFAULT_MAX_PLAIN_TEXT_CHARS,
+                MIN_MAX_PLAIN_TEXT_CHARS,
+                MAX_MAX_PLAIN_TEXT_CHARS,
+            ),
+            "max_plain_text_lines": self._read_bounded_int(
+                raw.get("max_plain_text_lines"),
+                DEFAULT_MAX_PLAIN_TEXT_LINES,
+                MIN_MAX_PLAIN_TEXT_LINES,
+                MAX_MAX_PLAIN_TEXT_LINES,
+            ),
         }
+        # 每次读取配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
+        self._configure_output_renderer(settings)
+        return settings
 
     async def get_groups(self) -> List[GroupConfig]:
         raw = await self.get_kv_data("groups", {}) or {}
@@ -300,9 +379,11 @@ class AcmerGroupBot(Star):
         )
         try:
             value = str(text or "").strip()
+            await self.get_settings()
+            should_render_as_image = self.output_renderer.needs_image(value)
             chain = MessageChain([Plain(value)])
             rendered_as_image = False
-            if self.output_renderer.needs_image(value):
+            if should_render_as_image:
                 # @everyone 必须保留为独立文本组件，避免被绘制进图片后失去
                 # 平台识别机会；其余长内容作为图片发送。
                 mention_prefix = "<@everyone>\n"
@@ -322,10 +403,7 @@ class AcmerGroupBot(Star):
                 except Exception as exc:  # noqa: BLE001 - 长推送必须有文字兜底
                     logger.warning("群 %s 长通知转图片失败：%s", group_id, exc)
 
-            if (
-                self.output_renderer.needs_image(value)
-                and not rendered_as_image
-            ):
+            if should_render_as_image and not rendered_as_image:
                 # 转图不可用时按安全长度拆分，避免把超长原文直接交给 QQ。
                 ok = await self._send_text_chunks(session, value)
             else:
@@ -428,6 +506,7 @@ class AcmerGroupBot(Star):
         value = str(text or "").strip()
         if not value:
             return
+        await self.get_settings()
         if not self.output_renderer.needs_image(value):
             yield event.plain_result(value)
             return
@@ -684,15 +763,34 @@ class AcmerGroupBot(Star):
                 settings = payload["settings"]
                 if not isinstance(settings, dict):
                     raise ValueError("settings 必须是对象")
+                current = await self.get_settings()
                 morning = settings.get(
-                    "morning_push_time", DEFAULT_MORNING_TIME
+                    "morning_push_time", current["morning_push_time"]
                 )
-                validate_hhmm(morning)
-                platforms = settings.get("push_platforms") or list(DEFAULT_PLATFORMS)
+                morning = validate_hhmm(morning)
+                raw_platforms = settings.get(
+                    "push_platforms", current["push_platforms"]
+                )
+                platforms = raw_platforms or list(DEFAULT_PLATFORMS)
                 if not isinstance(platforms, list):
                     raise ValueError("push_platforms 必须是列表")
                 platforms = [p for p in DEFAULT_PLATFORMS if p in platforms]
-                current = await self.get_settings()
+                max_plain_text_chars = self._validate_bounded_int(
+                    settings.get(
+                        "max_plain_text_chars", current["max_plain_text_chars"]
+                    ),
+                    "文字转图片最大字符数",
+                    MIN_MAX_PLAIN_TEXT_CHARS,
+                    MAX_MAX_PLAIN_TEXT_CHARS,
+                )
+                max_plain_text_lines = self._validate_bounded_int(
+                    settings.get(
+                        "max_plain_text_lines", current["max_plain_text_lines"]
+                    ),
+                    "文字转图片最大行数",
+                    MIN_MAX_PLAIN_TEXT_LINES,
+                    MAX_MAX_PLAIN_TEXT_LINES,
+                )
                 await self.put_kv_data(
                     "settings",
                     {
@@ -708,7 +806,16 @@ class AcmerGroupBot(Star):
                                 "at_all_enabled", current["at_all_enabled"]
                             )
                         ),
+                        "max_plain_text_chars": max_plain_text_chars,
+                        "max_plain_text_lines": max_plain_text_lines,
                     },
+                )
+                # 保存成功后立即更新当前实例，无需等待下一次消息或重启插件。
+                self._configure_output_renderer(
+                    {
+                        "max_plain_text_chars": max_plain_text_chars,
+                        "max_plain_text_lines": max_plain_text_lines,
+                    }
                 )
             if "groups" in payload:
                 groups = payload["groups"]

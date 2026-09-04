@@ -13,6 +13,15 @@ def test_short_text_stays_plain_text():
     assert renderer.needs_image("这是一段明显超过当前长度限制的文本内容，请转图片") is True
 
 
+def test_configure_updates_thresholds():
+    renderer = AdaptiveOutputRenderer(max_chars=20, max_lines=3)
+    renderer.configure(max_chars=100, max_lines=5)
+    assert renderer.max_chars == 100
+    assert renderer.max_lines == 5
+    assert renderer.needs_image("一\n二\n三\n四") is False
+    assert renderer.needs_image("x" * 101) is True
+
+
 def test_html_escapes_and_keeps_structure(tmp_path: Path):
     renderer = AdaptiveOutputRenderer(cache_dir=tmp_path)
     html = renderer._html_for_text(
