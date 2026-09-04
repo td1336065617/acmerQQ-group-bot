@@ -5,6 +5,7 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -13,13 +14,54 @@ import aiohttp
 
 from astrbot.api import logger
 
-from src.models import (
-    OFFLINE_PLATFORM,
-    PLATFORM_LABELS,
-    QUERY_PLATFORMS,
-    Contest,
-    OfflineContest,
-)
+from src.models import CN_TZ, Contest, DEFAULT_PLATFORMS, PLATFORM_LABELS
+try:
+    from src.models import OfflineContest
+except ImportError:  # 兼容旧版本文件未同步完成的临时状态
+    @dataclass
+    class OfflineContest:  # type: ignore[no-redef]
+        """旧部署缺少新模型时的兼容模型，完整更新后会使用 models.py 版本。"""
+
+        name: str
+        start_date: date
+        end_date: Optional[date] = None
+        venue: str = ""
+        organizer: str = ""
+        problem_setter: str = ""
+        official_url: str = ""
+        allocation_plan: str = ""
+        source_url: str = ""
+
+        def event_end_date(self) -> date:
+            return self.end_date or self.start_date
+
+        def is_upcoming(self) -> bool:
+            return self.event_end_date() >= datetime.now(CN_TZ).date()
+
+        def date_text(self) -> str:
+            if self.end_date and self.end_date != self.start_date:
+                return f"{self.start_date:%Y-%m-%d} 至 {self.end_date:%Y-%m-%d}"
+            return f"{self.start_date:%Y-%m-%d}"
+
+        def format_detail(self) -> str:
+            lines = [
+                "🏟 线下赛",
+                f"🏷 {self.name}",
+                f"🕐 日期：{self.date_text()}（北京时间）",
+            ]
+            if self.venue:
+                lines.append(f"📍 赛站/地点：{self.venue}")
+            if self.organizer:
+                lines.append(f"🏫 主办方：{self.organizer}")
+            if self.problem_setter:
+                lines.append(f"🧩 出题组：{self.problem_setter}")
+            if self.allocation_plan:
+                lines.append(f"📌 名额/规则：{self.allocation_plan}")
+            if self.official_url:
+                lines.append(f"🔗 官方通知：{self.official_url}")
+            lines.append(f"📚 数据源：XCPC Link（{self.source_url}）")
+            return "\n".join(lines)
+
 from src.utils import LENTILLE_RE, USER_AGENT, fetch_text_with_retry
 
 CF_API_URL = "https://codeforces.com/api/contest.list"
@@ -42,6 +84,9 @@ XCPC_SCRIPT_IMPORT_RE = re.compile(
 XCPC_SCHEDULE_MARKER_RE = re.compile(
     r"=\s*\[\s*\{\s*(?:startDate|[\"']startDate[\"'])\s*:"
 )
+OFFLINE_PLATFORM = "offline"
+QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
+PLATFORM_LABELS.setdefault(OFFLINE_PLATFORM, "线下赛")
 
 
 class ContestFetcher:

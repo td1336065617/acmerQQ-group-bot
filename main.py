@@ -24,13 +24,15 @@ from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
-from src.contest_fetcher import ContestFetcher
+from src.contest_fetcher import (
+    OFFLINE_PLATFORM,
+    QUERY_PLATFORMS,
+    ContestFetcher,
+)
 from src.models import (
     CN_TZ,
     DEFAULT_PLATFORMS,
-    OFFLINE_PLATFORM,
     PLATFORM_LABELS,
-    QUERY_PLATFORMS,
     GroupConfig,
 )
 from src.scheduler import PushScheduler

@@ -1,5 +1,11 @@
 # 更新日志
 
+## [1.1.19] - 2026-09-04
+
+### 修复
+- 兼容 AstrBot 插件更新过程中 `main.py` 与 `src/models.py` 暂时不同步的情况，
+  避免启动时报 `cannot import name 'OFFLINE_PLATFORM'`。
+
 ## [1.1.18] - 2026-09-04
 
 ### 新增
