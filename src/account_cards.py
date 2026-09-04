@@ -14,7 +14,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 3
+CARD_FORMAT_VERSION = 4
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -470,6 +470,26 @@ class AccountCardRenderer:
         )
 
     @classmethod
+    def _pillow_overview_layout(cls, sections):
+        """计算 Pillow 总览的分区位置，避免不同高度分区互相覆盖。"""
+        items = list(sections.items())
+        section_heights = [
+            max(78, min(5, len(rows)) * 70 + 55)
+            for _, rows in items
+        ]
+        row_heights = []
+        for offset in range(0, len(section_heights), 2):
+            row_heights.append(
+                max(section_heights[offset : offset + 2])
+            )
+        row_tops = []
+        current_top = 205
+        for row_height in row_heights:
+            row_tops.append(current_top)
+            current_top += row_height + OVERVIEW_GRID_GAP
+        return items, section_heights, row_tops
+
+    @classmethod
     def _profile_html(
         cls,
         profiles: List[AccountProfile],
@@ -743,7 +763,7 @@ class AccountCardRenderer:
     .rank-value strong {{ display:block; color:#fff; font-size:27px; }}
     .rank-value small {{ color:#7e9bb7; font-size:13px; }}
     .rank-delta {{ text-align:right; font-size:19px; font-weight:800; }}
-    .overview-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; }}
+    .overview-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start; }}
     .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:rgba(10,17,45,.82); border:1px solid rgba(121,226,255,.3); border-radius:20px; box-shadow:0 18px 42px rgba(0,0,0,.28), inset 0 0 28px rgba(74,157,255,.06); }}
     .mini-section:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 18px var(--accent); }}
     .mini-section h2 {{ margin:0 0 8px; color:var(--accent); font-size:22px; }}
@@ -1066,24 +1086,28 @@ class AccountCardRenderer:
         value_font = cls._find_font(25)
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
-        section_count = max(1, len(sections))
-        rows = sum(max(1, min(5, len(value))) for value in sections.values())
-        height = max(MIN_CARD_HEIGHT, min(MAX_CARD_HEIGHT, 300 + rows * 70 + section_count * 70))
-        image = PILImage.new("RGB", (CARD_WIDTH, height), "#0d1230")
+        items, section_heights, row_tops = cls._pillow_overview_layout(
+            sections
+        )
+        height = cls._overview_height(sections, note=note)
+        image = PILImage.new(
+            "RGB",
+            (CARD_WIDTH, min(MAX_CARD_HEIGHT, height)),
+            "#0d1230",
+        )
         draw = ImageDraw.Draw(image)
         draw.text((70, 54), "ACM // GROUP RANKING MATRIX", font=body_font, fill="#63eaff")
         draw.text((70, 88), title, font=title_font, fill="#ffffff")
         draw.text((70, 140), subtitle, font=subtitle_font, fill="#a8c8e5")
         columns = 2
         section_w = (CARD_WIDTH - 140 - 24) // columns
-        y_base = 205
-        for index, (platform, rows_data) in enumerate(sections.items()):
+        for index, (platform, rows_data) in enumerate(items):
             col = index % columns
             row_index = index // columns
             x = 70 + col * (section_w + 24)
-            y = y_base + row_index * (max(1, min(5, len(rows_data))) * 70 + 90)
+            y = row_tops[row_index]
             accent = PLATFORM_COLORS.get(platform, ("#55e6ff", "#a855f7"))[0]
-            section_h = max(78, min(5, len(rows_data)) * 70 + 55)
+            section_h = section_heights[index]
             draw.rounded_rectangle(
                 (x, y, x + section_w, y + section_h),
                 radius=16,
@@ -1098,6 +1122,13 @@ class AccountCardRenderer:
                 draw.text((x + 75, row_y), str(item.get("display_name") or item.get("qq_name") or "未知用户"), font=body_font, fill="#ffffff")
                 draw.text((x + section_w - 145, row_y), _format_number(item.get("display_value", item.get("value"))), font=value_font, fill="#ffffff")
                 row_y += 70
+        if note:
+            draw.text(
+                (70, max(205, image.height - 112)),
+                note,
+                font=subtitle_font,
+                fill="#b1cae2",
+            )
         draw.text((70, image.height - 42), f"生成时间：{_updated_text()} · {metric_label}", font=subtitle_font, fill="#718ba8")
         try:
             image.save(image_path, format="PNG")

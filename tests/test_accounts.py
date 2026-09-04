@@ -436,6 +436,30 @@ def test_overview_card_height_is_based_on_sections_and_note(tmp_path):
     assert height < 1800
 
 
+def test_pillow_overview_layout_uses_previous_row_max_height(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    sections = {
+        "codeforces": [{} for _ in range(5)],
+        "nowcoder": [{} for _ in range(5)],
+        "luogu": [{}],
+        "atcoder": [{}],
+    }
+
+    items, section_heights, row_tops = renderer._pillow_overview_layout(
+        sections
+    )
+
+    assert [platform for platform, _ in items] == [
+        "codeforces",
+        "nowcoder",
+        "luogu",
+        "atcoder",
+    ]
+    assert section_heights[:2] == [405, 405]
+    assert section_heights[2:] == [125, 125]
+    assert row_tops[1] >= row_tops[0] + max(section_heights[:2]) + 24
+
+
 def test_registry_bulk_rating_snapshots_and_deltas():
     async def scenario():
         plugin = FakePlugin()
