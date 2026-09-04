@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -26,6 +27,19 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
 from .src.contest_fetcher import ContestFetcher
+from .src.account_cards import AccountCardRenderer
+from .src.account_fetcher import (
+    AccountFetcher,
+    normalize_account_identifier,
+)
+from .src.account_models import (
+    ACCOUNT_PLATFORMS,
+    VERIFICATION_FIELD_LABELS,
+    AccountFetchError,
+    normalize_platform,
+    platform_label,
+)
+from .src.account_registry import AccountRegistry
 from .src.models import (
     CN_TZ,
     DEFAULT_PLATFORMS,
@@ -65,11 +79,81 @@ AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 比赛列表最多展示的条数（防止消息过长）
 MAX_CONTEST_LIST = 30
 
+
+def _format_signed_number(value: object) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{int(value):+d}"
+    except (TypeError, ValueError):
+        return str(value)
+
+ACCOUNT_BIND_RE = re.compile(
+    r"^(?:绑定|bind)\s*(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|luogu|"
+    r"atc|atcoder)\s+(.+?)\s*$",
+    re.I,
+)
+ACCOUNT_CONFIRM_RE = re.compile(
+    r"^(?:确认绑定|confirm\s*bind)\s*(cf|codeforces|nk|牛客|nowcoder|"
+    r"lg|洛谷|luogu|atc|atcoder)(?:\s+(.+?))?\s*$",
+    re.I,
+)
+ACCOUNT_UNBIND_RE = re.compile(
+    r"^(?:解绑|unbind)\s*(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|"
+    r"luogu|atc|atcoder)\s*$",
+    re.I,
+)
+MY_PLATFORM_COMMANDS = {
+    normalize_command("我的cf"): "codeforces",
+    normalize_command("我的codeforces"): "codeforces",
+    normalize_command("我的牛客"): "nowcoder",
+    normalize_command("我的nk"): "nowcoder",
+    normalize_command("我的nowcoder"): "nowcoder",
+    normalize_command("我的洛谷"): "luogu",
+    normalize_command("我的lg"): "luogu",
+    normalize_command("我的luogu"): "luogu",
+    normalize_command("我的atcoder"): "atcoder",
+    normalize_command("我的atc"): "atcoder",
+}
+MY_ACCOUNT_COMMANDS = {
+    normalize_command("我的账号"),
+    normalize_command("我的战绩"),
+    normalize_command("刷新我的战绩"),
+}
+JOIN_RANK_COMMANDS = {
+    normalize_command("加入群排行"),
+    normalize_command("加入排行"),
+}
+LEAVE_RANK_COMMANDS = {
+    normalize_command("退出群排行"),
+    normalize_command("退出排行"),
+}
+GROUP_RANK_COMMANDS = {
+    normalize_command("群排行"): None,
+    normalize_command("本周进步榜"): "progress",
+    normalize_command("群cf排行"): "codeforces",
+    normalize_command("群codeforces排行"): "codeforces",
+    normalize_command("群牛客排行"): "nowcoder",
+    normalize_command("群nk排行"): "nowcoder",
+    normalize_command("群洛谷排行"): "luogu",
+    normalize_command("群lg排行"): "luogu",
+    normalize_command("群atcoder排行"): "atcoder",
+    normalize_command("群atc排行"): "atcoder",
+}
+
 MENU_TEXT = (
     "🏆 acmer群管理插件菜单\n"
     "━━━━━━━━━━━━\n"
     "👥 所有人可用\n"
     "• acmer激活 ─ 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
+    "• 绑定cf/绑定牛客/绑定洛谷/绑定atcoder ─ 绑定个人竞赛账号\n"
+    "• 确认绑定/解绑 ─ 完成或解除平台账号绑定\n"
+    "• 我的战绩/我的账号 ─ 查看四平台个人战绩卡\n"
+    "• 我的cf/我的牛客/我的洛谷/我的atcoder ─ 查看单个平台战绩卡\n"
+    "• 群排行 ─ 查看四个平台排行总览\n"
+    "• 群cf排行/群牛客排行/群洛谷排行/群atcoder排行 ─ 查看平台排行\n"
+    "• 本周进步榜 ─ 查看各平台本周 Rating 变化\n"
+    "• 加入群排行/退出群排行 ─ 管理当前群的排行展示\n"
     "• 最近比赛 ─ 汇总所有平台未来 N 天内及进行中的比赛（N 可在 WebUI 设置）\n"
     "• nk比赛 / 牛客比赛 ─ 牛客全部未开始比赛\n"
     "• 最近nk比赛 / 最近牛客比赛 ─ 牛客最近一场比赛\n"
@@ -134,6 +218,11 @@ class AcmerGroupBot(Star):
         super().__init__(context, config)
         self.config = config if isinstance(config, dict) else {}
         self.fetcher = ContestFetcher()
+        self.account_fetcher = AccountFetcher()
+        self.account_registry = AccountRegistry(self)
+        self.account_card_renderer = AccountCardRenderer(
+            cache_dir=Path(__file__).resolve().parent / "data" / "account_cards"
+        )
         self.output_renderer = AdaptiveOutputRenderer(
             cache_dir=Path(__file__).resolve().parent / "data" / "output_cache"
         )
@@ -164,6 +253,7 @@ class AcmerGroupBot(Star):
 
     async def initialize(self) -> None:
         await self.fetcher.initialize()
+        await self.account_fetcher.initialize(self.fetcher.session)
         await self.scheduler.start()
         logger.info(
             "acmerQQ群机器人 已启动；若消息指令无响应，请检查 AstrBot "
@@ -172,6 +262,7 @@ class AcmerGroupBot(Star):
 
     async def terminate(self) -> None:
         await self.scheduler.stop()
+        await self.account_fetcher.close()
         await self.fetcher.close()
         logger.info("acmerQQ群机器人 已停止")
 
@@ -278,6 +369,694 @@ class AcmerGroupBot(Star):
         # 每次读取配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
         self._configure_output_renderer(settings)
         return settings
+
+    @staticmethod
+    def _event_display_name(event: AstrMessageEvent) -> str:
+        """尽量获取 QQ 昵称；适配器未提供时回退到 sender_id。"""
+        for method_name in ("get_sender_name", "get_sender_nickname"):
+            method = getattr(event, method_name, None)
+            if callable(method):
+                try:
+                    value = method()
+                    if value:
+                        return str(value).strip()
+                except Exception:
+                    pass
+        message_obj = getattr(event, "message_obj", None)
+        sender = getattr(message_obj, "sender", None)
+        for attr in ("nickname", "card", "name"):
+            value = getattr(sender, attr, None)
+            if value:
+                return str(value).strip()
+        return str(event.get_sender_id() or "QQ用户")
+
+    @staticmethod
+    def _account_platform_help() -> str:
+        return (
+            "用法：绑定cf/绑定牛客/绑定洛谷/绑定atcoder <用户名、UID或主页链接>\n"
+            "验证字段：CF 姓氏、牛客个性签名、洛谷个人介绍、"
+            "AtCoder Affiliation（所属）"
+        )
+
+    @staticmethod
+    def _account_error_text(platform: str, exc: Exception) -> str:
+        message = str(exc).strip() or "平台暂时无法访问，请稍后重试"
+        if platform == "luogu" and (
+            "暂时无法绑定" in message or "个人资料暂时无法读取" in message
+        ):
+            return "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
+        return f"⚠️ {platform_label(platform)}：{message}"
+
+    async def _load_bound_profiles(
+        self,
+        user_id: str,
+        *,
+        detail: bool = True,
+        force: bool = False,
+    ):
+        """读取用户已绑定账号；单个平台失败不会影响其他平台。"""
+        accounts = await self.account_registry.get_user_accounts(user_id)
+        tasks = []
+        for platform in ACCOUNT_PLATFORMS:
+            record = accounts.get(platform)
+            if not isinstance(record, dict):
+                continue
+            identifier = str(
+                record.get("platform_user_id") or record.get("handle") or ""
+            ).strip()
+            if not identifier:
+                continue
+            tasks.append(
+                (
+                    platform,
+                    record,
+                    asyncio.create_task(
+                        self.account_fetcher.get_profile(
+                            platform,
+                            identifier,
+                            detail=detail,
+                            force=force,
+                            include_submissions=False,
+                        )
+                    ),
+                )
+            )
+        profiles = []
+        errors = []
+        if not tasks:
+            return accounts, profiles, errors
+        results = await asyncio.gather(
+            *(task for _, _, task in tasks),
+            return_exceptions=True,
+        )
+        for (platform, record, _), result in zip(tasks, results):
+            if isinstance(result, Exception):
+                errors.append((platform, result))
+                continue
+            profiles.append(result)
+            await self._record_profile_metric(user_id, result)
+        return accounts, profiles, errors
+
+    @staticmethod
+    def _profile_metric(profile) -> Optional[dict]:
+        """返回排行/快照使用的统一指标；洛谷没有 Elo 时按公开排名排行。"""
+        if profile.rating is not None:
+            return {
+                "snapshot_key": profile.platform,
+                "value": int(profile.rating),
+                "display_value": str(profile.rating),
+                "metric_label": "Rating",
+                "sort_value": int(profile.rating),
+            }
+        if (
+            profile.platform == "luogu"
+            and profile.rating_rank is not None
+        ):
+            rank = int(profile.rating_rank)
+            return {
+                "snapshot_key": "luogu_rank",
+                "value": -rank,
+                "display_value": f"#{rank}",
+                "metric_label": "平台排名",
+                "sort_value": -rank,
+            }
+        return None
+
+    async def _record_profile_metric(self, user_id: str, profile) -> None:
+        metric = self._profile_metric(profile)
+        if metric is None:
+            return
+        await self.account_registry.record_rating(
+            user_id,
+            metric["snapshot_key"],
+            metric["value"],
+        )
+
+    async def _profile_weekly_delta(self, user_id: str, profile) -> Optional[int]:
+        calculator = getattr(
+            self.account_fetcher, "rating_delta_for_period", None
+        )
+        direct = (
+            calculator(profile, days=7)
+            if callable(calculator)
+            else None
+        )
+        if direct is not None:
+            return direct
+        metric = self._profile_metric(profile)
+        if metric is None:
+            return None
+        return await self.account_registry.weekly_delta(
+            user_id,
+            metric["snapshot_key"],
+            days=7,
+        )
+
+    @classmethod
+    def _format_account_text(
+        cls,
+        profiles,
+        errors,
+        weekly_changes=None,
+        *,
+        title: str = "📊 我的竞赛战绩",
+    ) -> str:
+        weekly_changes = weekly_changes or {}
+        lines = [title]
+        for profile in profiles:
+            label = platform_label(profile.platform)
+            metric = cls._profile_metric(profile)
+            metric_value = (
+                metric["display_value"] if metric is not None else "未评级"
+            )
+            metric_label = metric["metric_label"] if metric is not None else "Rating"
+            rank = profile.rating_rank or profile.rank_text or "—"
+            delta = weekly_changes.get(profile.platform)
+            if delta is None:
+                delta = profile.recent_delta
+            lines.append(
+                f"【{label}】{profile.handle}｜{metric_label}：{metric_value}"
+                f"｜排名：{rank}"
+            )
+            lines.append(
+                f"  最高：{profile.max_rating or '—'}｜"
+                f"参赛：{profile.contest_count or '—'}｜"
+                f"本周变化：{_format_signed_number(delta)}"
+            )
+            if profile.profile_url:
+                lines.append(f"  {profile.profile_url}")
+        for platform, exc in errors:
+            lines.append(
+                f"⚠️ {platform_label(platform)}同步失败：{str(exc)}"
+            )
+        return "\n".join(lines)
+
+    async def _reply_account_bind(
+        self,
+        event: AstrMessageEvent,
+        platform: str,
+        identifier: str,
+    ):
+        user_id = str(event.get_sender_id() or "").strip()
+        if not user_id:
+            yield event.plain_result("无法识别 QQ 用户，请稍后重试")
+            return
+        try:
+            profile = await self.account_fetcher.get_profile(
+                platform, identifier, detail=False, force=True
+            )
+            # 洛谷个人介绍不可读时，直接按用户约定返回明确反馈。
+            if platform == "luogu" and not profile.verification_value.strip():
+                yield event.plain_result(
+                    "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
+                )
+                return
+            token = await self.account_registry.create_pending(
+                user_id,
+                platform,
+                profile,
+                group_id=str(event.get_group_id() or ""),
+            )
+        except AccountFetchError as exc:
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+        except Exception as exc:
+            logger.warning("创建%s绑定挑战失败：%s", platform_label(platform), exc)
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+
+        field = VERIFICATION_FIELD_LABELS.get(platform, "公开资料字段")
+        group_hint = (
+            "\n建议在机器人私聊中完成绑定，避免验证码出现在群消息里。"
+            if event.get_group_id()
+            else ""
+        )
+        yield event.plain_result(
+            f"✅ 已找到 {platform_label(platform)} 账号：{profile.handle}\n"
+            f"请在该账号的【{field}】中追加：{token}\n"
+            f"修改完成后发送：确认绑定{platform}{group_hint}\n"
+            "验证码 10 分钟内有效，验证成功后可以删除。"
+        )
+
+    async def _reply_account_confirm(
+        self,
+        event: AstrMessageEvent,
+        platform: str,
+        identifier: str = "",
+    ):
+        user_id = str(event.get_sender_id() or "").strip()
+        pending = await self.account_registry.get_pending(user_id, platform)
+        if pending is None:
+            yield event.plain_result(
+                f"没有找到待确认的{platform_label(platform)}绑定请求，"
+                f"请先发送：绑定{platform}<账号>"
+            )
+            return
+        pending_identifier = str(
+            pending.get("platform_user_id") or pending.get("handle") or ""
+        )
+        if identifier:
+            normalized = normalize_account_identifier(
+                platform, identifier
+            )
+            if normalized and normalized.casefold() != pending_identifier.casefold():
+                yield event.plain_result(
+                    f"待确认账号是 {pending.get('handle') or pending_identifier}，"
+                    "如需更换请重新发送绑定指令"
+                )
+                return
+        try:
+            profile = await self.account_fetcher.get_profile(
+                platform,
+                pending_identifier,
+                detail=False,
+                force=True,
+            )
+        except AccountFetchError as exc:
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+        except Exception as exc:
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+
+        if platform == "luogu" and not profile.verification_value.strip():
+            await self.account_registry.clear_pending(user_id, platform)
+            yield event.plain_result(
+                "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
+            )
+            return
+        expected_hash = str(pending.get("token_hash") or "")
+        if not self.account_registry.token_matches(
+            profile.verification_value, expected_hash
+        ):
+            field = VERIFICATION_FIELD_LABELS.get(platform, "公开资料字段")
+            yield event.plain_result(
+                f"暂未在{field}中找到验证码，请确认已经追加正确验证码，"
+                "然后再次发送确认绑定指令"
+            )
+            return
+
+        group_id = str(event.get_group_id() or "").strip() or str(
+            pending.get("group_id") or ""
+        ).strip()
+        try:
+            await self.account_registry.save_binding(
+                user_id,
+                platform,
+                profile,
+                group_id=group_id,
+                qq_name=self._event_display_name(event),
+            )
+            await self._record_profile_metric(user_id, profile)
+        except ValueError as exc:
+            yield event.plain_result(f"⚠️ 绑定失败：{exc}")
+            return
+        except Exception as exc:
+            logger.error("保存%s绑定失败：%s", platform_label(platform), exc, exc_info=True)
+            yield event.plain_result("⚠️ 绑定保存失败，请稍后重试")
+            return
+        yield event.plain_result(
+            f"🎉 {platform_label(platform)} 账号 {profile.handle} 绑定成功！\n"
+            "已自动加入当前群的竞赛排行（如在私聊绑定，请在目标群发送一次“我的战绩”）。"
+        )
+
+    async def _reply_account_unbind(
+        self, event: AstrMessageEvent, platform: str
+    ):
+        user_id = str(event.get_sender_id() or "").strip()
+        removed = await self.account_registry.remove_binding(user_id, platform)
+        if removed:
+            remaining = await self.account_registry.get_user_accounts(user_id)
+            if not remaining:
+                await self.account_registry.remove_user_from_all_groups(user_id)
+                suffix = "，并退出所有群排行"
+            else:
+                suffix = ""
+            yield event.plain_result(f"✅ 已解绑 {platform_label(platform)}{suffix}")
+        else:
+            yield event.plain_result(f"你还没有绑定{platform_label(platform)}账号")
+
+    async def _reply_my_account(
+        self,
+        event: AstrMessageEvent,
+        *,
+        platform: Optional[str] = None,
+        force: bool = False,
+    ):
+        user_id = str(event.get_sender_id() or "").strip()
+        await self.account_registry.set_user_display_name(
+            user_id, self._event_display_name(event)
+        )
+        if platform:
+            accounts = await self.account_registry.get_user_accounts(user_id)
+            record = accounts.get(platform)
+            if not isinstance(record, dict):
+                yield event.plain_result(
+                    f"你还没有绑定{platform_label(platform)}账号\n"
+                    f"发送：绑定{platform}<账号>"
+                )
+                return
+            identifier = str(
+                record.get("platform_user_id") or record.get("handle") or ""
+            )
+            try:
+                profile = await self.account_fetcher.get_profile(
+                    platform,
+                    identifier,
+                    detail=True,
+                    force=force,
+                    include_submissions=False,
+                )
+                await self._record_profile_metric(user_id, profile)
+                delta = await self._profile_weekly_delta(user_id, profile)
+                image_path = await asyncio.to_thread(
+                    self.account_card_renderer.render_profile,
+                    [profile],
+                    display_name=self._event_display_name(event),
+                    weekly_changes={platform: delta},
+                )
+                if image_path is not None and image_path.is_file():
+                    yield event.image_result(str(image_path))
+                else:
+                    async for result in self._adaptive_results(
+                        event,
+                        self._format_account_text(
+                            [profile], [], {platform: delta},
+                            title=f"📊 {platform_label(platform)}战绩",
+                        ),
+                    ):
+                        yield result
+            except Exception as exc:
+                yield event.plain_result(self._account_error_text(platform, exc))
+            return
+
+        accounts, profiles, errors = await self._load_bound_profiles(
+            user_id, detail=True, force=force
+        )
+        if not accounts:
+            yield event.plain_result(
+                "你还没有绑定竞赛平台账号。\n" + self._account_platform_help()
+            )
+            return
+        if not profiles:
+            message = self._format_account_text(
+                profiles,
+                errors,
+                title="📊 我的竞赛战绩",
+            )
+            yield event.plain_result(
+                message
+                or "暂时无法读取已绑定账号资料，请稍后重试"
+            )
+            return
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id:
+            await self.account_registry.set_group_member(
+                group_id,
+                user_id,
+                True,
+                preserve_opt_out=True,
+            )
+        weekly = {
+            profile.platform: await self._profile_weekly_delta(user_id, profile)
+            for profile in profiles
+        }
+        image_path = await asyncio.to_thread(
+            self.account_card_renderer.render_profile,
+            profiles,
+            display_name=self._event_display_name(event),
+            weekly_changes=weekly,
+        )
+        if image_path is not None and image_path.is_file():
+            yield event.image_result(str(image_path))
+            if errors:
+                yield event.plain_result(
+                    "⚠️ 部分平台同步失败："
+                    + "、".join(platform_label(p) for p, _ in errors)
+                )
+            return
+        async for result in self._adaptive_results(
+            event,
+            self._format_account_text(profiles, errors, weekly),
+        ):
+            yield result
+
+    async def _collect_rank_rows(
+        self,
+        group_id: str,
+        platform: str,
+        *,
+        progress: bool = False,
+    ):
+        member_ids = await self.account_registry.get_group_member_ids(group_id)
+        accounts = await self.account_registry.get_all_accounts()
+        records = []
+        for user_id in member_ids:
+            record = accounts.get(user_id, {}).get(platform)
+            if not isinstance(record, dict):
+                continue
+            identifier = str(
+                record.get("platform_user_id") or record.get("handle") or ""
+            )
+            normalized = normalize_account_identifier(platform, identifier)
+            if not normalized:
+                continue
+            records.append((user_id, record, normalized))
+
+        resolved = []
+        bulk_getter = getattr(self.account_fetcher, "get_profiles", None)
+        if (
+            platform == "codeforces"
+            and not progress
+            and records
+            and callable(bulk_getter)
+        ):
+            try:
+                profiles = await bulk_getter(
+                    platform,
+                    [identifier for _, _, identifier in records],
+                )
+                resolved = [
+                    (
+                        user_id,
+                        record,
+                        profiles.get(identifier.casefold())
+                        or AccountFetchError("未找到该 Codeforces 用户"),
+                    )
+                    for user_id, record, identifier in records
+                ]
+            except Exception as exc:
+                # 一个失效的 CF 账号不应让整个群排行失效，退回逐账号查询。
+                logger.warning("Codeforces 批量读取失败，改为逐账号读取：%s", exc)
+
+        tasks = []
+        if not resolved:
+            for user_id, record, identifier in records:
+                if not identifier:
+                    continue
+                tasks.append(
+                    (
+                        user_id,
+                        record,
+                        asyncio.create_task(
+                            self.account_fetcher.get_profile(
+                                platform,
+                                identifier,
+                                detail=progress,
+                                include_submissions=False,
+                            )
+                        ),
+                    )
+                )
+            results = await asyncio.gather(
+                *(task for _, _, task in tasks),
+                return_exceptions=True,
+            ) if tasks else []
+            resolved = [
+                (item[0], item[1], result)
+                for item, result in zip(tasks, results)
+            ]
+
+        rows = []
+        errors = []
+        for user_id, record, result in resolved:
+            if isinstance(result, Exception):
+                errors.append((user_id, result))
+                continue
+            await self._record_profile_metric(user_id, result)
+            delta = await self._profile_weekly_delta(user_id, result)
+            metric = self._profile_metric(result)
+            if metric is None:
+                continue
+            if progress:
+                value = delta
+                display_value = _format_signed_number(delta)
+                sort_value = delta
+                metric_label = "本周变化"
+            else:
+                value = metric["value"]
+                display_value = metric["display_value"]
+                sort_value = metric["sort_value"]
+                metric_label = metric["metric_label"]
+            if value is None:
+                continue
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "display_name": str(
+                        record.get("qq_name")
+                        or record.get("display_name")
+                        or user_id
+                    ),
+                    "handle": result.handle,
+                    "value": value,
+                    "display_value": display_value,
+                    "metric_label": metric_label,
+                    "sort_value": sort_value,
+                    "delta": delta,
+                    "rating": result.rating,
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                -(
+                    int(row["sort_value"])
+                    if isinstance(row["sort_value"], int)
+                    else 0
+                ),
+                str(row.get("display_name") or "").casefold(),
+            )
+        )
+        return rows, errors
+
+    async def _reply_set_rank_membership(
+        self, event: AstrMessageEvent, enabled: bool
+    ):
+        group_id = str(event.get_group_id() or "").strip()
+        if not group_id:
+            yield event.plain_result("群排行设置只能在群聊中使用")
+            return
+        user_id = str(event.get_sender_id() or "").strip()
+        await self.account_registry.set_user_display_name(
+            user_id, self._event_display_name(event)
+        )
+        accounts = await self.account_registry.get_user_accounts(user_id)
+        if enabled and not accounts:
+            yield event.plain_result(
+                "你还没有绑定竞赛平台账号，绑定后会自动加入群排行"
+            )
+            return
+        await self.account_registry.set_group_member(
+            group_id, user_id, enabled
+        )
+        if enabled:
+            yield event.plain_result(
+                "✅ 已加入本群排行；已绑定的平台会出现在对应榜单中"
+            )
+        else:
+            yield event.plain_result("✅ 已退出本群排行")
+
+    async def _reply_group_rank(
+        self,
+        event: AstrMessageEvent,
+        mode: Optional[str],
+    ):
+        group_id = str(event.get_group_id() or "").strip()
+        if not group_id:
+            yield event.plain_result("群排行只能在群聊中使用")
+            return
+
+        platforms = (
+            [mode]
+            if mode in ACCOUNT_PLATFORMS
+            else list(ACCOUNT_PLATFORMS)
+        )
+        progress = mode == "progress"
+        sections = {}
+        errors = []
+        for platform in platforms:
+            rows, row_errors = await self._collect_rank_rows(
+                group_id, platform, progress=progress
+            )
+            sections[platform] = rows
+            errors.extend((platform, error) for _, error in row_errors)
+
+        if mode in ACCOUNT_PLATFORMS:
+            rows = sections.get(mode, [])
+            if not rows:
+                yield event.plain_result(
+                    f"当前群还没有加入{platform_label(mode)}排行的成员"
+                )
+                return
+            title = f"本群 {platform_label(mode)} 排行"
+            metric = (
+                rows[0].get("metric_label")
+                if rows
+                else "Rating"
+            ) or "Rating"
+            note = (
+                "洛谷没有公开 Elo 时按平台公开排名排序"
+                if mode == "luogu"
+                else ""
+            )
+            image_path = await asyncio.to_thread(
+                self.account_card_renderer.render_ranking,
+                rows[:MAX_CONTEST_LIST],
+                title=title,
+                subtitle=f"共 {len(rows)} 名成员 · 公开资料排行",
+                metric_label=metric,
+                note=note,
+            )
+            fallback = "\n".join(
+                [
+                    title,
+                    *(
+                        f"{i}. {row['display_name']}（{row['handle']}）"
+                        f" {row.get('display_value', row['value'])}"
+                        for i, row in enumerate(rows[:MAX_CONTEST_LIST], 1)
+                    ),
+                ]
+            )
+        else:
+            if not any(sections.values()):
+                yield event.plain_result("当前群还没有加入排行的成员")
+                return
+            title = "本群竞赛排行总览" if not progress else "本群本周进步榜"
+            metric = "Rating" if not progress else "本周变化"
+            note = (
+                "各平台分开排行，不直接比较不同平台 Rating"
+                if not progress
+                else "暂无完整一周快照的成员会暂不计入"
+            )
+            image_path = await asyncio.to_thread(
+                self.account_card_renderer.render_overview_ranking,
+                sections,
+                title=title,
+                subtitle="四平台公开战绩矩阵",
+                metric_label=metric,
+                note=note,
+            )
+            fallback_lines = [title]
+            for platform, rows in sections.items():
+                fallback_lines.append(f"【{platform_label(platform)}】")
+                for i, row in enumerate(rows[:5], 1):
+                    value = (
+                        row.get("display_value", row["value"])
+                    )
+                    fallback_lines.append(
+                        f"{i}. {row['display_name']}（{row['handle']}） {value}"
+                    )
+            fallback = "\n".join(fallback_lines)
+        if image_path is not None and image_path.is_file():
+            yield event.image_result(str(image_path))
+        else:
+            async for result in self._adaptive_results(event, fallback):
+                yield result
+        if errors:
+            yield event.plain_result(
+                "⚠️ 部分账号同步失败，排行可能不完整："
+                + "、".join(platform_label(p) for p, _ in errors)
+            )
 
     async def get_groups(self) -> List[GroupConfig]:
         raw = await self.get_kv_data("groups", {}) or {}
@@ -788,11 +1567,63 @@ class AcmerGroupBot(Star):
     )
     async def on_message(self, event: AstrMessageEvent):
         """全匹配指令分发：无需 @机器人 也能直接触发，且不会误伤聊天内容。"""
-        message_str = normalize_command(event.message_str)
+        raw_message = str(event.message_str or "").strip()
         # QQ 官方指令面板可能自动补上“/”；统一去掉一个前缀后再匹配。
-        if message_str.startswith("/"):
-            message_str = normalize_command(message_str[1:])
+        if raw_message.startswith("/"):
+            raw_message = raw_message[1:].lstrip()
+        message_str = normalize_command(raw_message)
         if not message_str:
+            return
+        bind_match = ACCOUNT_BIND_RE.match(raw_message)
+        if bind_match:
+            platform = normalize_platform(bind_match.group(1))
+            if platform:
+                async for result in self._reply_account_bind(
+                    event, platform, bind_match.group(2)
+                ):
+                    yield result
+            return
+        confirm_match = ACCOUNT_CONFIRM_RE.match(raw_message)
+        if confirm_match:
+            platform = normalize_platform(confirm_match.group(1))
+            if platform:
+                async for result in self._reply_account_confirm(
+                    event, platform, confirm_match.group(2) or ""
+                ):
+                    yield result
+            return
+        unbind_match = ACCOUNT_UNBIND_RE.match(raw_message)
+        if unbind_match:
+            platform = normalize_platform(unbind_match.group(1))
+            if platform:
+                async for result in self._reply_account_unbind(event, platform):
+                    yield result
+            return
+        if message_str in MY_PLATFORM_COMMANDS:
+            async for result in self._reply_my_account(
+                event, platform=MY_PLATFORM_COMMANDS[message_str]
+            ):
+                yield result
+            return
+        if message_str in MY_ACCOUNT_COMMANDS:
+            async for result in self._reply_my_account(
+                event, force=message_str == normalize_command("刷新我的战绩")
+            ):
+                yield result
+            return
+        if message_str in JOIN_RANK_COMMANDS:
+            async for result in self._reply_set_rank_membership(event, True):
+                yield result
+            return
+        if message_str in LEAVE_RANK_COMMANDS:
+            async for result in self._reply_set_rank_membership(event, False):
+                yield result
+            return
+        if message_str in GROUP_RANK_COMMANDS:
+            async for result in self._reply_group_rank(
+                event, GROUP_RANK_COMMANDS[message_str]
+            ):
+                yield result
             return
         if message_str in MENU_COMMANDS:
             async for result in self._adaptive_results(event, MENU_TEXT):
