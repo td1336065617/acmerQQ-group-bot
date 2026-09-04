@@ -24,11 +24,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
-from src.contest_fetcher import (
-    OFFLINE_PLATFORM,
-    QUERY_PLATFORMS,
-    ContestFetcher,
-)
+from src.contest_fetcher import ContestFetcher
 from src.models import (
     CN_TZ,
     DEFAULT_PLATFORMS,
@@ -37,6 +33,11 @@ from src.models import (
 )
 from src.scheduler import PushScheduler
 from src.utils import validate_hhmm
+
+# 这两个常量在主程序内定义，避免 AstrBot 更新过程中只替换 main.py
+# 时因为旧版 contest_fetcher.py 尚未同步而无法加载插件。
+OFFLINE_PLATFORM = "offline"
+QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 
 PLUGIN_NAME = "acmer_qq_group_bot"
 DEFAULT_MORNING_TIME = "08:00"
@@ -380,6 +381,11 @@ class AcmerGroupBot(Star):
 
     async def _reply_offline(self, event: AstrMessageEvent):
         """查询 XCPC Link 线下赛程，并明确展示数据源。"""
+        if not hasattr(self.fetcher, "_fetch_offline"):
+            yield event.plain_result(
+                "⚠️ 线下赛功能文件未完整更新，请在 AstrBot 中完整重装本插件后重试"
+            )
+            return
         contests, err = await self.fetcher.fetch_platform(OFFLINE_PLATFORM)
         source_text = self.fetcher.source_text(OFFLINE_PLATFORM)
         if err:
@@ -417,7 +423,11 @@ class AcmerGroupBot(Star):
             yield event.plain_result("此指令仅限管理员")
             return
         parts = ["🔄 比赛数据刷新完成"]
-        for platform in QUERY_PLATFORMS:
+        platforms = list(QUERY_PLATFORMS)
+        if not hasattr(self.fetcher, "_fetch_offline"):
+            platforms.remove(OFFLINE_PLATFORM)
+            parts.append("线下赛：插件文件未完整更新，请完整重装后再刷新")
+        for platform in platforms:
             contests, err = await self.fetcher.fetch_platform(platform, force=True)
             label = PLATFORM_LABELS.get(platform, platform)
             if err:
