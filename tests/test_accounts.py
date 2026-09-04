@@ -197,7 +197,15 @@ def test_registry_binding_token_and_group_auto_join():
         token = await registry.create_pending("user-1", "codeforces", profile)
         pending = await registry.get_pending("user-1", "codeforces")
         assert pending is not None
-        assert registry.token_matches(f"prefix {token} suffix", pending["token_hash"])
+        # CF 的 Last name 同样允许保留原姓氏，再追加验证码。
+        assert registry.token_matches(
+            f"原姓氏 {token}",
+            pending["token_hash"],
+        )
+        assert registry.token_matches(
+            f"{token} suffix",
+            pending["token_hash"],
+        )
         assert token not in str(pending)
 
         await registry.save_binding(

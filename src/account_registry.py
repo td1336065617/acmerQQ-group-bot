@@ -182,6 +182,7 @@ class AccountRegistry:
 
     @staticmethod
     def token_matches(value: str, expected_hash: str) -> bool:
+        """校验验证码是否追加在公开资料字段中。"""
         return any(
             token_hash(candidate) == expected_hash
             for candidate in TOKEN_RE.findall(str(value or ""))

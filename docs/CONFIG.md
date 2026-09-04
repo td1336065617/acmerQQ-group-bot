@@ -50,7 +50,7 @@
 
 ### 账号绑定与排行
 
-- Codeforces 绑定：发送 `绑定cf <handle>`，将验证码追加到 Codeforces
+- Codeforces 绑定：发送 `绑定cf <handle>`，将验证码追加到 Codeforces 的
   `Last name/姓氏`，再发送 `确认绑定cf`。
 - 牛客绑定：发送 `绑定牛客 <用户ID或主页链接>`，将验证码追加到牛客
   `个性签名`，再发送 `确认绑定牛客`。
