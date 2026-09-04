@@ -10,6 +10,7 @@ from src.account_cards import AccountCardRenderer
 from src.account_fetcher import AccountFetcher, normalize_account_identifier
 from src.account_models import AccountProfile
 from src.account_registry import AccountRegistry
+from src.output_renderer import AdaptiveOutputRenderer
 
 
 class FakePlugin:
@@ -265,3 +266,80 @@ def test_profile_and_ranking_html_escape_user_content(tmp_path):
     assert "&lt;demo&gt;" in ranking_html
     assert "ACM // NEURAL CONTEST NETWORK" in profile_html
     assert "ACM // NEURAL CONTEST NETWORK" in ranking_html
+
+
+def test_profile_card_height_and_single_layout_are_adaptive(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="tourist",
+        rating=3824,
+        rank_text="legendary grandmaster",
+        max_rating=3979,
+        rating_rank=1,
+        contest_count=180,
+        recent_contests=[
+            {"name": "Codeforces Round #999", "delta": 42}
+        ],
+    )
+    source_one = {
+        "kind": "profile",
+        "profiles": [profile.public_dict()],
+    }
+    source_two = {
+        "kind": "profile",
+        "profiles": [profile.public_dict(), profile.public_dict()],
+    }
+    source_four = {
+        "kind": "profile",
+        "profiles": [profile.public_dict() for _ in range(4)],
+    }
+    one_height = renderer._estimate_height(source_one)
+    two_height = renderer._estimate_height(source_two)
+    four_height = renderer._estimate_height(source_four)
+
+    assert one_height < 760
+    assert two_height < 760
+    assert four_height > two_height
+
+    profile_html = renderer._profile_html(
+        [profile],
+        display_name="测试用户",
+        weekly_changes={"codeforces": 42},
+    )
+    assert 'class="page profile-document"' in profile_html
+    assert 'class="profile-grid profile-single"' in profile_html
+    assert 'class="profile-main"' in profile_html
+    assert 'class="profile-meta"' in profile_html
+
+
+def test_profile_renderer_uses_png_temp_suffix(tmp_path, monkeypatch):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="demo",
+        rating=1200,
+    )
+    seen_suffixes = []
+
+    def fake_render(kind, executable, html_path, image_path, height):
+        seen_suffixes.append(image_path.suffix)
+        image_path.write_bytes(b"fake-png")
+        return True
+
+    monkeypatch.setattr(
+        AdaptiveOutputRenderer,
+        "_find_renderers",
+        staticmethod(lambda: [("chromium", "fake-browser")]),
+    )
+    monkeypatch.setattr(
+        AdaptiveOutputRenderer,
+        "_run_external_renderer",
+        staticmethod(fake_render),
+    )
+
+    image_path = renderer.render_profile([profile])
+
+    assert image_path is not None
+    assert image_path.is_file()
+    assert seen_suffixes == [".png"]

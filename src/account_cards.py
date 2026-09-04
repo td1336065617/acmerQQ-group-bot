@@ -14,10 +14,14 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 1
+CARD_FORMAT_VERSION = 2
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
+PROFILE_MIN_RENDER_HEIGHT = 500
+PROFILE_PAGE_OVERHEAD = 245
+PROFILE_CARD_BASE_HEIGHT = 270
+PROFILE_GRID_GAP = 18
 
 PLATFORM_COLORS = {
     "codeforces": ("#ff557a", "#ff9a5a"),
@@ -193,7 +197,9 @@ class AccountCardRenderer:
         html_path = self.cache_dir / f"account-card-{digest}.html"
         image_path = self.cache_dir / f"account-card-{digest}.png"
         html_tmp = self.cache_dir / f".account-card-{digest}.html.tmp"
-        image_tmp = self.cache_dir / f".account-card-{digest}.png.tmp"
+        # Chromium 根据文件扩展名判断截图格式；临时文件也必须以 .png 结尾，
+        # 否则会报 Unsupported screenshot image file type: .tmp。
+        image_tmp = self.cache_dir / f".account-card-{digest}.tmp.png"
 
         with self._lock:
             try:
@@ -242,10 +248,106 @@ class AccountCardRenderer:
                 MIN_CARD_HEIGHT,
                 min(MAX_CARD_HEIGHT, 620 + rows * 74),
             )
-        profiles = len(source.get("profiles") or [])
+        return AccountCardRenderer._profile_height(
+            source.get("profiles") or []
+        )
+
+    @staticmethod
+    def _text_width(value: object) -> int:
+        """估算中英文混排文本宽度，用于预测 HTML 卡片的换行高度。"""
+        text = str(value or "")
+        return sum(
+            2 if char.isascii() is False else 1
+            for char in text
+        )
+
+    @classmethod
+    def _profile_card_height(
+        cls,
+        profile: object,
+        *,
+        compact: bool = False,
+    ) -> int:
+        """估算单个平台卡片高度，和 CSS 的主要换行点保持一致。"""
+        if isinstance(profile, AccountProfile):
+            recent_contests = profile.recent_contests
+            values = {
+                "handle": profile.handle,
+                "rank": profile.rank_text or profile.color or "",
+                "school": profile.school,
+                "organization": profile.organization,
+                "country": profile.country,
+                "solved_count": profile.solved_count,
+            }
+        elif isinstance(profile, dict):
+            recent_contests = profile.get("recent_contests") or []
+            values = {
+                "handle": profile.get("handle", ""),
+                "rank": profile.get("rank_text") or profile.get("color") or "",
+                "school": profile.get("school", ""),
+                "organization": profile.get("organization", ""),
+                "country": profile.get("country", ""),
+                "solved_count": profile.get("solved_count"),
+            }
+        else:
+            return PROFILE_CARD_BASE_HEIGHT
+
+        height = 222 if compact else PROFILE_CARD_BASE_HEIGHT
+        if values["solved_count"] is not None:
+            height += 28
+
+        # 单平台卡片使用整行宽度；这些阈值对应压缩后的 CSS 卡片宽度。
+        handle_width = cls._text_width(values["handle"])
+        if handle_width > 42:
+            height += min(60, ((handle_width - 1) // 42) * 28)
+
+        rank_width = cls._text_width(values["rank"])
+        if rank_width > 24:
+            height += min(28, ((rank_width - 1) // 24) * 24)
+
+        extras = " · ".join(
+            str(values[key] or "").strip()
+            for key in ("school", "organization", "country")
+            if str(values[key] or "").strip()
+        )
+        if extras:
+            height += min(48, max(0, (cls._text_width(extras) - 1) // 84) * 24)
+
+        latest = (
+            recent_contests[0]
+            if recent_contests and isinstance(recent_contests[0], dict)
+            else {}
+        )
+        if latest.get("name"):
+            height += 30
+            latest_width = cls._text_width(latest.get("name"))
+            if latest_width > 84:
+                height += min(30, ((latest_width - 1) // 84) * 24)
+        return height
+
+    @classmethod
+    def _profile_height(cls, profiles: Iterable[object]) -> int:
+        """按卡片数量和内容估算截图高度，避免固定模板留下大块空白。"""
+        profile_list = list(profiles)
+        if not profile_list:
+            grid_height = 96
+        else:
+            row_heights = []
+            for offset in range(0, len(profile_list), 2):
+                row = profile_list[offset : offset + 2]
+                row_heights.append(
+                    max(
+                        cls._profile_card_height(
+                            item,
+                            compact=len(profile_list) == 1,
+                        )
+                        for item in row
+                    )
+                )
+            grid_height = sum(row_heights) + max(0, len(row_heights) - 1) * PROFILE_GRID_GAP
         return max(
-            MIN_CARD_HEIGHT,
-            min(MAX_CARD_HEIGHT, 650 + ((profiles + 1) // 2) * 360),
+            PROFILE_MIN_RENDER_HEIGHT,
+            min(MAX_CARD_HEIGHT, PROFILE_PAGE_OVERHEAD + grid_height),
         )
 
     @classmethod
@@ -307,16 +409,20 @@ class AccountCardRenderer:
                     <span class="platform-tag">{_escape(platform_label(profile.platform))}</span>
                     <span class="verified">◆ VERIFIED</span>
                   </div>
-                  <div class="handle">{_escape(profile.handle)}</div>
-                  <div class="rating-row">
-                    <span class="rating">{_escape(primary_value)}</span>
-                    <span class="rating-label">{_escape(primary_label)}</span>
-                    <span class="rank">{_escape(profile.rank_text or profile.color or "未评级")}</span>
+                  <div class="profile-main">
+                    <div class="handle">{_escape(profile.handle)}</div>
+                    <div class="rating-row">
+                      <span class="rating">{_escape(primary_value)}</span>
+                      <span class="rating-label">{_escape(primary_label)}</span>
+                      <span class="rank">{_escape(profile.rank_text or profile.color or "未评级")}</span>
+                    </div>
                   </div>
                   <div class="stats">{details_html}</div>
-                  <div class="trend {delta_class}">本次变化：{_escape(_format_delta(delta))}</div>
-                  {latest_text}
-                  {f'<div class="extra">{_escape(extras)}</div>' if extras else ""}
+                  <div class="profile-meta">
+                    <div class="trend {delta_class}">本次变化：{_escape(_format_delta(delta))}</div>
+                    {latest_text}
+                    {f'<div class="extra">{_escape(extras)}</div>' if extras else ""}
+                  </div>
                 </article>
                 """
             )
@@ -327,14 +433,20 @@ class AccountCardRenderer:
         updated = _updated_text(
             max((p.fetched_at for p in profiles), default=None)
         )
+        grid_class = (
+            "profile-grid profile-single"
+            if len(profiles) == 1
+            else "profile-grid"
+        )
         return cls._document(
             title="ACM 竞赛战绩卡",
             subtitle=f"{display_name} · 账号同步完成",
             body=(
-                f'<div class="profile-grid">{"".join(cards)}</div>'
+                f'<div class="{grid_class}">{"".join(cards)}</div>'
                 f'<div class="card-footer">数据更新时间：{_escape(updated)} · '
                 "仅展示平台公开资料</div>"
             ),
+            page_class="profile-document",
         )
 
     @classmethod
@@ -441,7 +553,13 @@ class AccountCardRenderer:
         return cls._document(title=title, subtitle=subtitle, body=body)
 
     @staticmethod
-    def _document(*, title: str, subtitle: str, body: str) -> str:
+    def _document(
+        *,
+        title: str,
+        subtitle: str,
+        body: str,
+        page_class: str = "",
+    ) -> str:
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -491,6 +609,11 @@ class AccountCardRenderer:
     .trend.negative, .rank-delta.negative {{ color:#ff7899; }}
     .extra {{ margin-top:13px; color:#8faac3; font-size:15px; overflow-wrap:anywhere; }}
     .recent {{ margin-top:13px; color:#b7d5eb; font-size:15px; overflow-wrap:anywhere; }}
+    .profile-main {{ position:relative; }}
+    .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
+    .profile-meta > .trend,
+    .profile-meta > .recent,
+    .profile-meta > .extra {{ flex:1 1 210px; min-width:0; margin-top:0; }}
     .ranking-list {{ position:relative; overflow:hidden; padding:10px 24px; }}
     .rank-row {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:20px 8px; border-bottom:1px solid rgba(142,203,231,.15); }}
     .rank-row:last-child {{ border-bottom:0; }}
@@ -518,10 +641,53 @@ class AccountCardRenderer:
     .rank-note {{ position:relative; margin-top:18px; padding:14px 18px; color:#b1cae2; background:rgba(35,56,105,.38); border-radius:12px; font-size:16px; }}
     .empty-card {{ padding:48px; color:#9ab4ce; font-size:20px; text-align:center; }}
     .card-footer {{ position:relative; margin-top:24px; color:#718ba8; font-size:14px; letter-spacing:.4px; }}
+    .profile-document.page {{ padding:40px 70px 36px; }}
+    .profile-document .header {{ margin-bottom:20px; }}
+    .profile-document h1 {{ margin:6px 0 4px; font-size:38px; }}
+    .profile-document .subtitle {{ font-size:18px; }}
+    .profile-document .profile-grid {{ gap:18px; align-items:start; }}
+    .profile-document .profile-grid.profile-single {{ grid-template-columns:1fr; }}
+    .profile-document .platform-card {{ padding:20px 24px 18px; border-radius:18px; }}
+    .profile-document .profile-grid.profile-single .platform-card {{
+      display:grid;
+      grid-template-columns:minmax(230px,.9fr) minmax(0,1.1fr);
+      column-gap:26px;
+      row-gap:8px;
+    }}
+    .profile-document .profile-grid.profile-single .platform-head,
+    .profile-document .profile-grid.profile-single .profile-meta {{
+      grid-column:1 / -1;
+    }}
+    .profile-document .profile-grid.profile-single .profile-main {{
+      grid-column:1;
+      align-self:center;
+    }}
+    .profile-document .profile-grid.profile-single .stats {{
+      grid-column:2;
+      align-self:center;
+    }}
+    .profile-document .profile-grid.profile-single .profile-meta {{
+      margin-top:2px;
+    }}
+    .profile-document .platform-tag {{ font-size:18px; }}
+    .profile-document .verified {{ font-size:11px; }}
+    .profile-document .handle {{ margin-top:8px; font-size:25px; line-height:1.2; }}
+    .profile-document .rating-row {{ gap:12px; margin:10px 0 14px; }}
+    .profile-document .rating {{ font-size:42px; }}
+    .profile-document .rating-label {{ font-size:13px; }}
+    .profile-document .rank {{ font-size:16px; }}
+    .profile-document .stats {{ gap:7px 14px; }}
+    .profile-document .stat {{ font-size:14px; padding-bottom:5px; }}
+    .profile-document .stat b {{ font-size:16px; }}
+    .profile-document .trend {{ margin-top:11px; font-size:15px; }}
+    .profile-document .recent,
+    .profile-document .extra {{ margin-top:9px; font-size:14px; }}
+    .profile-document .card-footer {{ margin-top:18px; font-size:13px; }}
+    .profile-document .empty-card {{ padding:32px; font-size:18px; }}
   </style>
 </head>
 <body>
-  <main class="page">
+  <main class="page {_escape(page_class)}">
     <span class="orb one"></span><span class="orb two"></span>
     <header class="header">
       <div class="eyebrow">ACM // NEURAL CONTEST NETWORK</div>
@@ -570,47 +736,145 @@ class AccountCardRenderer:
         body_font = cls._find_font(17)
         if not all((title_font, subtitle_font, platform_font, handle_font, rating_font, body_font)):
             return False
+        single = len(profiles) == 1
+        card_gap = 18
+        card_width = CARD_WIDTH - 140 if single else (CARD_WIDTH - 140 - card_gap) // 2
+        card_rows = []
+        for offset in range(0, len(profiles), 2):
+            row_profiles = profiles[offset : offset + 2]
+            card_rows.append(
+                max(
+                    270 if single else 300,
+                    max(
+                        cls._profile_card_height(profile, compact=single)
+                        for profile in row_profiles
+                    ),
+                )
+            )
+        grid_height = sum(card_rows) + max(0, len(card_rows) - 1) * card_gap
         height = max(
-            MIN_CARD_HEIGHT,
-            650 + ((len(profiles) + 1) // 2) * 360,
+            cls._profile_height(profiles),
+            205 + grid_height + 60,
         )
-        image = PILImage.new("RGB", (CARD_WIDTH, min(MAX_CARD_HEIGHT, height)), "#0d1230")
+        image = PILImage.new(
+            "RGB",
+            (CARD_WIDTH, min(MAX_CARD_HEIGHT, height)),
+            "#0d1230",
+        )
         draw = ImageDraw.Draw(image)
         draw.text((70, 54), "ACM // NEURAL CONTEST NETWORK", font=body_font, fill="#63eaff")
         draw.text((70, 86), "ACM 竞赛战绩卡", font=title_font, fill="#ffffff")
         draw.text((70, 140), f"{display_name} · 账号同步完成", font=subtitle_font, fill="#a8c8e5")
         start_y = 205
-        card_w = (CARD_WIDTH - 140 - 24) // 2
+        card_w = card_width
+        row_y = start_y
         for index, profile in enumerate(profiles):
             col = index % 2
             row = index // 2
-            x = 70 + col * (card_w + 24)
-            y = start_y + row * 360
+            if col == 0 and row > 0:
+                row_y += card_rows[row - 1] + card_gap
+            x = 70 + col * (card_w + card_gap)
+            y = row_y
+            card_h = card_rows[row]
             accent = PLATFORM_COLORS.get(profile.platform, ("#55e6ff", "#a855f7"))[0]
-            draw.rounded_rectangle((x, y, x + card_w, y + 320), radius=20, fill="#111b42", outline=accent, width=2)
-            draw.text((x + 25, y + 24), platform_label(profile.platform), font=platform_font, fill=accent)
-            draw.text((x + 25, y + 65), profile.handle, font=handle_font, fill="#ffffff")
+            draw.rounded_rectangle(
+                (x, y, x + card_w, y + card_h),
+                radius=18,
+                fill="#111b42",
+                outline=accent,
+                width=2,
+            )
+            draw.text(
+                (x + 25, y + 20),
+                platform_label(profile.platform),
+                font=platform_font,
+                fill=accent,
+            )
+            draw.text(
+                (x + 25, y + 56),
+                profile.handle,
+                font=handle_font,
+                fill="#ffffff",
+            )
             primary_label, primary_value = _primary_metric(profile)
-            draw.text((x + 25, y + 110), primary_value, font=rating_font, fill=accent)
-            draw.text((x + 270, y + 132), primary_label, font=body_font, fill="#8faac3")
-            draw.text((x + 370, y + 132), profile.rank_text or profile.color or "未评级", font=body_font, fill="#c8d8e9")
+            draw.text(
+                (x + 25, y + 100),
+                primary_value,
+                font=rating_font,
+                fill=accent,
+            )
+            draw.text(
+                (x + (310 if single else 270), y + 120),
+                primary_label,
+                font=body_font,
+                fill="#8faac3",
+            )
+            draw.text(
+                (x + (420 if single else 370), y + 120),
+                profile.rank_text or profile.color or "未评级",
+                font=body_font,
+                fill="#c8d8e9",
+            )
             details = [
                 f"最高 Rating：{_format_number(profile.max_rating)}",
                 f"平台排名：{_format_number(profile.rating_rank)}",
                 f"参赛次数：{_format_number(profile.contest_count)}",
                 f"本次变化：{_format_delta(weekly_changes.get(profile.platform, profile.recent_delta))}",
             ]
+            if profile.solved_count is not None:
+                details.append(f"通过题数：{_format_number(profile.solved_count)}")
+            columns = 4 if single else 2
+            detail_width = (card_w - 50) / columns
+            detail_top = y + 164
             for line_index, value in enumerate(details):
-                draw.text((x + 25, y + 180 + line_index * 24), value, font=body_font, fill="#a8c8e5")
-            if profile.recent_contests and profile.recent_contests[0].get("name"):
+                detail_col = line_index % columns
+                detail_row = line_index // columns
+                draw.text(
+                    (
+                        int(x + 25 + detail_col * detail_width),
+                        int(detail_top + detail_row * 27),
+                    ),
+                    value,
+                    font=body_font,
+                    fill="#a8d8e5",
+                )
+            detail_rows = (len(details) + columns - 1) // columns
+            meta_y = int(detail_top + detail_rows * 27 + 7)
+            if profile.recent_contests and isinstance(profile.recent_contests[0], dict) and profile.recent_contests[0].get("name"):
                 recent = profile.recent_contests[0]
                 draw.text(
-                    (x + 25, y + 278),
+                    (x + 25, meta_y),
                     f"最近：{recent.get('name')} {_format_delta(recent.get('delta'))}",
                     font=body_font,
                     fill="#b7d5eb",
                 )
-        draw.text((70, image.height - 42), f"生成时间：{_updated_text()} · 仅展示平台公开资料", font=body_font, fill="#718ba8")
+                meta_y += 23
+            extra_values = [
+                profile.school,
+                profile.organization,
+                profile.country,
+            ]
+            if profile.platform == "luogu":
+                ccf_level = str(profile.extra.get("ccf_level") or "").strip()
+                xcpc_level = str(profile.extra.get("xcpc_level") or "").strip()
+                if ccf_level:
+                    extra_values.append(f"CCF {ccf_level}")
+                if xcpc_level:
+                    extra_values.append(f"XCPC {xcpc_level}")
+            extras = " · ".join(value for value in extra_values if value)
+            if extras:
+                draw.text(
+                    (x + 25, meta_y),
+                    extras,
+                    font=body_font,
+                    fill="#8faac3",
+                )
+        draw.text(
+            (70, image.height - 42),
+            f"生成时间：{_updated_text()} · 仅展示平台公开资料",
+            font=body_font,
+            fill="#718ba8",
+        )
         try:
             image.save(image_path, format="PNG")
         except OSError:

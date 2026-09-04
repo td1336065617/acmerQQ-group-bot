@@ -85,6 +85,7 @@ Chromium/Chrome、Firefox、`wkhtmltoimage`，没有浏览器时使用 Pillow；
 自动回退为分片文字发送。
 
 个人战绩卡和群排行卡使用独立的二次元科幻风格 HTML 模板，优先转 PNG；
+个人战绩卡会根据已绑定平台数量自适应布局，单个平台不会预留多余空白；
 不依赖远程图片或 Google Chrome，卡片失败时回退为文字。卡片不显示 QQ 号、
 openid 或验证码。
 
