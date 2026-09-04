@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ if _PLUGIN_ROOT not in sys.path:
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.platform import MessageType
 from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
@@ -31,6 +32,7 @@ from .src.models import (
     PLATFORM_LABELS,
     GroupConfig,
 )
+from .src.output_renderer import AdaptiveOutputRenderer, text_chunks
 from .src.scheduler import PushScheduler
 from .src.utils import normalize_command, validate_hhmm
 
@@ -111,6 +113,9 @@ class AcmerGroupBot(Star):
         super().__init__(context, config)
         self.config = config if isinstance(config, dict) else {}
         self.fetcher = ContestFetcher()
+        self.output_renderer = AdaptiveOutputRenderer(
+            cache_dir=Path(__file__).resolve().parent / "data" / "output_cache"
+        )
         self.scheduler = PushScheduler(self)
         # 本次运行期间已收到过消息的群（用于自动重新激活日志）
         self._seen_group_this_run: set = set()
@@ -294,9 +299,51 @@ class AcmerGroupBot(Star):
             session_id=str(group_id),
         )
         try:
-            ok = await self.context.send_message(
-                session, MessageChain([Plain(text)])
-            )
+            value = str(text or "").strip()
+            chain = MessageChain([Plain(value)])
+            rendered_as_image = False
+            if self.output_renderer.needs_image(value):
+                # @everyone 必须保留为独立文本组件，避免被绘制进图片后失去
+                # 平台识别机会；其余长内容作为图片发送。
+                mention_prefix = "<@everyone>\n"
+                render_value = value
+                components = []
+                if value.startswith(mention_prefix):
+                    components.append(Plain(mention_prefix))
+                    render_value = value[len(mention_prefix) :].strip()
+                try:
+                    image_path = await asyncio.to_thread(
+                        self.output_renderer.render, render_value
+                    )
+                    if image_path is not None and image_path.is_file():
+                        components.append(Image.fromFileSystem(str(image_path)))
+                        chain = MessageChain(components)
+                        rendered_as_image = True
+                except Exception as exc:  # noqa: BLE001 - 长推送必须有文字兜底
+                    logger.warning("群 %s 长通知转图片失败：%s", group_id, exc)
+
+            if (
+                self.output_renderer.needs_image(value)
+                and not rendered_as_image
+            ):
+                # 转图不可用时按安全长度拆分，避免把超长原文直接交给 QQ。
+                ok = await self._send_text_chunks(session, value)
+            else:
+                try:
+                    ok = await self.context.send_message(session, chain)
+                except Exception as exc:
+                    if not rendered_as_image:
+                        raise
+                    logger.warning(
+                        "群 %s 图片通知发送异常，回退为文字：%s", group_id, exc
+                    )
+                    ok = False
+
+            if not ok and rendered_as_image:
+                # 个别适配器可能不接受本地图片组件；回退为原始文字，
+                # 保证主动推送仍然有可见结果。
+                logger.warning("群 %s 图片通知发送失败，回退为文字", group_id)
+                ok = await self._send_text_chunks(session, value)
             if not ok:
                 logger.warning("发送到群 %s 失败：未找到匹配平台", group_id)
                 return False
@@ -304,6 +351,15 @@ class AcmerGroupBot(Star):
         except Exception as exc:
             logger.error("发送到群 %s 失败: %s", group_id, exc)
             return False
+
+    async def _send_text_chunks(self, session, text: str) -> bool:
+        """按安全长度发送文字分片，返回所有分片是否发送成功。"""
+        for piece in text_chunks(text):
+            if not await self.context.send_message(
+                session, MessageChain([Plain(piece)])
+            ):
+                return False
+        return True
 
     async def build_morning_text(self, group: GroupConfig) -> Optional[str]:
         settings = await self.get_settings()
@@ -365,20 +421,60 @@ class AcmerGroupBot(Star):
     # ------------------------------------------------------------------
     # 指令：比赛查询
     # ------------------------------------------------------------------
+    async def _adaptive_results(
+        self, event: AstrMessageEvent, text: str
+    ):
+        """短结果发文字，长结果转 PNG；渲染失败时拆分为多条文字。"""
+        value = str(text or "").strip()
+        if not value:
+            return
+        if not self.output_renderer.needs_image(value):
+            yield event.plain_result(value)
+            return
+
+        # HTML/浏览器调用是阻塞操作，放到线程中，避免卡住 AstrBot 事件循环。
+        try:
+            image_path = await asyncio.to_thread(self.output_renderer.render, value)
+        except Exception as exc:  # noqa: BLE001 - 转图失败时必须保证文字兜底
+            logger.error("acmerQQ群机器人 长消息转图片异常：%s", exc, exc_info=True)
+            image_path = None
+        if image_path is not None and image_path.is_file():
+            logger.info(
+                "acmerQQ群机器人 长消息已转图片发送（%d 字符，%d 行）",
+                len(value),
+                len(value.splitlines()),
+            )
+            yield event.image_result(str(image_path))
+            return
+
+        logger.warning(
+            "acmerQQ群机器人 长消息转图片失败，改用纯文本分片（%d 字符）",
+            len(value),
+        )
+        for piece in text_chunks(value):
+            yield event.plain_result(piece)
+
     async def _reply_platform(
         self, event: AstrMessageEvent, platform: str, mode: str = "all"
     ):
         label = PLATFORM_LABELS.get(platform, platform)
         contests, err = await self.fetcher.fetch_platform(platform)
         if err:
-            yield event.plain_result(err)
+            async for result in self._adaptive_results(event, err):
+                yield result
             return
         upcoming = [c for c in contests if c.is_upcoming()]
         if not upcoming:
-            yield event.plain_result(f"{label} 近期暂无比赛")
+            async for result in self._adaptive_results(
+                event, f"{label} 近期暂无比赛"
+            ):
+                yield result
             return
         if mode == "nearest":
-            yield event.plain_result(upcoming[0].format_detail())
+            async for result in self._adaptive_results(
+                event, upcoming[0].format_detail()
+            ):
+                yield result
             return
         lines = [f"📋 {label} 未开始比赛（共 {len(upcoming)} 场）"]
         for idx, contest in enumerate(upcoming[:MAX_CONTEST_LIST], start=1):
@@ -392,28 +488,34 @@ class AcmerGroupBot(Star):
             )
         if len(upcoming) > MAX_CONTEST_LIST:
             lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
-        yield event.plain_result("\n".join(lines))
+        async for result in self._adaptive_results(event, "\n".join(lines)):
+            yield result
 
     async def _reply_offline(self, event: AstrMessageEvent):
         """查询 XCPC Link 线下赛程，并明确展示数据源。"""
         if not hasattr(self.fetcher, "_fetch_offline"):
-            yield event.plain_result(
-                "⚠️ 线下赛功能文件未完整更新，请在 AstrBot 中完整重装本插件后重试"
-            )
+            async for result in self._adaptive_results(
+                event,
+                "⚠️ 线下赛功能文件未完整更新，请在 AstrBot 中完整重装本插件后重试",
+            ):
+                yield result
             return
         contests, err = await self.fetcher.fetch_platform(OFFLINE_PLATFORM)
         source_text = self.fetcher.source_text(OFFLINE_PLATFORM)
         if err:
-            yield event.plain_result(
-                f"{err}\n📚 数据源：XCPC Link（{source_text}）"
-            )
+            async for result in self._adaptive_results(
+                event, f"{err}\n📚 数据源：XCPC Link（{source_text}）"
+            ):
+                yield result
             return
         upcoming = [contest for contest in contests if contest.is_upcoming()]
         if not upcoming:
-            yield event.plain_result(
+            async for result in self._adaptive_results(
+                event,
                 "🏟 线下赛近期暂无已收录赛事\n"
-                f"📚 数据源：XCPC Link（{source_text}）"
-            )
+                f"📚 数据源：XCPC Link（{source_text}）",
+            ):
+                yield result
             return
 
         lines = [
@@ -431,11 +533,13 @@ class AcmerGroupBot(Star):
                 lines.append(f"   官方通知：{contest.official_url}")
         if len(upcoming) > MAX_CONTEST_LIST:
             lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
-        yield event.plain_result("\n".join(lines))
+        async for result in self._adaptive_results(event, "\n".join(lines)):
+            yield result
 
     async def _update(self, event: AstrMessageEvent):
         if not await self._is_admin(event):
-            yield event.plain_result("此指令仅限管理员")
+            async for result in self._adaptive_results(event, "此指令仅限管理员"):
+                yield result
             return
         parts = ["🔄 比赛数据刷新完成"]
         platforms = list(QUERY_PLATFORMS)
@@ -451,7 +555,8 @@ class AcmerGroupBot(Star):
                 parts.append(
                     f"{label}：{len([c for c in contests if c.is_upcoming()])} 场"
                 )
-        yield event.plain_result("\n".join(parts))
+        async for result in self._adaptive_results(event, "\n".join(parts)):
+            yield result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
     @filter.event_message_type(
@@ -467,7 +572,8 @@ class AcmerGroupBot(Star):
         if not message_str:
             return
         if message_str in MENU_COMMANDS:
-            yield event.plain_result(MENU_TEXT)
+            async for result in self._adaptive_results(event, MENU_TEXT):
+                yield result
             return
         if message_str == ACTIVATE_COMMAND:
             async for result in self._activate_group(event):
