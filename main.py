@@ -24,8 +24,16 @@ from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
+from src.announcement_fetcher import AnnouncementFetcher
 from src.contest_fetcher import ContestFetcher
-from src.models import CN_TZ, DEFAULT_PLATFORMS, PLATFORM_LABELS, GroupConfig
+from src.models import (
+    ANNOUNCEMENT_LABELS,
+    CN_TZ,
+    DEFAULT_ANNOUNCEMENT_SOURCES,
+    DEFAULT_PLATFORMS,
+    PLATFORM_LABELS,
+    GroupConfig,
+)
 from src.scheduler import PushScheduler
 from src.utils import validate_hhmm
 
@@ -35,6 +43,8 @@ DEFAULT_MORNING_TIME = "08:00"
 AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 比赛列表最多展示的条数（防止消息过长）
 MAX_CONTEST_LIST = 30
+# 公告列表最多展示的条数（公告页单页 20 条）
+MAX_ANNOUNCEMENT_LIST = 10
 
 MENU_TEXT = (
     "🏆 acmer群管理插件菜单\n"
@@ -49,13 +59,16 @@ MENU_TEXT = (
     "• 最近atc比赛 / 最近AtCoder比赛 ─ AtCoder 最近一场比赛\n"
     "• lg比赛 / 洛谷比赛 ─ 洛谷全部未开始比赛\n"
     "• 最近lg比赛 / 最近洛谷比赛 ─ 洛谷最近一场比赛\n"
+    "• icpc公告 / 北京总部公告 ─ ICPC北京总部最新公告列表\n"
+    "• 最近icpc公告 / 最近北京总部公告 ─ ICPC北京总部最新一条公告\n"
     "• acm菜单 / acmer群管理插件菜单 ─ 显示本菜单\n"
     "━━━━━━━━━━━━\n"
     "🔑 仅管理员\n"
-    "• update / 刷新比赛 ─ 强制刷新全部比赛数据\n"
+    "• update / 刷新比赛 ─ 强制刷新全部比赛与公告数据\n"
     "━━━━━━━━━━━━\n"
     "提示：指令为全匹配，发送完整指令才会触发；也可带 / 前缀（如 /nk比赛）\n"
-    "⚙️ 推送配置（早报/提醒/@全体）：WebUI acmerQQ群机器人 页\n"
+    "📢 ICPC北京总部有新公告时会自动转发到本群（可在 WebUI 关闭）\n"
+    "⚙️ 推送配置（早报/提醒/公告/@全体）：WebUI acmerQQ群机器人 页\n"
     "🔗 开源：https://github.com/td1336065617/acmerQQ-group-bot"
 )
 
@@ -79,12 +92,23 @@ QUERY_COMMANDS = {
     "最近洛谷比赛": ("luogu", "nearest"),
 }
 
+# 公告查询指令表（同样全匹配）
+ANNOUNCEMENT_COMMANDS = {
+    "icpc公告": ("icpc_pku", "all"),
+    "ICPC公告": ("icpc_pku", "all"),
+    "北京总部公告": ("icpc_pku", "all"),
+    "最近icpc公告": ("icpc_pku", "nearest"),
+    "最近ICPC公告": ("icpc_pku", "nearest"),
+    "最近北京总部公告": ("icpc_pku", "nearest"),
+}
+
 
 class AcmerGroupBot(Star):
     def __init__(self, context: Context, config: Optional[dict] = None) -> None:
         super().__init__(context, config)
         self.config = config if isinstance(config, dict) else {}
         self.fetcher = ContestFetcher()
+        self.announcement_fetcher = AnnouncementFetcher()
         self.scheduler = PushScheduler(self)
         # 本次运行期间已收到过消息的群（用于自动重新激活日志）
         self._seen_group_this_run: set = set()
@@ -112,6 +136,7 @@ class AcmerGroupBot(Star):
 
     async def initialize(self) -> None:
         await self.fetcher.initialize()
+        await self.announcement_fetcher.initialize()
         await self.scheduler.start()
         logger.info(
             "acmerQQ群机器人 已启动；若消息指令无响应，请检查 AstrBot "
@@ -121,6 +146,7 @@ class AcmerGroupBot(Star):
     async def terminate(self) -> None:
         await self.scheduler.stop()
         await self.fetcher.close()
+        await self.announcement_fetcher.close()
         logger.info("acmerQQ群机器人 已停止")
 
     # ------------------------------------------------------------------
@@ -148,6 +174,7 @@ class AcmerGroupBot(Star):
             "push_platforms": platforms or list(DEFAULT_PLATFORMS),
             "reminder_enabled": bool(raw.get("reminder_enabled", True)),
             "at_all_enabled": bool(raw.get("at_all_enabled", False)),
+            "announcement_enabled": bool(raw.get("announcement_enabled", True)),
         }
 
     async def get_groups(self) -> List[GroupConfig]:
@@ -182,6 +209,7 @@ class AcmerGroupBot(Star):
                 "morning_push_time": DEFAULT_MORNING_TIME,
                 "push_platforms": list(DEFAULT_PLATFORMS),
                 "reminder_enabled": True,
+                "announcement_enabled": True,
             }
             changed = True
         if changed:
@@ -368,11 +396,34 @@ class AcmerGroupBot(Star):
             lines.append(f"…共 {len(upcoming)} 场，仅显示前 {MAX_CONTEST_LIST} 场")
         yield event.plain_result("\n".join(lines))
 
+    async def _reply_announcements(
+        self, event: AstrMessageEvent, source: str, mode: str = "all"
+    ):
+        label = ANNOUNCEMENT_LABELS.get(source, source)
+        announcements, err = await self.announcement_fetcher.fetch_source(source)
+        if err:
+            yield event.plain_result(err)
+            return
+        if not announcements:
+            yield event.plain_result(f"{label} 暂无公告")
+            return
+        if mode == "nearest":
+            yield event.plain_result(
+                announcements[0].format_detail(f"📢 {label} 最新公告")
+            )
+            return
+        shown = announcements[:MAX_ANNOUNCEMENT_LIST]
+        lines = [f"📢 {label} 最新公告（{len(shown)} 条）"]
+        for idx, item in enumerate(shown, start=1):
+            lines.append(f"{idx}. {item.format_line()}\n   {item.url}")
+        lines.append("🔗 全部公告：https://icpc.pku.edu.cn/tzgg/index.htm")
+        yield event.plain_result("\n".join(lines))
+
     async def _update(self, event: AstrMessageEvent):
         if not await self._is_admin(event):
             yield event.plain_result("此指令仅限管理员")
             return
-        parts = ["🔄 比赛数据刷新完成"]
+        parts = ["🔄 比赛与公告数据刷新完成"]
         for platform in DEFAULT_PLATFORMS:
             contests, err = await self.fetcher.fetch_platform(platform, force=True)
             label = PLATFORM_LABELS.get(platform, platform)
@@ -382,6 +433,15 @@ class AcmerGroupBot(Star):
                 parts.append(
                     f"{label}：{len([c for c in contests if c.is_upcoming()])} 场"
                 )
+        for source in DEFAULT_ANNOUNCEMENT_SOURCES:
+            announcements, err = await self.announcement_fetcher.fetch_source(
+                source, force=True
+            )
+            label = ANNOUNCEMENT_LABELS.get(source, source)
+            if err:
+                parts.append(f"{label}公告：{err}")
+            else:
+                parts.append(f"{label}公告：{len(announcements)} 条")
         yield event.plain_result("\n".join(parts))
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
@@ -408,6 +468,12 @@ class AcmerGroupBot(Star):
         if query is not None:
             platform, mode = query
             async for result in self._reply_platform(event, platform, mode):
+                yield result
+            return
+        announcement_query = ANNOUNCEMENT_COMMANDS.get(message_str)
+        if announcement_query is not None:
+            source, mode = announcement_query
+            async for result in self._reply_announcements(event, source, mode):
                 yield result
             return
         if message_str in ("update", "刷新比赛"):
@@ -530,6 +596,12 @@ class AcmerGroupBot(Star):
                         "at_all_enabled": bool(
                             settings.get(
                                 "at_all_enabled", current["at_all_enabled"]
+                            )
+                        ),
+                        "announcement_enabled": bool(
+                            settings.get(
+                                "announcement_enabled",
+                                current["announcement_enabled"],
                             )
                         ),
                     },

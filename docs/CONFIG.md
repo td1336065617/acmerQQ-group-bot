@@ -11,9 +11,12 @@
 | 键 | 内容 |
 | :--- | :--- |
 | `admin_users` | 管理员 openid 列表 |
-| `settings` | 全局推送设置（早报时间/平台/提醒/@全体） |
+| `settings` | 全局推送设置（早报时间/平台/提醒/公告/@全体） |
 | `groups` | 各群配置（自动注册） |
 | `reminded` | 已提醒的比赛去重记录 |
+| `announcement_sent` | 已转发公告去重记录（`群ID:来源:公告ID`） |
+| `announcement_baselined` | 已建立公告基线的 `群ID:来源`（防止首次刷屏） |
+| `announcement_last_check` | 上次公告轮询时间戳 |
 | `morning_<群ID>_<日期>` | 当日早报是否已发送 |
 | `at_all_blocked_until_<群ID>` | @全体失败后的冷却截止时间 |
 
@@ -25,11 +28,13 @@
 | 每日早报时间 `settings.morning_push_time` | `08:00` | HH:MM（24 小时制） |
 | 推送平台 `settings.push_platforms` | 牛客/CF/AtCoder/洛谷 | 早报与提醒默认平台 |
 | 赛前提醒 `settings.reminder_enabled` | 开 | 开始前 15 分钟提醒 |
+| 公告转发 `settings.announcement_enabled` | 开 | 转发 ICPC 北京总部新公告 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知带 `<@everyone>`，失败自动降级 |
 | 群启用 `groups[].enabled` | 开 | 是否向该群推送 |
 | 群早报时间 `groups[].morning_push_time` | `08:00` | 覆盖全局时间 |
 | 群推送平台 `groups[].push_platforms` | 全部 | 早报取“全局 ∩ 群”平台 |
 | 群赛前提醒 `groups[].reminder_enabled` | 开 | 该群是否发送提醒 |
+| 群公告转发 `groups[].announcement_enabled` | 开 | 该群是否接收公告转发 |
 
 ## 3. 管理员权限
 
@@ -49,6 +54,20 @@
 ### 赛前提醒
 - 比赛开始前 15 分钟窗口内发送提醒，按“平台+比赛ID”全局去重。
 - 定时任务每 30 秒检查一次，配置修改后最多 30 秒内生效。
+
+### ICPC 北京总部公告转发
+- 数据源：<https://icpc.pku.edu.cn/tzgg/index.htm>（静态页第一页，20 条）。
+- 每 **10 分钟**轮询一次（`announcement_last_check` 记录上次检查时间），
+  抓取失败时同样等下一个间隔再重试，不会连续请求源站。
+- **基线机制**：插件首次运行、或某个群首次被注册时，会把公告页当前的全部
+  历史公告标记为“已知”（写入 `announcement_baselined`），只有之后**新增**
+  的公告才会被转发，避免一上来就刷 20 条。
+- **去重**：记录键为 `群ID:来源:公告ID`，公告 ID 取自详情页文件名，
+  因此同一条公告每个群只会收到一次；某个群发送失败时**只重试该群**，
+  已成功的群不会重复收到。
+- 一次发现多条新公告时按**从旧到新**的顺序转发。
+- 关闭方式：WebUI 全局“转发 ICPC北京总部公告”开关，或在群配置里单独关闭
+  某个群的“公告转发”。
 
 ### @全体成员
 - 开启后，早报与提醒会先尝试带 `<@everyone>` 发送。
@@ -90,8 +109,10 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 | 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历，抓当前月+下月 |
 | AtCoder | `atcoder.jp/contests/` | 官网 Upcoming Contests 赛程表 |
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需登录 |
+| ICPC 北京总部公告 | `icpc.pku.edu.cn/tzgg/index.htm` | 静态页 `ul.item-list`，UTF-8 解码 |
 
-- 内存缓存 5 分钟；`/update`（管理员）可强制刷新。
+- 比赛数据内存缓存 5 分钟，公告内存缓存 10 分钟；`/update`（管理员）可强制
+  刷新全部比赛与公告。
 - 网络超时 10 秒，最多重试 3 次；失败返回友好提示并记录日志。
 
 ## 6. 常见问题
@@ -114,6 +135,15 @@ QQ 官方适配器的主动推送限制——需要该群在机器人**本次运
 
 **@全体成员没生效**：QQ 官方机器人在群聊的 @全体能力受限，失败后插件已
 自动降级为普通通知，并在 6 小时内不再尝试。
+
+**装好后没收到任何公告**：这是**预期行为**。基线机制只转发插件启用之后
+新发布的公告，历史公告不会补发；想看历史公告请发送 `icpc公告`。
+
+**公告标题乱码**：源站响应头不带 charset，插件已显式按 UTF-8 解码；若仍
+乱码说明源站编码变更，请提 issue。
+
+**公告发重复了 / 少发了**：检查日志中的“公告基线已建立”“已向群 X 转发”
+记录；去重数据在 KV 的 `announcement_sent` 与 `announcement_baselined` 里。
 
 **配置改了多久生效**：保存立即生效；定时任务最多 30 秒内按新配置执行。
 

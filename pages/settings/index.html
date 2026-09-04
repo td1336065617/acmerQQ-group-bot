@@ -67,6 +67,9 @@
     <label class="check"><input type="checkbox" id="reminderInput"> 赛前 15 分钟提醒</label>
   </div>
   <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="announcementInput"> 转发 ICPC北京总部公告（icpc.pku.edu.cn/tzgg，每 10 分钟检查一次，仅转发新公告）</label>
+  </div>
+  <div class="row" style="margin-bottom:10px">
     <label class="check"><input type="checkbox" id="atAllInput"> 通知尝试 @全体成员（注意：QQ 官方群聊不支持，即使机器人是群管理员也不会生效，建议关闭）</label>
   </div>
   <div class="row">
@@ -77,10 +80,11 @@
 <div class="card">
   <h2>群推送配置</h2>
   <table>
-    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th><th>公告转发</th><th>操作</th></tr></thead>
     <tbody id="groupBody"></tbody>
   </table>
   <div class="muted" style="margin-top:8px">机器人收到过消息的群会自动出现在这里；修改后点“保存群配置”。
+    “公告转发”控制本群是否接收 ICPC北京总部新公告（需同时开启上方全局开关）。
     “测试推送”会立即向该群发送今日比赛早报（发送前请先在群里发一条消息，QQ 主动推送需要会话缓存）。</div>
   <div class="row" style="margin-top:10px">
     <button id="btnSaveGroups">保存群配置</button>
@@ -94,7 +98,7 @@
   const adminBody = document.getElementById('adminBody');
   const groupBody = document.getElementById('groupBody');
   let adminUsers = [];
-  let settings = { morning_push_time: '08:00', push_platforms: [], reminder_enabled: true };
+  let settings = { morning_push_time: '08:00', push_platforms: [], reminder_enabled: true, at_all_enabled: false, announcement_enabled: true };
   let groups = [];
 
   function show(text, isError) {
@@ -139,6 +143,7 @@
     });
     document.getElementById('reminderInput').checked = !!settings.reminder_enabled;
     document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
+    document.getElementById('announcementInput').checked = settings.announcement_enabled !== false;
   }
 
   function renderPlatformId(id) {
@@ -149,7 +154,7 @@
   function renderGroups() {
     groupBody.innerHTML = '';
     if (!groups.length) {
-      groupBody.innerHTML = '<tr><td colspan="4" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
+      groupBody.innerHTML = '<tr><td colspan="5" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
       return;
     }
     groups.sort((a, b) => String(a.group_id).localeCompare(String(b.group_id)));
@@ -170,6 +175,13 @@
       timeInput.dataset.gid = g.group_id;
       timeInput.className = 'group-time';
       td3.appendChild(timeInput);
+      const tdAnn = document.createElement('td');
+      const annCb = document.createElement('input');
+      annCb.type = 'checkbox';
+      annCb.checked = g.announcement_enabled !== false;
+      annCb.dataset.gid = g.group_id;
+      annCb.className = 'group-announcement';
+      tdAnn.appendChild(annCb);
       const td4 = document.createElement('td');
       const testBtn = document.createElement('button');
       testBtn.className = 'secondary';
@@ -183,7 +195,7 @@
         }
       };
       td4.appendChild(testBtn);
-      tr.append(td1, td2, td3, td4);
+      tr.append(td1, td2, td3, tdAnn, td4);
       groupBody.appendChild(tr);
     }
   }
@@ -233,7 +245,8 @@
       morning_push_time: morning,
       push_platforms: platforms,
       reminder_enabled: document.getElementById('reminderInput').checked,
-      at_all_enabled: document.getElementById('atAllInput').checked
+      at_all_enabled: document.getElementById('atAllInput').checked,
+      announcement_enabled: document.getElementById('announcementInput').checked
     };
     try {
       await A.apiPost('config', { settings });
@@ -247,12 +260,14 @@
     const updated = groups.map(g => {
       const cb = document.querySelector('.group-enabled[data-gid="' + g.group_id + '"]');
       const timeInput = document.querySelector('.group-time[data-gid="' + g.group_id + '"]');
+      const annCb = document.querySelector('.group-announcement[data-gid="' + g.group_id + '"]');
       return {
         group_id: g.group_id,
         enabled: cb ? cb.checked : !!g.enabled,
         morning_push_time: timeInput ? timeInput.value : (g.morning_push_time || '08:00'),
         push_platforms: g.push_platforms || [],
-        reminder_enabled: !!g.reminder_enabled
+        reminder_enabled: !!g.reminder_enabled,
+        announcement_enabled: annCb ? annCb.checked : g.announcement_enabled !== false
       };
     });
     try {

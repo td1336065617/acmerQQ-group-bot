@@ -7,7 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.announcement_fetcher import AnnouncementFetcher
 from src.contest_fetcher import ContestFetcher
+from src.models import DEFAULT_ANNOUNCEMENT_SOURCES
 
 
 async def _main():
@@ -24,6 +26,19 @@ async def _main():
         if upcoming:
             first = upcoming[0]
             print("   first:", first.name, first.start_cn().strftime("%Y-%m-%d %H:%M"))
+
+    announcer = AnnouncementFetcher()
+    await announcer.initialize()
+    for source in DEFAULT_ANNOUNCEMENT_SOURCES:
+        announcements, err = await announcer.fetch_source(source, force=True)
+        if err:
+            print(f"[{source}] ERROR: {err}")
+            continue
+        print(f"[{source}] total={len(announcements)}")
+        for item in announcements[:3]:
+            print("   ", item.format_line())
+            print("    ", item.url)
+    await announcer.close()
 
 
 if __name__ == "__main__":

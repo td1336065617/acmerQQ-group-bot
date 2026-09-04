@@ -1,11 +1,12 @@
 name: acmer_qq_group_bot
 display_name: acmerQQ群机器人
-short_desc: ACM 竞赛信息查询与定时推送
+short_desc: ACM 竞赛信息查询、ICPC 公告转发与定时推送
 desc: |
   提供牛客、Codeforces、AtCoder、洛谷比赛查询与定时推送；
+  自动转发 ICPC 北京总部公告；
   支持每日早报、赛前 15 分钟提醒与 WebUI 配置。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
-version: 1.1.17
+version: 1.2.0
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot/tree/master
 astrbot_version: ">=4.13.0,<5"

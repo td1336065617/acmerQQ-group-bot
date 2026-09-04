@@ -1,7 +1,7 @@
 """数据模型定义。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -16,6 +16,12 @@ PLATFORM_LABELS = {
     "luogu": "洛谷",
 }
 DEFAULT_PLATFORMS = ["nowcoder", "codeforces", "atcoder", "luogu"]
+
+# 公告来源（目前只有 ICPC 北京总部；预留多来源结构便于以后扩展）
+ANNOUNCEMENT_LABELS = {
+    "icpc_pku": "ICPC北京总部",
+}
+DEFAULT_ANNOUNCEMENT_SOURCES = ["icpc_pku"]
 
 
 class Contest(BaseModel):
@@ -50,6 +56,34 @@ class Contest(BaseModel):
         return "\n".join(lines)
 
 
+class Announcement(BaseModel):
+    """统一后的公告模型（published 为公告页给出的发布日期，无时区）。"""
+
+    source: str = "icpc_pku"
+    title: str
+    url: str = ""
+    published: Optional[date] = None
+    announcement_id: str = ""
+
+    def source_label(self) -> str:
+        return ANNOUNCEMENT_LABELS.get(self.source, self.source)
+
+    def published_text(self) -> str:
+        return f"{self.published:%Y-%m-%d}" if self.published else "日期未知"
+
+    def format_line(self) -> str:
+        return f"[{self.published_text()}] {self.title}"
+
+    def format_detail(self, heading: Optional[str] = None) -> str:
+        lines = [heading or f"📢 {self.source_label()} 公告"]
+        lines.append(f"🏷 {self.title}")
+        if self.published:
+            lines.append(f"🗓 {self.published:%Y-%m-%d}")
+        if self.url:
+            lines.append(f"🔗 {self.url}")
+        return "\n".join(lines)
+
+
 class GroupConfig(BaseModel):
     """每个群的推送配置。"""
 
@@ -60,3 +94,4 @@ class GroupConfig(BaseModel):
     morning_push_time: str = "08:00"
     push_platforms: List[str] = Field(default_factory=lambda: list(DEFAULT_PLATFORMS))
     reminder_enabled: bool = True
+    announcement_enabled: bool = True

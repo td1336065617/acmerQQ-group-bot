@@ -25,16 +25,21 @@ async def fetch_text_with_retry(
     *,
     retries: int = 3,
     timeout: float = 10.0,
+    encoding: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
-    """带超时与重试的 GET 请求，返回响应文本。"""
+    """带超时与重试的 GET 请求，返回响应文本。
+
+    ``encoding`` 用于响应头没有 charset 的站点（如 icpc.pku.edu.cn 只返回
+    ``Content-Type: text/html``），避免 aiohttp 自动探测把 UTF-8 中文识别错。
+    """
     last_error: Optional[Exception] = None
     attempts = max(1, retries)
     for attempt in range(attempts):
         try:
             async with session.get(url, timeout=timeout, **kwargs) as resp:
                 resp.raise_for_status()
-                return await resp.text()
+                return await resp.text(encoding=encoding)
         except Exception as exc:  # noqa: BLE001 - 统一重试，由上层分类处理
             last_error = exc
             if attempt < attempts - 1:
