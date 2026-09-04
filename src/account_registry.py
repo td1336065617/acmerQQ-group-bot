@@ -5,7 +5,7 @@ import hashlib
 import re
 import secrets
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .account_models import AccountProfile
 
@@ -99,14 +99,14 @@ class AccountRegistry:
             await self.set_group_member(str(group_id), user_key, True)
         await self.clear_pending(user_key, platform)
 
-    async def set_user_display_name(self, user_id: str, qq_name: str) -> None:
+    async def set_user_display_name(self, user_id: str, qq_name: str) -> bool:
         name = str(qq_name or "").strip()
         if not name:
-            return
+            return False
         accounts = await self.get_all_accounts()
         user_accounts = accounts.get(str(user_id))
         if not isinstance(user_accounts, dict):
-            return
+            return False
         changed = False
         for item in user_accounts.values():
             if isinstance(item, dict) and item.get("qq_name") != name:
@@ -114,6 +114,7 @@ class AccountRegistry:
                 changed = True
         if changed:
             await self._put(ACCOUNTS_KEY, accounts)
+        return changed
 
     async def remove_binding(self, user_id: str, platform: str) -> bool:
         accounts = await self.get_all_accounts()
@@ -233,35 +234,51 @@ class AccountRegistry:
     async def record_rating(
         self, user_id: str, platform: str, rating: Optional[int]
     ) -> None:
-        if rating is None:
+        await self.record_ratings([(user_id, platform, rating)])
+
+    async def record_ratings(
+        self,
+        entries: List[Tuple[str, str, Optional[int]]],
+    ) -> None:
+        """批量写入 Rating 快照，避免大群排行逐成员读写 KV。"""
+        normalized: Dict[Tuple[str, str], int] = {}
+        for user_id, platform, rating in entries:
+            if rating is None:
+                continue
+            try:
+                normalized[(str(user_id), str(platform))] = int(rating)
+            except (TypeError, ValueError):
+                continue
+        if not normalized:
             return
-        try:
-            value = int(rating)
-        except (TypeError, ValueError):
-            return
+
         data = await self._get(RATING_SNAPSHOTS_KEY, {})
         if not isinstance(data, dict):
             data = {}
-        user = data.setdefault(str(user_id), {})
-        if not isinstance(user, dict):
-            user = {}
-            data[str(user_id)] = user
-        history = user.setdefault(platform, [])
-        if not isinstance(history, list):
-            history = []
-            user[platform] = history
         now = time.time()
-        if history and isinstance(history[-1], dict):
-            last_value = history[-1].get("rating")
-            try:
-                last_time = float(history[-1].get("timestamp", 0) or 0)
-            except (TypeError, ValueError):
-                last_time = 0.0
-            if last_value == value and now - last_time < 15 * 60:
-                return
-        history.append({"timestamp": now, "rating": value})
-        user[platform] = history[-90:]
-        await self._put(RATING_SNAPSHOTS_KEY, data)
+        changed = False
+        for (user_id, platform), value in normalized.items():
+            user = data.setdefault(user_id, {})
+            if not isinstance(user, dict):
+                user = {}
+                data[user_id] = user
+            history = user.setdefault(platform, [])
+            if not isinstance(history, list):
+                history = []
+                user[platform] = history
+            if history and isinstance(history[-1], dict):
+                last_value = history[-1].get("rating")
+                try:
+                    last_time = float(history[-1].get("timestamp", 0) or 0)
+                except (TypeError, ValueError):
+                    last_time = 0.0
+                if last_value == value and now - last_time < 15 * 60:
+                    continue
+            history.append({"timestamp": now, "rating": value})
+            user[platform] = history[-90:]
+            changed = True
+        if changed:
+            await self._put(RATING_SNAPSHOTS_KEY, data)
 
     async def weekly_delta(
         self,
@@ -271,37 +288,64 @@ class AccountRegistry:
         days: int = 7,
         now: Optional[float] = None,
     ) -> Optional[int]:
+        return (
+            await self.get_weekly_deltas(
+                [(str(user_id), str(platform))],
+                days=days,
+                now=now,
+            )
+        ).get((str(user_id), str(platform)))
+
+    async def get_weekly_deltas(
+        self,
+        requests: List[Tuple[str, str]],
+        *,
+        days: int = 7,
+        now: Optional[float] = None,
+    ) -> Dict[Tuple[str, str], Optional[int]]:
+        """批量计算多个用户/平台的近期 Rating 变化。"""
         data = await self._get(RATING_SNAPSHOTS_KEY, {})
         if not isinstance(data, dict):
-            return None
-        user = data.get(str(user_id), {})
-        if not isinstance(user, dict):
-            return None
-        history = user.get(platform, [])
-        if not isinstance(history, list) or not history:
-            return None
-        entries = [
-            item
-            for item in history
-            if isinstance(item, dict)
-            and item.get("rating") is not None
-            and item.get("timestamp") is not None
-        ]
-        if not entries:
-            return None
-        entries.sort(key=lambda item: float(item["timestamp"]))
-        current = entries[-1]
-        current_rating = int(current["rating"])
-        cutoff = (time.time() if now is None else now) - max(1, int(days)) * 86400
-        baseline = None
-        for item in entries:
-            if float(item["timestamp"]) <= cutoff:
-                baseline = item
-            else:
-                break
-        if baseline is None:
-            return None
-        return current_rating - int(baseline["rating"])
+            return {
+                (str(user_id), str(platform)): None
+                for user_id, platform in requests
+            }
+        current_time = time.time() if now is None else now
+        cutoff = current_time - max(1, int(days)) * 86400
+        result: Dict[Tuple[str, str], Optional[int]] = {}
+        for user_id, platform in requests:
+            key = (str(user_id), str(platform))
+            if key in result:
+                continue
+            user = data.get(key[0], {})
+            history = user.get(key[1], []) if isinstance(user, dict) else []
+            if not isinstance(history, list) or not history:
+                result[key] = None
+                continue
+            entries = []
+            for item in history:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    timestamp = float(item.get("timestamp", 0) or 0)
+                    rating = int(item.get("rating"))
+                except (TypeError, ValueError):
+                    continue
+                entries.append((timestamp, rating))
+            if not entries:
+                result[key] = None
+                continue
+            entries.sort(key=lambda item: item[0])
+            current_rating = entries[-1][1]
+            baseline = next(
+                (rating for timestamp, rating in reversed(entries)
+                 if timestamp <= cutoff),
+                None,
+            )
+            result[key] = (
+                current_rating - baseline if baseline is not None else None
+            )
+        return result
 
     async def remove_user_from_all_groups(self, user_id: str) -> None:
         data = await self._get(GROUP_RANK_KEY, {})

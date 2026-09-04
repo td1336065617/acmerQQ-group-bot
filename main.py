@@ -78,6 +78,13 @@ MAX_RECENT_CONTEST_DAYS = 30
 AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 比赛列表最多展示的条数（防止消息过长）
 MAX_CONTEST_LIST = 30
+# 群排行按平台分页，避免 2000 人群一次生成超长图片/消息。
+RANK_PAGE_SIZE = 30
+RANK_OVERVIEW_SIZE = 5
+RANK_CACHE_TTL = 5 * 60
+RANK_CACHE_MAX_ENTRIES = 64
+RANK_FETCH_BATCH_SIZE = 100
+RANK_FETCH_CONCURRENCY = 8
 
 
 def _format_signed_number(value: object) -> str:
@@ -140,6 +147,12 @@ GROUP_RANK_COMMANDS = {
     normalize_command("群atcoder排行"): "atcoder",
     normalize_command("群atc排行"): "atcoder",
 }
+RANK_PAGE_COMMANDS = {
+    "codeforces": "群cf排行",
+    "nowcoder": "群牛客排行",
+    "luogu": "群洛谷排行",
+    "atcoder": "群atcoder排行",
+}
 
 MENU_TEXT = (
     "🏆 acmer群管理插件菜单\n"
@@ -151,7 +164,7 @@ MENU_TEXT = (
     "• 我的战绩/我的账号 ─ 查看四平台个人战绩卡\n"
     "• 我的cf/我的牛客/我的洛谷/我的atcoder ─ 查看单个平台战绩卡\n"
     "• 群排行 ─ 查看四个平台排行总览\n"
-    "• 群cf排行/群牛客排行/群洛谷排行/群atcoder排行 ─ 查看平台排行\n"
+    "• 群cf排行/群牛客排行/群洛谷排行/群atcoder排行 ─ 查看平台排行（每页30人，可加页码）\n"
     "• 本周进步榜 ─ 查看各平台本周 Rating 变化\n"
     "• 加入群排行/退出群排行 ─ 管理当前群的排行展示\n"
     "• 最近比赛 ─ 汇总所有平台未来 N 天内及进行中的比赛（N 可在 WebUI 设置）\n"
@@ -211,6 +224,26 @@ UPDATE_COMMANDS = {
 RECENT_ALL_COMMANDS = {
     normalize_command(command) for command in ("最近比赛", "近期比赛")
 }
+GROUP_RANK_PAGE_RE = re.compile(
+    r"^(?P<command>.+?)(?:\s*第\s*)?(?P<page>\d+)\s*页?$",
+    re.I,
+)
+
+
+def parse_group_rank_command(
+    value: str,
+) -> Optional[tuple[Optional[str], int]]:
+    """解析群排行及其页码；不带页码时默认第一页。"""
+    normalized = normalize_command(value)
+    if normalized in GROUP_RANK_COMMANDS:
+        return GROUP_RANK_COMMANDS[normalized], 1
+    match = GROUP_RANK_PAGE_RE.fullmatch(normalized)
+    if not match:
+        return None
+    command = normalize_command(match.group("command"))
+    if command not in GROUP_RANK_COMMANDS:
+        return None
+    return GROUP_RANK_COMMANDS[command], int(match.group("page"))
 
 
 class AcmerGroupBot(Star):
@@ -229,6 +262,9 @@ class AcmerGroupBot(Star):
         self.scheduler = PushScheduler(self)
         # 本次运行期间已收到过消息的群（用于自动重新激活日志）
         self._seen_group_this_run: set = set()
+        # 群排行结果短缓存：同一群多人同时查看时只执行一次资料汇总。
+        self._rank_cache = {}
+        self._rank_cache_locks = {}
         try:
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/config",
@@ -667,6 +703,7 @@ class AcmerGroupBot(Star):
                 group_id=group_id,
                 qq_name=self._event_display_name(event),
             )
+            self._invalidate_all_rank_cache()
             await self._record_profile_metric(user_id, profile)
         except ValueError as exc:
             yield event.plain_result(f"⚠️ 绑定失败：{exc}")
@@ -686,6 +723,7 @@ class AcmerGroupBot(Star):
         user_id = str(event.get_sender_id() or "").strip()
         removed = await self.account_registry.remove_binding(user_id, platform)
         if removed:
+            self._invalidate_all_rank_cache()
             remaining = await self.account_registry.get_user_accounts(user_id)
             if not remaining:
                 await self.account_registry.remove_user_from_all_groups(user_id)
@@ -704,9 +742,11 @@ class AcmerGroupBot(Star):
         force: bool = False,
     ):
         user_id = str(event.get_sender_id() or "").strip()
-        await self.account_registry.set_user_display_name(
+        display_name_changed = await self.account_registry.set_user_display_name(
             user_id, self._event_display_name(event)
         )
+        if display_name_changed:
+            self._invalidate_all_rank_cache()
         if platform:
             accounts = await self.account_registry.get_user_accounts(user_id)
             record = accounts.get(platform)
@@ -777,6 +817,7 @@ class AcmerGroupBot(Star):
                 True,
                 preserve_opt_out=True,
             )
+            self._invalidate_rank_cache(group_id)
         weekly = {
             profile.platform: await self._profile_weekly_delta(user_id, profile)
             for profile in profiles
@@ -802,6 +843,63 @@ class AcmerGroupBot(Star):
             yield result
 
     async def _collect_rank_rows(
+        self,
+        group_id: str,
+        platform: str,
+        *,
+        progress: bool = False,
+    ):
+        """读取排行结果；短时间内同一群/平台只计算一次。"""
+        key = (str(group_id), platform, bool(progress))
+        self._prune_rank_cache()
+        now = time.monotonic()
+        cached = self._rank_cache.get(key)
+        if cached and now - cached[0] < RANK_CACHE_TTL:
+            return cached[1], cached[2]
+
+        lock = self._rank_cache_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._rank_cache.get(key)
+            if cached and time.monotonic() - cached[0] < RANK_CACHE_TTL:
+                return cached[1], cached[2]
+            rows, errors = await self._collect_rank_rows_uncached(
+                group_id,
+                platform,
+                progress=progress,
+            )
+            self._rank_cache[key] = (time.monotonic(), rows, errors)
+            return rows, errors
+
+    def _invalidate_rank_cache(self, group_id: str) -> None:
+        """成员绑定/退出或昵称更新后，让对应群排行立即重新计算。"""
+        group_key = str(group_id)
+        for key in list(self._rank_cache):
+            if key[0] == group_key:
+                self._rank_cache.pop(key, None)
+
+    def _invalidate_all_rank_cache(self) -> None:
+        """账号关系或展示名称变化时清理所有群的排行缓存。"""
+        self._rank_cache.clear()
+
+    def _prune_rank_cache(self) -> None:
+        """清理过期或过多的排行缓存，避免群数量增长后占用内存。"""
+        now = time.monotonic()
+        for key, item in list(self._rank_cache.items()):
+            if now - item[0] >= RANK_CACHE_TTL:
+                self._rank_cache.pop(key, None)
+        overflow = len(self._rank_cache) - RANK_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(
+                self._rank_cache.items(),
+                key=lambda pair: pair[1][0],
+            )[:overflow]
+            for key, _ in oldest:
+                self._rank_cache.pop(key, None)
+        for key, lock in list(self._rank_cache_locks.items()):
+            if key not in self._rank_cache and not lock.locked():
+                self._rank_cache_locks.pop(key, None)
+
+    async def _collect_rank_rows_uncached(
         self,
         group_id: str,
         platform: str,
@@ -849,45 +947,101 @@ class AcmerGroupBot(Star):
                 # 一个失效的 CF 账号不应让整个群排行失效，退回逐账号查询。
                 logger.warning("Codeforces 批量读取失败，改为逐账号读取：%s", exc)
 
-        tasks = []
         if not resolved:
-            for user_id, record, identifier in records:
-                if not identifier:
-                    continue
-                tasks.append(
-                    (
-                        user_id,
-                        record,
-                        asyncio.create_task(
-                            self.account_fetcher.get_profile(
-                                platform,
-                                identifier,
-                                detail=progress,
-                                include_submissions=False,
-                            )
-                        ),
+            semaphore = asyncio.Semaphore(RANK_FETCH_CONCURRENCY)
+
+            async def fetch_one(item):
+                async with semaphore:
+                    return await self.account_fetcher.get_profile(
+                        platform,
+                        item[2],
+                        detail=progress,
+                        include_submissions=False,
                     )
+
+            for offset in range(0, len(records), RANK_FETCH_BATCH_SIZE):
+                batch = records[
+                    offset : offset + RANK_FETCH_BATCH_SIZE
+                ]
+                results = await asyncio.gather(
+                    *(fetch_one(item) for item in batch),
+                    return_exceptions=True,
                 )
-            results = await asyncio.gather(
-                *(task for _, _, task in tasks),
-                return_exceptions=True,
-            ) if tasks else []
-            resolved = [
-                (item[0], item[1], result)
-                for item, result in zip(tasks, results)
-            ]
+                resolved.extend(
+                    (item[0], item[1], result)
+                    for item, result in zip(batch, results)
+                )
 
         rows = []
         errors = []
+        metric_records = []
+        rating_entries = []
+        snapshot_requests = []
+        direct_deltas = {}
+        delta_calculator = getattr(
+            self.account_fetcher,
+            "rating_delta_for_period",
+            None,
+        )
         for user_id, record, result in resolved:
             if isinstance(result, Exception):
                 errors.append((user_id, result))
                 continue
-            await self._record_profile_metric(user_id, result)
-            delta = await self._profile_weekly_delta(user_id, result)
             metric = self._profile_metric(result)
             if metric is None:
                 continue
+            rating_entries.append(
+                (user_id, metric["snapshot_key"], metric["value"])
+            )
+            key = (str(user_id), metric["snapshot_key"])
+            delta = (
+                delta_calculator(result, days=7)
+                if callable(delta_calculator)
+                else None
+            )
+            direct_deltas[key] = delta
+            if delta is None:
+                snapshot_requests.append(key)
+            metric_records.append(
+                (user_id, record, result, metric, key)
+            )
+
+        bulk_recorder = getattr(
+            self.account_registry,
+            "record_ratings",
+            None,
+        )
+        if callable(bulk_recorder):
+            await bulk_recorder(rating_entries)
+        else:
+            for user_id, snapshot_key, value in rating_entries:
+                await self.account_registry.record_rating(
+                    user_id,
+                    snapshot_key,
+                    value,
+                )
+
+        snapshot_deltas = {}
+        bulk_delta_getter = getattr(
+            self.account_registry,
+            "get_weekly_deltas",
+            None,
+        )
+        if snapshot_requests and callable(bulk_delta_getter):
+            snapshot_deltas = await bulk_delta_getter(snapshot_requests)
+        elif snapshot_requests:
+            snapshot_deltas = {
+                key: await self.account_registry.weekly_delta(
+                    key[0],
+                    key[1],
+                )
+                for key in snapshot_requests
+            }
+
+        for user_id, record, result, metric, key in metric_records:
+            delta = direct_deltas.get(key)
+            if delta is None:
+                delta = snapshot_deltas.get(key)
             if progress:
                 value = delta
                 display_value = _format_signed_number(delta)
@@ -937,9 +1091,11 @@ class AcmerGroupBot(Star):
             yield event.plain_result("群排行设置只能在群聊中使用")
             return
         user_id = str(event.get_sender_id() or "").strip()
-        await self.account_registry.set_user_display_name(
+        display_name_changed = await self.account_registry.set_user_display_name(
             user_id, self._event_display_name(event)
         )
+        if display_name_changed:
+            self._invalidate_all_rank_cache()
         accounts = await self.account_registry.get_user_accounts(user_id)
         if enabled and not accounts:
             yield event.plain_result(
@@ -949,6 +1105,7 @@ class AcmerGroupBot(Star):
         await self.account_registry.set_group_member(
             group_id, user_id, enabled
         )
+        self._invalidate_rank_cache(group_id)
         if enabled:
             yield event.plain_result(
                 "✅ 已加入本群排行；已绑定的平台会出现在对应榜单中"
@@ -960,10 +1117,21 @@ class AcmerGroupBot(Star):
         self,
         event: AstrMessageEvent,
         mode: Optional[str],
+        page: int = 1,
     ):
         group_id = str(event.get_group_id() or "").strip()
         if not group_id:
             yield event.plain_result("群排行只能在群聊中使用")
+            return
+        if page < 1:
+            yield event.plain_result("排行页码必须从第 1 页开始")
+            return
+        if page != 1 and mode not in ACCOUNT_PLATFORMS:
+            yield event.plain_result(
+                "群排行总览和本周进步榜只展示各平台前 "
+                f"{RANK_OVERVIEW_SIZE} 名；完整榜单请使用群cf排行、"
+                "群牛客排行、群洛谷排行或群atcoder排行翻页"
+            )
             return
 
         platforms = (
@@ -988,33 +1156,58 @@ class AcmerGroupBot(Star):
                     f"当前群还没有加入{platform_label(mode)}排行的成员"
                 )
                 return
-            title = f"本群 {platform_label(mode)} 排行"
+            total = len(rows)
+            total_pages = max(1, (total + RANK_PAGE_SIZE - 1) // RANK_PAGE_SIZE)
+            if page > total_pages:
+                yield event.plain_result(
+                    f"{platform_label(mode)}排行没有第 {page} 页，"
+                    f"当前共 {total_pages} 页（共 {total} 名成员）"
+                )
+                return
+            start = (page - 1) * RANK_PAGE_SIZE
+            end = min(start + RANK_PAGE_SIZE, total)
+            page_rows = rows[start:end]
+            page_command = RANK_PAGE_COMMANDS.get(
+                mode,
+                f"群{platform_label(mode)}排行",
+            )
+            navigation = []
+            if page > 1:
+                navigation.append(f"上一页：{page_command} {page - 1}")
+            if page < total_pages:
+                navigation.append(f"下一页：{page_command} {page + 1}")
+            note_parts = [
+                f"共 {total} 名成员 · 当前显示第 {start + 1}-{end} 名"
+            ]
             metric = (
                 rows[0].get("metric_label")
                 if rows
                 else "Rating"
             ) or "Rating"
-            note = (
-                "洛谷没有公开 Elo 时按平台公开排名排序"
-                if mode == "luogu"
-                else ""
-            )
+            if mode == "luogu":
+                note_parts.append("洛谷没有公开 Elo 时按平台公开排名排序")
+            if navigation:
+                note_parts.append("；".join(navigation))
+            note = " · ".join(note_parts)
+            title = f"本群 {platform_label(mode)} 排行 · 第 {page}/{total_pages} 页"
             image_path = await asyncio.to_thread(
                 self.account_card_renderer.render_ranking,
-                rows[:MAX_CONTEST_LIST],
+                page_rows,
                 title=title,
-                subtitle=f"共 {len(rows)} 名成员 · 公开资料排行",
+                subtitle=f"当前显示 {start + 1}-{end} / {total} 名成员 · 公开资料排行",
                 metric_label=metric,
                 note=note,
             )
             fallback = "\n".join(
                 [
                     title,
+                    f"当前显示 {start + 1}-{end} / {total} 名成员",
                     *(
                         f"{i}. {row['display_name']}（{row['handle']}）"
                         f" {row.get('display_value', row['value'])}"
-                        for i, row in enumerate(rows[:MAX_CONTEST_LIST], 1)
+                        for i, row in enumerate(page_rows, start + 1)
                     ),
+                    f"提示：{note}",
                 ]
             )
         else:
@@ -1028,24 +1221,33 @@ class AcmerGroupBot(Star):
                 if not progress
                 else "暂无完整一周快照的成员会暂不计入"
             )
+            overview_sections = {
+                platform: rows[:RANK_OVERVIEW_SIZE]
+                for platform, rows in sections.items()
+            }
+            note += (
+                f" · 总览每个平台仅显示前 {RANK_OVERVIEW_SIZE} 名，"
+                "完整榜单请使用对应平台排行指令"
+            )
             image_path = await asyncio.to_thread(
                 self.account_card_renderer.render_overview_ranking,
-                sections,
+                overview_sections,
                 title=title,
-                subtitle="四平台公开战绩矩阵",
+                subtitle=f"四平台公开战绩矩阵 · 每个平台前 {RANK_OVERVIEW_SIZE} 名",
                 metric_label=metric,
                 note=note,
             )
             fallback_lines = [title]
-            for platform, rows in sections.items():
+            for platform, rows in overview_sections.items():
                 fallback_lines.append(f"【{platform_label(platform)}】")
-                for i, row in enumerate(rows[:5], 1):
+                for i, row in enumerate(rows, 1):
                     value = (
                         row.get("display_value", row["value"])
                     )
                     fallback_lines.append(
                         f"{i}. {row['display_name']}（{row['handle']}） {value}"
                     )
+            fallback_lines.append(f"提示：{note}")
             fallback = "\n".join(fallback_lines)
         if image_path is not None and image_path.is_file():
             yield event.image_result(str(image_path))
@@ -1053,9 +1255,12 @@ class AcmerGroupBot(Star):
             async for result in self._adaptive_results(event, fallback):
                 yield result
         if errors:
+            failed_platforms = list(
+                dict.fromkeys(platform for platform, _ in errors)
+            )
             yield event.plain_result(
                 "⚠️ 部分账号同步失败，排行可能不完整："
-                + "、".join(platform_label(p) for p, _ in errors)
+                + "、".join(platform_label(p) for p in failed_platforms)
             )
 
     async def get_groups(self) -> List[GroupConfig]:
@@ -1619,9 +1824,13 @@ class AcmerGroupBot(Star):
             async for result in self._reply_set_rank_membership(event, False):
                 yield result
             return
-        if message_str in GROUP_RANK_COMMANDS:
+        rank_command = parse_group_rank_command(message_str)
+        if rank_command is not None:
+            rank_mode, rank_page = rank_command
             async for result in self._reply_group_rank(
-                event, GROUP_RANK_COMMANDS[message_str]
+                event,
+                rank_mode,
+                page=rank_page,
             ):
                 yield result
             return
