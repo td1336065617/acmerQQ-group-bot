@@ -155,6 +155,9 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 - 图片缓存于插件 `data/output_cache/`；相同内容直接复用，内容变化后才重新生成。
 - 转图支持 Chromium/Chrome、Firefox、`wkhtmltoimage`；没有浏览器时使用 Pillow。
   如果运行环境没有可用渲染器，则自动拆分为多条文字，不会丢失结果。
+- 中文字体会优先选择 `Noto Sans CJK SC` 的简体中文字体面；如需指定字体文件，
+  可设置环境变量 `ACMER_QQ_BOT_FONT`，使用 TTC 字体时可通过
+  `ACMER_QQ_BOT_FONT_INDEX` 指定字体面索引（默认自动选择简体中文面）。
 - `我的账号`、`我的战绩` 和各平台个人战绩卡使用独立的 HTML/PNG 模板；
   单平台卡片使用紧凑整行布局，多平台卡片按平台数量自适应高度，减少底部空白。
 - 资料卡会根据公开 Rating 历史显示趋势折线图，Codeforces 账号会显示通过题难度条形图；

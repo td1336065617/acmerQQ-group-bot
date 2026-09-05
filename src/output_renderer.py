@@ -21,7 +21,16 @@ MAX_TEXT_CHUNK = 1500
 RENDER_WIDTH = 1200
 MIN_RENDER_HEIGHT = 420
 MAX_RENDER_HEIGHT = 16000
-RENDER_FORMAT_VERSION = 2
+RENDER_FORMAT_VERSION = 3
+
+# Chromium、Firefox 与 Pillow 必须使用同一套简体中文字库。只写
+# ``Noto Sans CJK SC`` 而不指定 TTC face 时，Pillow 会默认加载第 0
+# 个日文字库面，导致菜单里的中文出现字形错乱或方框。
+MENU_FONT_FAMILY = (
+    '"Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", '
+    '"WenQuanYi Zen Hei", "Microsoft YaHei", "Noto Color Emoji", '
+    "sans-serif"
+)
 
 _ITEM_RE = re.compile(r"^\s*\d+[.、]\s*")
 
@@ -153,7 +162,7 @@ class AdaptiveOutputRenderer:
   <style>
     * {{ box-sizing: border-box; }}
     html, body {{ margin: 0; padding: 0; background: #21162d; }}
-    body {{ color: #563b65; font-family: "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }}
+    body {{ color: #563b65; font-family: {MENU_FONT_FAMILY}; font-variant-east-asian: simplified; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }}
     .page {{ width: {RENDER_WIDTH}px; margin: 0 auto; padding: 42px 56px 52px; position:relative; overflow:hidden;
       background:
         radial-gradient(circle at 92% 8%, rgba(255,177,218,.26), transparent 24%),
@@ -245,39 +254,86 @@ class AdaptiveOutputRenderer:
         return renderers
 
     @staticmethod
-    def _find_cjk_font() -> Optional[str]:
+    def _font_index_from_env(default: int = 0) -> int:
+        try:
+            return max(0, int(os.environ.get("ACMER_QQ_BOT_FONT_INDEX", default)))
+        except (TypeError, ValueError):
+            return max(0, default)
+
+    @staticmethod
+    def _find_cjk_font_spec(*, bold: bool = False) -> Tuple[Optional[str], int]:
+        """返回真正的简体中文字体路径及 TTC face index。"""
         configured = os.environ.get("ACMER_QQ_BOT_FONT")
-        candidates = [configured] if configured else []
-        candidates.extend(
-            [
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-                "/usr/share/fonts/truetype/arphic/uming.ttc",
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            ]
-        )
-        for candidate in candidates:
-            if candidate and Path(candidate).is_file():
-                return candidate
+        if configured and Path(configured).is_file():
+            default_index = (
+                2
+                if Path(configured).suffix.casefold() == ".ttc"
+                and "NotoSansCJK" in Path(configured).name
+                else 0
+            )
+            return configured, AdaptiveOutputRenderer._font_index_from_env(
+                default_index
+            )
 
         fc_match = shutil.which("fc-match")
         if fc_match:
-            try:
-                result = subprocess.run(
-                    [fc_match, "-f", "%{file}", ":lang=zh"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                path = result.stdout.strip()
-                if result.returncode == 0 and Path(path).is_file():
-                    return path
-            except (OSError, subprocess.SubprocessError):
-                pass
-        return None
+            style = "Bold" if bold else "Regular"
+            queries = (
+                f"Noto Sans CJK SC:style={style}",
+                "Noto Sans CJK SC",
+                ":lang=zh-cn",
+            )
+            for query in queries:
+                try:
+                    result = subprocess.run(
+                        [
+                            fc_match,
+                            "-f",
+                            "%{file}|%{index}",
+                            query,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    path_text, _, index_text = (
+                        result.stdout.strip().partition("|")
+                    )
+                    if result.returncode != 0 or not Path(path_text).is_file():
+                        continue
+                    try:
+                        index = int(index_text or "0")
+                    except ValueError:
+                        index = 0
+                    return path_text, max(0, index)
+                except (OSError, subprocess.SubprocessError):
+                    break
+
+        if bold:
+            candidates = [
+                ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 2),
+                ("/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc", 2),
+                ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
+                ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
+            ]
+        else:
+            candidates = [
+                ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
+                ("/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc", 2),
+                ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
+                ("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", 0),
+            ]
+        for path, index in candidates:
+            if Path(path).is_file():
+                return path, index
+        return None, 0
+
+    @staticmethod
+    def _find_cjk_font() -> Optional[str]:
+        """兼容旧调用方，只返回字体路径。"""
+        path, _ = AdaptiveOutputRenderer._find_cjk_font_spec()
+        return path
 
     @staticmethod
     def _run_external_renderer(
@@ -349,14 +405,23 @@ class AdaptiveOutputRenderer:
         except ImportError:
             return False
 
-        font_path = cls._find_cjk_font()
-        if not font_path:
+        regular_spec = cls._find_cjk_font_spec()
+        bold_spec = cls._find_cjk_font_spec(bold=True)
+        if not regular_spec[0] or not bold_spec[0]:
             return False
         try:
-            title_font = ImageFont.truetype(font_path, 36)
-            body_font = ImageFont.truetype(font_path, 20)
-            detail_font = ImageFont.truetype(font_path, 18)
-            source_font = ImageFont.truetype(font_path, 16)
+            title_font = ImageFont.truetype(
+                bold_spec[0], 36, index=bold_spec[1]
+            )
+            body_font = ImageFont.truetype(
+                regular_spec[0], 20, index=regular_spec[1]
+            )
+            detail_font = ImageFont.truetype(
+                regular_spec[0], 18, index=regular_spec[1]
+            )
+            source_font = ImageFont.truetype(
+                regular_spec[0], 16, index=regular_spec[1]
+            )
         except (OSError, ValueError):
             return False
 
