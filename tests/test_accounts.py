@@ -1035,6 +1035,11 @@ def test_ranking_typography_is_readable(tmp_path):
     assert (
         ".mini-value { color:#4b2b5c; font-size:22px;" in overview_html
     )
+    assert ".rank-header { display:grid;" in ranking_html
+    assert ".rank-delta { min-width:0; color:#6e4a67;" in ranking_html
+    assert "#16835f" in ranking_html
+    assert "#c03d66" in ranking_html
+    assert "#f0c8df" in ranking_html
 
 
 def test_pillow_ranking_text_stays_inside_columns(tmp_path):

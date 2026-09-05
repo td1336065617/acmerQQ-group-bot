@@ -22,7 +22,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 15
+CARD_FORMAT_VERSION = 16
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -65,6 +65,13 @@ PLATFORM_COLORS = {
     "nowcoder": ("#63bfd7", "#b4eaf1"),
     "luogu": ("#c985c7", "#efa8d1"),
     "atcoder": ("#76c9b6", "#b9eddf"),
+}
+
+PLATFORM_TEXT_COLORS = {
+    "codeforces": "#b33a72",
+    "nowcoder": "#16758d",
+    "luogu": "#8b4d8d",
+    "atcoder": "#1f806d",
 }
 
 
@@ -1560,6 +1567,10 @@ class AccountCardRenderer:
             start, end = PLATFORM_COLORS.get(
                 profile.platform, ("#df6c9e", "#f4a7c6")
             )
+            text_accent = PLATFORM_TEXT_COLORS.get(
+                profile.platform,
+                "#8b4d8d",
+            )
             delta = (
                 weekly_changes.get(profile.platform)
                 if profile.platform in weekly_changes
@@ -1617,7 +1628,7 @@ class AccountCardRenderer:
             )
             cards.append(
                 f"""
-                <article class="platform-card" style="--accent:{_escape(start)};--accent2:{_escape(end)}">
+                <article class="platform-card" style="--accent:{_escape(start)};--accent2:{_escape(end)};--accent-text:{_escape(text_accent)}">
                   <div class="platform-head">
                     <span class="platform-tag">{_escape(platform_label(profile.platform))}</span>
                     <span class="verified">◆ VERIFIED</span>
@@ -1764,6 +1775,10 @@ class AccountCardRenderer:
             start, end = PLATFORM_COLORS.get(
                 platform, ("#df6c9e", "#f4a7c6")
             )
+            text_accent = PLATFORM_TEXT_COLORS.get(
+                platform,
+                "#8b4d8d",
+            )
             rendered = []
             for index, row in enumerate(rows[:5], start=1):
                 delta = row.get("delta")
@@ -1823,7 +1838,7 @@ class AccountCardRenderer:
             ) if is_progress else secondary_label or "近7日变化"
             blocks.append(
                 f"""
-                <section class="mini-section" style="--accent:{_escape(start)};--accent2:{_escape(end)}">
+                <section class="mini-section" style="--accent:{_escape(start)};--accent2:{_escape(end)};--accent-text:{_escape(text_accent)}">
                   <h2>{_escape(platform_label(platform))}</h2>
                   <div class="mini-header">
                     <span>名次</span>
@@ -1892,30 +1907,30 @@ class AccountCardRenderer:
     .crystal.a {{ right:250px; top:218px; }}
     .crystal.b {{ left:210px; bottom:92px; transform:rotate(45deg) scale(.65); }}
     .header {{ position:relative; margin-bottom:30px; z-index:1; }}
-    .eyebrow {{ color:#ffd2e9; letter-spacing:4px; font-size:15px; font-weight:800; text-shadow:0 0 16px rgba(255,170,216,.45); }}
+    .eyebrow {{ color:#fff0f7; letter-spacing:4px; font-size:15px; font-weight:800; text-shadow:0 0 16px rgba(255,170,216,.55); }}
     h1 {{ margin:8px 0 5px; font-size:44px; letter-spacing:2px; color:#fff8fc; text-shadow:0 3px 20px rgba(255,137,195,.45); }}
-    .subtitle {{ color:#f2d8e8; font-size:20px; }}
+    .subtitle {{ color:#ffe7f2; font-size:20px; text-shadow:0 1px 8px rgba(28,12,43,.28); }}
     .profile-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; }}
     .platform-card, .ranking-list, .empty-card {{ position:relative; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92));
       border:1px solid rgba(255,211,235,.9); border-radius:22px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .platform-card {{ padding:26px 30px 24px; overflow:hidden; }}
     .platform-card:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:6px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 20px var(--accent); }}
     .platform-head {{ display:flex; justify-content:space-between; align-items:center; }}
-    .platform-tag {{ color:var(--accent); font-size:20px; font-weight:900; letter-spacing:1px; }}
-    .verified {{ color:#ae7d9c; font-size:12px; letter-spacing:1px; }}
+    .platform-tag {{ color:var(--accent-text,var(--accent)); font-size:20px; font-weight:900; letter-spacing:1px; }}
+    .verified {{ color:#784b70; font-size:12px; letter-spacing:1px; font-weight:800; }}
     .handle {{ margin-top:13px; font-size:28px; font-weight:900; color:#4b2b5c; overflow-wrap:anywhere; }}
     .rating-row {{ display:flex; align-items:baseline; gap:16px; margin:13px 0 19px; }}
-    .rating {{ font-size:48px; line-height:1; font-weight:900; color:var(--accent); text-shadow:0 0 18px color-mix(in srgb,var(--accent),transparent 45%); }}
-    .rating-label {{ color:#9d718d; font-size:14px; letter-spacing:1px; }}
-    .rank {{ color:#6f4b71; font-size:18px; }}
+    .rating {{ font-size:48px; line-height:1; font-weight:900; color:var(--accent-text,var(--accent)); text-shadow:0 0 18px color-mix(in srgb,var(--accent),transparent 45%); }}
+    .rating-label {{ color:#704966; font-size:14px; letter-spacing:1px; font-weight:700; }}
+    .rank {{ color:#5e3b5d; font-size:18px; font-weight:700; }}
     .stats {{ display:grid; grid-template-columns:1fr 1fr; gap:10px 18px; }}
-    .stat {{ display:flex; justify-content:space-between; gap:10px; color:#795572; font-size:15px; font-weight:600; border-bottom:1px dashed rgba(180,113,157,.3); padding-bottom:7px; }}
+    .stat {{ display:flex; justify-content:space-between; gap:10px; color:#6e4a67; font-size:15px; font-weight:600; border-bottom:1px dashed rgba(180,113,157,.3); padding-bottom:7px; }}
     .stat b {{ color:#452852; font-size:17px; font-weight:800; text-align:right; }}
-    .trend {{ margin-top:16px; color:#795572; font-size:17px; font-weight:600; }}
-    .trend.positive, .rank-delta.positive {{ color:#61f0ad; }}
-    .trend.negative, .rank-delta.negative {{ color:#ff7899; }}
-    .extra {{ margin-top:13px; color:#795572; font-size:15px; font-weight:600; overflow-wrap:anywhere; }}
-    .recent {{ margin-top:13px; color:#76506d; font-size:15px; font-weight:600; overflow-wrap:anywhere; }}
+    .trend {{ margin-top:16px; color:#6b4564; font-size:17px; font-weight:600; }}
+    .trend.positive, .rank-delta.positive {{ color:#16835f; }}
+    .trend.negative, .rank-delta.negative {{ color:#c03d66; }}
+    .extra {{ margin-top:13px; color:#6e4a67; font-size:15px; font-weight:600; overflow-wrap:anywhere; }}
+    .recent {{ margin-top:13px; color:#6f4b69; font-size:15px; font-weight:600; overflow-wrap:anywhere; }}
     .profile-main {{ position:relative; }}
     .identity-line {{ display:flex; align-items:center; gap:14px; min-width:0; }}
     .identity-copy {{ min-width:0; flex:1; }}
@@ -1923,45 +1938,45 @@ class AccountCardRenderer:
     .avatar-wrap:after {{ content:""; position:absolute; inset:0; border:2px solid rgba(255,255,255,.72); border-radius:inherit; pointer-events:none; }}
     .avatar-wrap img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; display:block; transform:scale(1.02); }}
     .avatar-fallback {{ position:absolute; inset:0; display:grid; place-items:center; color:#fff; font-size:32px; font-weight:900; text-shadow:0 2px 8px rgba(91,35,89,.35); }}
-    .group-rank {{ flex:1 1 210px; min-width:0; color:#d34f93; font-size:14px; overflow-wrap:anywhere; }}
+    .group-rank {{ flex:1 1 210px; min-width:0; color:#a92b73; font-size:14px; font-weight:700; overflow-wrap:anywhere; }}
     .group-rank b {{ color:#6b315f; font-size:17px; }}
-    .group-rank.muted {{ color:#a17a95; }}
+    .group-rank.muted {{ color:#6e4a67; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
     .difficulty-panel, .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
-    .difficulty-title {{ display:flex; align-items:center; color:#79516f; font-size:14px; line-height:1.35; font-weight:800; letter-spacing:.2px; margin-bottom:9px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .difficulty-title {{ display:flex; align-items:center; color:#6b4564; font-size:14px; line-height:1.35; font-weight:800; letter-spacing:.2px; margin-bottom:9px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
     .difficulty-bars {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 14px; }}
     .difficulty-row {{ display:grid; grid-template-columns:90px minmax(48px,1fr) 42px; align-items:center; gap:8px; min-width:0; min-height:22px; }}
-    .difficulty-label {{ color:#795572; font-size:12px; font-weight:600; white-space:nowrap; }}
+    .difficulty-label {{ color:#6e4a67; font-size:12px; font-weight:600; white-space:nowrap; }}
     .difficulty-track {{ display:block; height:10px; min-width:0; overflow:hidden; border-radius:99px; background:rgba(216,183,207,.34); box-shadow:inset 0 1px 2px rgba(112,70,107,.12); }}
     .difficulty-fill {{ display:block; height:100%; min-width:4px; border-radius:inherit; background:linear-gradient(90deg,var(--accent),var(--accent2)); box-shadow:0 0 8px color-mix(in srgb,var(--accent),transparent 52%); }}
     .difficulty-count {{ color:#452852; font-size:14px; font-weight:800; text-align:right; }}
-    .difficulty-unknown .difficulty-label {{ color:#5f8ea2; }}
+    .difficulty-unknown .difficulty-label {{ color:#4d7890; }}
     .difficulty-unknown .difficulty-fill {{ background:linear-gradient(90deg,#6ea6b7,#b4eaf1); box-shadow:0 0 8px rgba(110,166,183,.35); }}
     .analysis-panel {{ background:linear-gradient(105deg,rgba(248,246,255,.84),rgba(228,247,252,.66)); }}
     .secondary-fill {{ background:linear-gradient(90deg,#9d7fd1,#c6b5ed); }}
     .analysis-summary {{ flex:1 1 100%; min-width:0; padding:11px 14px 12px; border:1px solid rgba(205,145,184,.34); border-radius:14px; background:linear-gradient(105deg,rgba(255,248,252,.82),rgba(242,239,255,.7)); }}
     .analysis-chips {{ display:flex; flex-wrap:wrap; gap:6px 8px; margin-top:7px; }}
-    .analysis-chip {{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:9px; background:rgba(255,255,255,.78); border:1px solid rgba(224,177,206,.42); color:#795572; font-size:12px; line-height:1.2; }}
-    .analysis-chip b {{ color:#8a60a7; font-weight:700; }}
+    .analysis-chip {{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:9px; background:rgba(255,255,255,.78); border:1px solid rgba(224,177,206,.42); color:#6e4a67; font-size:12px; line-height:1.2; }}
+    .analysis-chip b {{ color:#754b94; font-weight:700; }}
     .analysis-chip strong {{ color:#452852; font-size:13px; font-weight:800; }}
-    .analysis-detail {{ margin-top:8px; color:#795572; font-size:12px; font-weight:600; overflow-wrap:anywhere; }}
-    .analysis-source {{ margin-top:7px; color:#7d7184; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }}
+    .analysis-detail {{ margin-top:8px; color:#6e4a67; font-size:12px; font-weight:600; overflow-wrap:anywhere; }}
+    .analysis-source {{ margin-top:7px; color:#655669; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }}
     .rating-chart {{ padding-bottom:10px; }}
     .rating-chart-head {{ display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:5px; }}
-    .rating-chart-title {{ color:#79516f; font-size:14px; font-weight:800; letter-spacing:.2px; }}
-    .rating-chart-head small {{ color:#98738b; font-size:12px; font-weight:600; }}
+    .rating-chart-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; }}
+    .rating-chart-head small {{ color:#6f4b69; font-size:12px; font-weight:600; }}
     .rating-chart-svg {{ display:block; width:100%; height:78px; overflow:visible; color:var(--accent); }}
     .rating-chart-gridline {{ stroke:rgba(159,117,148,.22); stroke-width:.7; vector-effect:non-scaling-stroke; }}
     .rating-chart-area {{ fill:color-mix(in srgb,var(--accent),transparent 82%); }}
     .rating-chart-line {{ fill:none; stroke:var(--accent); stroke-width:2.8; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; filter:drop-shadow(0 2px 3px color-mix(in srgb,var(--accent),transparent 60%)); }}
     .rating-chart-dot {{ fill:#fffafd; stroke:var(--accent); stroke-width:1.8; vector-effect:non-scaling-stroke; }}
-    .rating-chart-scale {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:2px; color:#8b657e; font-size:11px; font-weight:600; }}
-    .rating-chart-scale b {{ color:#5c3564; font-size:12px; }}
+    .rating-chart-scale {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:2px; color:#6e4a67; font-size:11px; font-weight:600; }}
+    .rating-chart-scale b {{ color:#5e3b5d; font-size:12px; }}
     .profile-meta > .trend,
     .profile-meta > .recent,
     .profile-meta > .extra {{ flex:1 1 210px; min-width:0; margin-top:0; }}
     .ranking-list {{ position:relative; overflow:hidden; padding:14px 24px 16px; }}
-    .rank-header {{ display:grid; grid-template-columns:72px minmax(0,1fr) 180px 140px; align-items:center; gap:18px; min-height:50px; padding:6px 14px 12px; color:#6f4767; font-size:16px; line-height:1.25; font-weight:900; letter-spacing:.2px; border-bottom:1px solid rgba(184,113,157,.34); }}
+    .rank-header {{ display:grid; grid-template-columns:72px minmax(0,1fr) 180px 140px; align-items:center; gap:18px; min-height:50px; padding:6px 14px 12px; color:#5e3b5d; font-size:16px; line-height:1.25; font-weight:900; letter-spacing:.2px; border-bottom:1px solid rgba(184,113,157,.34); }}
     .rank-header span {{ min-width:0; white-space:nowrap; }}
     .rank-header span:nth-child(3),
     .rank-header span:nth-child(4) {{ text-align:right; }}
@@ -1970,16 +1985,16 @@ class AccountCardRenderer:
     .rank-no {{ color:#d34f93; font-size:30px; line-height:1; font-weight:900; }}
     .rank-user {{ min-width:0; }}
     .rank-user b {{ display:block; color:#4b2b5c; font-size:22px; line-height:1.3; font-weight:800; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
-    .rank-user span {{ display:block; color:#79566f; margin-top:7px; font-size:16px; line-height:1.35; letter-spacing:.3px; overflow-wrap:anywhere; word-break:break-word; }}
+    .rank-user span {{ display:block; color:#6f4b69; margin-top:7px; font-size:16px; line-height:1.35; letter-spacing:.3px; overflow-wrap:anywhere; word-break:break-word; }}
     .rank-value {{ min-width:0; text-align:right; white-space:nowrap; }}
     .rank-value strong {{ display:block; color:#4b2b5c; font-size:31px; line-height:1.05; font-weight:900; letter-spacing:.25px; }}
-    .rank-value small {{ color:#79566f; font-size:14px; line-height:1.3; font-weight:700; letter-spacing:.25px; }}
-    .rank-delta {{ min-width:0; color:#79566f; text-align:right; font-size:21px; line-height:1.2; font-weight:800; letter-spacing:.3px; white-space:nowrap; }}
+    .rank-value small {{ color:#6f4b69; font-size:14px; line-height:1.3; font-weight:700; letter-spacing:.25px; }}
+    .rank-delta {{ min-width:0; color:#6e4a67; text-align:right; font-size:21px; line-height:1.2; font-weight:800; letter-spacing:.3px; white-space:nowrap; }}
     .overview-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start; }}
     .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92)); border:1px solid rgba(255,211,235,.9); border-radius:20px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .mini-section:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 18px var(--accent); }}
-    .mini-section h2 {{ margin:0 0 8px; color:var(--accent); font-size:23px; line-height:1.2; }}
-    .mini-header {{ display:grid; grid-template-columns:50px minmax(0,1fr) 155px 110px; align-items:center; gap:10px; min-height:36px; padding-bottom:6px; color:#6f4767; font-size:13px; line-height:1.25; font-weight:900; letter-spacing:.1px; border-bottom:1px solid rgba(184,113,157,.3); }}
+    .mini-section h2 {{ margin:0 0 8px; color:var(--accent-text,var(--accent)); font-size:23px; line-height:1.2; }}
+    .mini-header {{ display:grid; grid-template-columns:50px minmax(0,1fr) 155px 110px; align-items:center; gap:10px; min-height:36px; padding-bottom:6px; color:#5e3b5d; font-size:13px; line-height:1.25; font-weight:900; letter-spacing:.1px; border-bottom:1px solid rgba(184,113,157,.3); }}
     .mini-header span {{ min-width:0; }}
     .mini-header span:nth-child(3),
     .mini-header span:nth-child(4) {{ text-align:right; }}
@@ -1988,15 +2003,15 @@ class AccountCardRenderer:
     .mini-no {{ color:#d34f93; font-size:20px; line-height:1.1; font-weight:800; }}
     .mini-user {{ min-width:0; }}
     .mini-user b {{ display:block; color:#4b2b5c; font-size:17px; line-height:1.35; font-weight:800; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
-    .mini-user small {{ display:block; color:#79566f; margin-top:4px; font-size:13px; line-height:1.3; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
+    .mini-user small {{ display:block; color:#6f4b69; margin-top:4px; font-size:13px; line-height:1.3; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
     .mini-value {{ color:#4b2b5c; font-size:22px; line-height:1.1; font-weight:800; letter-spacing:.3px; text-align:right; white-space:nowrap; }}
-    .mini-delta {{ color:#79566f; font-size:15px; line-height:1.25; font-weight:700; letter-spacing:.25px; text-align:right; white-space:nowrap; }}
-    .mini-delta.positive {{ color:#61f0ad; }}
-    .mini-delta.negative {{ color:#ff7899; }}
-    .mini-empty {{ color:#a17a95; padding:20px 0; }}
-    .rank-note {{ position:relative; margin-top:18px; padding:14px 18px; color:#7b5b78; background:linear-gradient(110deg,rgba(255,220,239,.78),rgba(207,239,255,.58)); border:1px solid rgba(255,213,235,.7); border-radius:12px; font-size:16px; }}
-    .empty-card {{ padding:48px; color:#a17a95; font-size:20px; text-align:center; }}
-    .card-footer {{ position:relative; margin-top:24px; color:#e6bfd7; font-size:14px; letter-spacing:.4px; }}
+    .mini-delta {{ color:#6e4a67; font-size:15px; line-height:1.25; font-weight:700; letter-spacing:.25px; text-align:right; white-space:nowrap; }}
+    .mini-delta.positive {{ color:#16835f; }}
+    .mini-delta.negative {{ color:#c03d66; }}
+    .mini-empty {{ color:#6e4a67; padding:20px 0; }}
+    .rank-note {{ position:relative; margin-top:18px; padding:14px 18px; color:#5b3a58; background:linear-gradient(110deg,rgba(255,220,239,.86),rgba(207,239,255,.72)); border:1px solid rgba(255,213,235,.82); border-radius:12px; font-size:16px; }}
+    .empty-card {{ padding:48px; color:#6e4a67; font-size:20px; text-align:center; }}
+    .card-footer {{ position:relative; margin-top:24px; color:#f0c8df; font-size:14px; letter-spacing:.4px; text-shadow:0 1px 7px rgba(28,12,43,.35); }}
     .profile-document.page {{ padding:40px 70px 36px; }}
     .profile-document .header {{ margin-bottom:20px; }}
     .profile-document h1 {{ margin:6px 0 4px; font-size:38px; }}
@@ -2221,7 +2236,7 @@ class AccountCardRenderer:
             title_font,
             max(80, width - 24),
         )
-        draw.text((x + 12, y + 7), title, font=title_font, fill="#79516f")
+        draw.text((x + 12, y + 7), title, font=title_font, fill="#6b4564")
 
         columns = DIFFICULTY_CHART_COLUMNS if len(items) > 1 else 1
         column_gap = 14
@@ -2248,7 +2263,7 @@ class AccountCardRenderer:
                 "未建模",
                 "未标注",
             }
-            label_color = "#5f8ea2" if unknown else "#795572"
+            label_color = "#4d7890" if unknown else "#6e4a67"
             draw.text(
                 (cell_x, row_y + 3),
                 label,
@@ -2382,7 +2397,7 @@ class AccountCardRenderer:
             (x + 12, y + 7),
             "数据分析摘要",
             font=title_font,
-            fill="#79516f",
+            fill="#6b4564",
         )
         if summary:
             columns = min(4, len(summary))
@@ -2407,7 +2422,7 @@ class AccountCardRenderer:
                     (cell_x, cell_y),
                     text,
                     font=label_font,
-                    fill="#5c3564",
+                    fill="#5e3b5d",
                 )
 
         detail_y = y + 32 + (
@@ -2447,7 +2462,7 @@ class AccountCardRenderer:
                     width - 24,
                 ),
                 font=label_font,
-                fill="#795572",
+                fill="#6e4a67",
             )
             detail_y += 25
 
@@ -2476,7 +2491,7 @@ class AccountCardRenderer:
                     (x + 12, detail_y),
                     line,
                     font=label_font,
-                    fill="#7d7184",
+                    fill="#655669",
                 )
                 detail_y += 17
         return height
@@ -2521,7 +2536,7 @@ class AccountCardRenderer:
             (x + 12, y + 8),
             _rating_chart_title(profile),
             font=title_font,
-            fill="#79516f",
+            fill="#6b4564",
         )
         recent_text = f"最近 {len(values)} 场"
         recent_box = draw.textbbox((0, 0), recent_text, font=label_font)
@@ -2532,7 +2547,7 @@ class AccountCardRenderer:
             ),
             recent_text,
             font=label_font,
-            fill="#98738b",
+            fill="#6f4b69",
         )
 
         left = x + 18
@@ -2575,7 +2590,7 @@ class AccountCardRenderer:
         minimum_text = str(minimum)
         latest_text = f"最新 {values[-1]}"
         maximum_text = str(maximum)
-        draw.text((left, y + 105), minimum_text, font=label_font, fill="#8b657e")
+        draw.text((left, y + 105), minimum_text, font=label_font, fill="#6e4a67")
         latest_box = draw.textbbox((0, 0), latest_text, font=label_font)
         draw.text(
             (
@@ -2584,7 +2599,7 @@ class AccountCardRenderer:
             ),
             latest_text,
             font=label_font,
-            fill="#5c3564",
+            fill="#5e3b5d",
         )
         maximum_box = draw.textbbox((0, 0), maximum_text, font=label_font)
         draw.text(
@@ -2594,7 +2609,7 @@ class AccountCardRenderer:
             ),
             maximum_text,
             font=label_font,
-            fill="#8b657e",
+            fill="#6e4a67",
         )
         return height
 
@@ -2708,7 +2723,7 @@ class AccountCardRenderer:
             (70, 54),
             "ELYSIAN // PINK PEARL ARCHIVE",
             font=body_font,
-            fill="#ffd5e8",
+            fill="#ffe7f2",
         )
         draw.text(
             (70, 86),
@@ -2720,7 +2735,7 @@ class AccountCardRenderer:
             (70, 140),
             f"{display_name} · 账号同步完成",
             font=subtitle_font,
-            fill="#f1d7e7",
+            fill="#ffe7f2",
         )
         start_y = 205
         card_w = card_width
@@ -2737,6 +2752,10 @@ class AccountCardRenderer:
                 profile.platform,
                 ("#df6c9e", "#f4a7c6"),
             )[0]
+            text_accent = PLATFORM_TEXT_COLORS.get(
+                profile.platform,
+                "#8b4d8d",
+            )
             draw.rounded_rectangle(
                 (x, y, x + card_w, y + card_h),
                 radius=18,
@@ -2748,7 +2767,7 @@ class AccountCardRenderer:
                 (x + 25, y + 20),
                 platform_label(profile.platform),
                 font=platform_font,
-                fill=accent,
+                fill=text_accent,
             )
             avatar_size = 96 if single else 64
             avatar_x = x + 25 if single else x + card_w - 25 - avatar_size
@@ -2811,19 +2830,19 @@ class AccountCardRenderer:
                 (x + 25, y + (160 if single else 100)),
                 primary_value,
                 font=rating_font,
-                fill=accent,
+                fill=text_accent,
             )
             draw.text(
                 (x + (310 if single else 270), y + (180 if single else 120)),
                 primary_label,
                 font=body_font,
-                fill="#a27692",
+                fill="#704966",
             )
             draw.text(
                 (x + (420 if single else 370), y + (180 if single else 120)),
                 profile.rank_text or profile.color or "未评级",
                 font=body_font,
-                fill="#765477",
+                fill="#5e3b5d",
             )
             details = [
                 f"{label}：{value}"
@@ -2842,7 +2861,7 @@ class AccountCardRenderer:
                     ),
                     value,
                     font=body_font,
-                    fill="#8d6683",
+                    fill="#6e4a67",
                 )
             detail_rows = (len(details) + columns - 1) // columns
             meta_y = int(detail_top + detail_rows * 27 + 7)
@@ -2901,7 +2920,7 @@ class AccountCardRenderer:
                 (x + 25, meta_y),
                 f"本次变化：{_format_delta(change_value)}",
                 font=body_font,
-                fill="#61b98b" if (change_value or 0) >= 0 else "#e26c91",
+                fill="#16835f" if (change_value or 0) >= 0 else "#c03d66",
             )
             meta_y += 23
             if profile.recent_contests and isinstance(profile.recent_contests[0], dict) and profile.recent_contests[0].get("name"):
@@ -2910,7 +2929,7 @@ class AccountCardRenderer:
                     (x + 25, meta_y),
                     f"最近：{recent.get('name')} {_format_delta(recent.get('delta'))}",
                     font=body_font,
-                    fill="#80617d",
+                    fill="#6e4a67",
                 )
                 meta_y += 23
             extras = _profile_extra_text(profile)
@@ -2919,7 +2938,7 @@ class AccountCardRenderer:
                     (x + 25, meta_y),
                     extras,
                     font=body_font,
-                    fill="#9a718c",
+                    fill="#6e4a67",
                 )
                 meta_y += 23
             rank_info = group_ranks.get(profile.platform)
@@ -2936,13 +2955,13 @@ class AccountCardRenderer:
                     (x + 25, meta_y),
                     rank_text,
                     font=body_font,
-                    fill="#d34f93" if rank is not None else "#9a718c",
+                    fill="#a92b73" if rank is not None else "#6e4a67",
                 )
         draw.text(
             (70, image.height - 42),
             f"生成时间：{_updated_text()} · 仅展示平台公开资料",
             font=body_font,
-            fill="#e3b9d2",
+            fill="#f7dceb",
         )
         try:
             image.save(image_path, format="PNG")
@@ -2999,12 +3018,12 @@ class AccountCardRenderer:
             (70, 54),
             "ELYSIAN // PINK PEARL ARCHIVE",
             font=body_font,
-            fill="#ffd5e8",
+            fill="#ffe7f2",
         )
         draw.text((70, 88), title, font=title_font, fill="#fff7fb")
-        draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
+        draw.text((70, 140), subtitle, font=subtitle_font, fill="#ffe7f2")
         y = 205
-        header_fill = "#79566f"
+        header_fill = "#f0c8df"
         delta_right = CARD_WIDTH - 95
         value_right = delta_right - 135
         draw.text((95, y), "名次", font=subtitle_font, fill=header_fill)
@@ -3074,7 +3093,7 @@ class AccountCardRenderer:
                     user_max_width,
                 ),
                 font=subtitle_font,
-                fill="#79566f",
+                fill="#6e4a67",
             )
             draw.text(
                 (value_right, y + 13),
@@ -3103,9 +3122,9 @@ class AccountCardRenderer:
                     125,
                 ),
                 font=body_font,
-                fill="#61f0ad"
+                fill="#16835f"
                 if (row.get("delta") or 0) >= 0
-                else "#ff7899",
+                else "#c03d66",
                 anchor="rt",
             )
             y += RANKING_PILLOW_ROW_STEP
@@ -3114,13 +3133,13 @@ class AccountCardRenderer:
                 (70, min(y, image.height - 100)),
                 note,
                 font=subtitle_font,
-                fill="#80617d",
+                fill="#f0c8df",
             )
         draw.text(
             (70, image.height - 42),
             f"生成时间：{_updated_text()} · 只展示已加入群排行成员",
             font=subtitle_font,
-            fill="#e3b9d2",
+            fill="#f7dceb",
         )
         try:
             image.save(image_path, format="PNG")
@@ -3175,10 +3194,10 @@ class AccountCardRenderer:
             (70, 54),
             "ELYSIAN // PINK PEARL ARCHIVE",
             font=body_font,
-            fill="#ffd5e8",
+            fill="#ffe7f2",
         )
         draw.text((70, 88), title, font=title_font, fill="#fff7fb")
-        draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
+        draw.text((70, 140), subtitle, font=subtitle_font, fill="#ffe7f2")
         columns = 2
         is_progress = secondary_value_key != "delta"
         section_w = (CARD_WIDTH - 140 - 24) // columns
@@ -3200,7 +3219,7 @@ class AccountCardRenderer:
                 width=2,
             )
             draw.text((x + 20, y + 14), platform_label(platform), font=value_font, fill=accent)
-            header_fill = "#79566f"
+            header_fill = "#5e3b5d"
             section_metric_label = rank_metric_label_for_rows(
                 rows_data,
                 platform=platform,
@@ -3321,7 +3340,7 @@ class AccountCardRenderer:
                         110,
                     ),
                     font=delta_font,
-                    fill="#79566f",
+                    fill="#6e4a67",
                     anchor="rt",
                 )
                 row_y += OVERVIEW_PILLOW_ROW_STEP
@@ -3330,13 +3349,13 @@ class AccountCardRenderer:
                 (70, max(205, image.height - 112)),
                 note,
                 font=subtitle_font,
-                fill="#80617d",
+                fill="#f0c8df",
             )
         draw.text(
             (70, image.height - 42),
             f"生成时间：{_updated_text()} · {metric_label}",
             font=subtitle_font,
-            fill="#e3b9d2",
+            fill="#f7dceb",
         )
         try:
             image.save(image_path, format="PNG")
