@@ -562,6 +562,7 @@ class AcmerGroupBot(Star):
                             force=force,
                             include_submissions=False,
                             include_difficulty=detail,
+                            include_analysis=detail,
                         )
                     ),
                 )
@@ -839,6 +840,7 @@ class AcmerGroupBot(Star):
                     if value
                 )
             )
+            analysis = getattr(profile, "analysis", {}) or {}
             difficulty = getattr(profile, "difficulty_distribution", []) or []
             if isinstance(difficulty, list):
                 distribution = " · ".join(
@@ -849,7 +851,70 @@ class AcmerGroupBot(Star):
                     and item.get("count") is not None
                 )
                 if distribution:
-                    lines.append(f"  CF 做题分布：{distribution}")
+                    difficulty_title = (
+                        analysis.get("difficulty_title")
+                        if isinstance(analysis, dict)
+                        else ""
+                    ) or "CF 做题分布"
+                    lines.append(
+                        f"  {difficulty_title}：{distribution}"
+                    )
+            if isinstance(analysis, dict):
+                category = analysis.get("category_distribution") or []
+                activity = analysis.get("activity_distribution") or []
+                if activity and not difficulty:
+                    activity_text = " · ".join(
+                        f"{item.get('label')} {item.get('count')}"
+                        for item in activity
+                        if isinstance(item, dict)
+                        and item.get("label")
+                        and item.get("count") is not None
+                    )
+                    if activity_text:
+                        lines.append(
+                            f"  {analysis.get('activity_title') or '活跃度分析'}："
+                            f"{activity_text}"
+                        )
+                if category:
+                    category_text = " · ".join(
+                        f"{item.get('label')} {item.get('count')}"
+                        for item in category
+                        if isinstance(item, dict)
+                        and item.get("label")
+                        and item.get("count") is not None
+                    )
+                    if category_text:
+                        lines.append(
+                            f"  {analysis.get('category_title') or '数据分布'}："
+                            f"{category_text}"
+                        )
+                language = analysis.get("language_distribution") or []
+                if language:
+                    language_text = " · ".join(
+                        f"{item.get('label')} {item.get('count')}"
+                        for item in language[:5]
+                        if isinstance(item, dict)
+                        and item.get("label")
+                        and item.get("count") is not None
+                    )
+                    if language_text:
+                        lines.append(f"  常用语言：{language_text}")
+                summary = analysis.get("summary") or []
+                summary_text = " · ".join(
+                    f"{item.get('label')} {item.get('value')}"
+                    for item in summary
+                    if isinstance(item, dict)
+                    and item.get("label")
+                    and item.get("value") is not None
+                )
+                if summary_text:
+                    lines.append(f"  数据分析：{summary_text}")
+                source = str(analysis.get("source") or "").strip()
+                coverage = str(analysis.get("coverage") or "").strip()
+                if source:
+                    lines.append(f"  数据源：{source}")
+                if coverage:
+                    lines.append(f"  统计范围：{coverage}")
             rank_info = group_ranks.get(profile.platform)
             if isinstance(rank_info, dict):
                 if rank_info.get("rank") is not None:
@@ -1174,6 +1239,7 @@ class AcmerGroupBot(Star):
                     force=force,
                     include_submissions=False,
                     include_difficulty=True,
+                    include_analysis=True,
                 )
                 await self._record_profile_metric(user_id, profile)
                 delta = await self._profile_weekly_delta(user_id, profile)

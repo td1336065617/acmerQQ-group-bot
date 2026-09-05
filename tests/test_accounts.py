@@ -5,7 +5,6 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-
 from src.account_cards import AccountCardRenderer
 from src.account_fetcher import AccountFetcher, normalize_account_identifier
 from src.account_models import AccountProfile
@@ -152,6 +151,288 @@ def test_public_profile_parsers():
     luogu_user = AccountFetcher._find_luogu_user(luogu_payload, "1770958")
     assert luogu_user is not None
     assert luogu_user["introduction"] == "ACM-TOKEN"
+
+
+def test_nowcoder_practice_and_problem_metadata_parsers():
+    practice_html = """
+    <div class="my-state-item">
+      <div class="state-num">2</div><span>题已挑战</span>
+    </div>
+    <div class="my-state-item">
+      <div class="state-num">1</div><span>题已通过</span>
+    </div>
+    <div class="my-state-item">
+      <div class="state-num">3</div><span>次提交</span>
+    </div>
+    <table><tbody>
+      <tr>
+        <td><a href="/acm/contest/view-submission?submissionId=10">10</a></td>
+        <td><a href="/acm/problem/100" target="_blank">星题</a></td>
+        <td>答案正确</td><td>100</td><td>1</td><td>2</td><td>3</td>
+        <td>C++</td><td>2026-09-04 12:00:00</td>
+      </tr>
+      <tr>
+        <td><a href="/acm/contest/view-submission?submissionId=11">11</a></td>
+        <td><a href="/acm/problem/101" target="_blank">另一题</a></td>
+        <td>答案错误</td><td>0</td><td>1</td><td>2</td><td>3</td>
+        <td>Python</td><td>2026-09-04 12:01:00</td>
+      </tr>
+    </tbody></table>
+    <div class="pagination"><ul data-total="1"></ul></div>
+    """
+    stats, rows, page_total = AccountFetcher._parse_nowcoder_practice_page(
+        practice_html
+    )
+
+    assert stats == {
+        "challenged_count": 2,
+        "solved_count": 1,
+        "submission_count": 3,
+    }
+    assert page_total == 1
+    assert rows[0]["problem_id"] == "100"
+    assert rows[0]["accepted"] is True
+    assert rows[1]["language"] == "Python"
+
+    problem_html = """
+    <table><tbody>
+      <tr data-problemId="100">
+        <td>NC100</td>
+        <td>
+          <a class="title" href="/acm/problem/100">星题</a>
+          <a class="tag-label" data-id="1">图论</a>
+          <a class="tag-label" data-id="2">搜索</a>
+        </td>
+        <td>3</td><td>100</td>
+      </tr>
+    </tbody></table>
+    """
+    assert AccountFetcher._parse_nowcoder_problem_metadata(
+        problem_html,
+        "100",
+    ) == {
+        "problem_id": "100",
+        "title": "星题",
+        "difficulty": 3,
+        "tags": ["图论", "搜索"],
+    }
+
+
+def test_nowcoder_analysis_uses_practice_and_problem_metadata(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+        practice_html = """
+        <div class="my-state-item">
+          <div class="state-num">2</div><span>题已挑战</span>
+        </div>
+        <div class="my-state-item">
+          <div class="state-num">1</div><span>题已通过</span>
+        </div>
+        <div class="my-state-item">
+          <div class="state-num">2</div><span>次提交</span>
+        </div>
+        <table><tbody>
+          <tr>
+            <td><a href="submission?submissionId=10">10</a></td>
+            <td><a href="/acm/problem/100">星题</a></td>
+            <td>答案正确</td><td>100</td><td>1</td><td>2</td><td>3</td>
+            <td>C++</td><td>2026-09-04 12:00:00</td>
+          </tr>
+          <tr>
+            <td><a href="submission?submissionId=11">11</a></td>
+            <td><a href="/acm/problem/101">另一题</a></td>
+            <td>答案错误</td><td>0</td><td>1</td><td>2</td><td>3</td>
+            <td>Python</td><td>2026-09-04 12:01:00</td>
+          </tr>
+        </tbody></table>
+        <div class="pagination"><ul data-total="1"></ul></div>
+        """
+        problem_html = """
+        <table><tbody>
+          <tr data-problemId="100">
+            <td>NC100</td>
+            <td>
+              <a class="title" href="/acm/problem/100">星题</a>
+              <a class="tag-label">图论</a>
+              <a class="tag-label">搜索</a>
+            </td>
+            <td>3</td><td>100</td>
+          </tr>
+        </tbody></table>
+        """
+
+        async def fake_fetch_text(url, *, headers=None, retries=2):
+            if "practice-coding" in url:
+                return practice_html
+            return problem_html
+
+        monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        analysis = await fetcher._fetch_nowcoder_analysis("123")
+
+        assert analysis["solved_count"] == 1
+        assert analysis["submission_count"] == 2
+        assert analysis["acceptance_rate"] == 50.0
+        assert analysis["difficulty_distribution"] == [
+            {"label": "≤599", "count": 1}
+        ]
+        assert analysis["category_distribution"] == [
+            {"label": "图论", "count": 1},
+            {"label": "搜索", "count": 1},
+        ]
+        assert analysis["language_distribution"] == [
+            {"label": "C++", "count": 1},
+            {"label": "Python", "count": 1},
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_luogu_analysis_uses_activity_scores_and_elo_history():
+    payload = {
+        "data": {
+            "gu": {
+                "scores": {
+                    "basic": 20,
+                    "practice": 40,
+                    "contest": 30,
+                }
+            },
+            "dailyCounts": {
+                "2026-09-01": [3, 2],
+                "2026-07-20": [1, 2],
+            },
+            "elo": [
+                {
+                    "rating": 1200,
+                    "time": 1_756_000_000,
+                    "prevDiff": 30,
+                    "contest": {"id": 2, "name": "新赛"},
+                },
+                {
+                    "rating": 1170,
+                    "time": 1_755_000_000,
+                    "prevDiff": 20,
+                    "contest": {"id": 1, "name": "旧赛"},
+                },
+            ],
+        }
+    }
+    analysis = AccountFetcher._build_luogu_analysis(payload)
+
+    assert analysis["current_rating"] == 1200
+    assert analysis["max_rating"] == 1200
+    assert analysis["contest_count"] == 2
+    assert analysis["active_days_30"] == 1
+    assert analysis["activity_distribution"]
+    assert analysis["category_distribution"] == [
+        {"label": "基础信用", "count": 20},
+        {"label": "练习情况", "count": 40},
+        {"label": "比赛情况", "count": 30},
+    ]
+    assert analysis["rating_history"][0]["name"] == "新赛"
+
+
+def test_atcoder_analysis_uses_problem_models_and_submission_data(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+        submissions = [
+            {
+                "id": 1,
+                "epoch_second": 1_700_000_000,
+                "problem_id": "abc001_a",
+                "contest_id": "abc001",
+                "language": "C++",
+                "result": "AC",
+            },
+            {
+                "id": 2,
+                "epoch_second": 1_700_000_100,
+                "problem_id": "arc001_a",
+                "contest_id": "arc001",
+                "language": "Python",
+                "result": "AC",
+            },
+            {
+                "id": 3,
+                "epoch_second": 1_700_000_200,
+                "problem_id": "abc001_a",
+                "contest_id": "abc001",
+                "language": "C++",
+                "result": "WA",
+            },
+        ]
+        problems = [
+            {"id": "abc001_a", "contest_id": "abc001"},
+            {"id": "arc001_a", "contest_id": "arc001"},
+        ]
+        models = {
+            "abc001_a": {"difficulty": -100},
+            "arc001_a": {"difficulty": 900},
+        }
+
+        async def fake_fetch_json(url, *, headers=None, retries=2):
+            if "user/submissions" in url:
+                return submissions
+            raise AssertionError(url)
+
+        async def fake_resource(key, url):
+            if key == "atcoder-problems":
+                return problems
+            if key == "atcoder-problem-models":
+                return models
+            raise AssertionError(key)
+
+        monkeypatch.setattr(fetcher, "_fetch_json", fake_fetch_json)
+        monkeypatch.setattr(fetcher, "_fetch_resource_json", fake_resource)
+        analysis = await fetcher._fetch_atcoder_analysis("demo")
+
+        assert analysis["submission_count"] == 3
+        assert analysis["solved_count"] == 2
+        assert analysis["acceptance_rate"] == 66.7
+        assert analysis["difficulty_distribution"] == [
+            {"label": "≤399", "count": 1},
+            {"label": "800–1199", "count": 1},
+        ]
+        assert analysis["category_distribution"] == [
+            {"label": "ABC", "count": 1},
+            {"label": "ARC", "count": 1},
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_analysis_profile_cache_uses_long_ttl(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+        calls = []
+
+        async def fake_fetch_profile(*args, **kwargs):
+            calls.append((args, kwargs))
+            return AccountProfile(
+                platform="atcoder",
+                handle="demo",
+                rating=1200,
+                analysis={"source": "test"},
+            )
+
+        monkeypatch.setattr(fetcher, "_fetch_profile", fake_fetch_profile)
+        first = await fetcher.get_profile(
+            "atcoder",
+            "demo",
+            detail=True,
+            include_analysis=True,
+        )
+        second = await fetcher.get_profile(
+            "atcoder",
+            "demo",
+            detail=True,
+            include_analysis=True,
+        )
+
+        assert first is second
+        assert len(calls) == 1
+
+    asyncio.run(scenario())
 
 
 def test_codeforces_bulk_profiles(monkeypatch):
@@ -744,6 +1025,94 @@ def test_profile_card_includes_charts_and_adaptive_chart_height(tmp_path):
     assert renderer._estimate_height(
         {"kind": "profile", "profiles": [profile.public_dict()]}
     ) > 760
+
+
+def test_profile_cards_render_platform_specific_analysis(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    nowcoder = AccountProfile(
+        platform="nowcoder",
+        handle="nk-demo",
+        rating=1500,
+        solved_count=57,
+        difficulty_distribution=[
+            {"label": "1星", "count": 20},
+            {"label": "2星", "count": 30},
+            {"label": "3星", "count": 7},
+        ],
+        analysis={
+            "source": "牛客公开练习页 + 牛客题库列表",
+            "coverage": "练习页读取 126/126 条提交；题目元数据 57/57",
+            "difficulty_title": "牛客题目星级分布",
+            "category_title": "牛客通过题知识点",
+            "category_distribution": [
+                {"label": "动态规划", "count": 18},
+                {"label": "图论", "count": 12},
+            ],
+            "language_distribution": [
+                {"label": "C++", "count": 100},
+                {"label": "Python", "count": 26},
+            ],
+            "summary": [
+                {"label": "挑战题", "value": 66},
+                {"label": "提交", "value": 126},
+                {"label": "AC率", "value": "45.2%"},
+            ],
+        },
+        rating_history=[
+            {"rating": 1300, "timestamp": 1},
+            {"rating": 1500, "timestamp": 2},
+        ],
+    )
+    luogu = AccountProfile(
+        platform="luogu",
+        handle="lg-demo",
+        rating_rank=100,
+        analysis={
+            "source": "洛谷公开个人页 #lentille-context",
+            "coverage": "账号摘要、公开活动日历和 Elo 历史",
+            "activity_title": "洛谷近半年活跃天数",
+            "activity_distribution": [
+                {"label": "07月", "count": 2},
+                {"label": "08月", "count": 5},
+            ],
+            "category_title": "洛谷资料分项",
+            "category_distribution": [
+                {"label": "练习情况", "count": 40},
+                {"label": "比赛情况", "count": 30},
+            ],
+            "summary": [
+                {"label": "练习评分", "value": 40},
+                {"label": "活跃天数", "value": 7},
+            ],
+            "rating_history": [
+                {"rating": 900, "timestamp": 1},
+                {"rating": 1100, "timestamp": 2},
+            ],
+        },
+        rating_history=[
+            {"rating": 900, "timestamp": 1},
+            {"rating": 1100, "timestamp": 2},
+        ],
+    )
+
+    nowcoder_html = renderer._profile_html(
+        [nowcoder],
+        display_name="测试用户",
+        weekly_changes={"nowcoder": 20},
+    )
+    luogu_html = renderer._profile_html(
+        [luogu],
+        display_name="测试用户",
+        weekly_changes={"luogu": 20},
+    )
+
+    assert "牛客题目星级分布" in nowcoder_html
+    assert "动态规划" in nowcoder_html
+    assert "常用语言：C++ 100 · Python 26" in nowcoder_html
+    assert "牛客公开练习页" in nowcoder_html
+    assert "洛谷近半年活跃天数" in luogu_html
+    assert "洛谷资料分项" in luogu_html
+    assert "账号摘要、公开活动日历和 Elo 历史" in luogu_html
 
 
 def test_pillow_profile_fallback_renders_charts(tmp_path):

@@ -22,7 +22,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 9
+CARD_FORMAT_VERSION = 10
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -141,7 +141,44 @@ def _profile_stats(profile: object) -> List[tuple[str, str]]:
     contribution = _profile_field(profile, "contribution")
     if contribution is not None:
         stats.append(("贡献", _format_number(contribution)))
-    return stats
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    if isinstance(analysis, dict):
+        submission_count = analysis.get("submission_count")
+        if submission_count is not None and not any(
+            label == "提交次数" for label, _ in stats
+        ):
+            stats.append(("提交次数", _format_number(submission_count)))
+        challenged_count = analysis.get("challenged_count")
+        if challenged_count is not None:
+            stats.append(("挑战题数", _format_number(challenged_count)))
+        acceptance_rate = analysis.get("acceptance_rate")
+        if acceptance_rate is not None:
+            try:
+                stats.append(("提交通过率", f"{float(acceptance_rate):.1f}%"))
+            except (TypeError, ValueError):
+                stats.append(("提交通过率", _format_number(acceptance_rate)))
+        problem_acceptance_rate = analysis.get("problem_acceptance_rate")
+        if problem_acceptance_rate is not None:
+            try:
+                stats.append(
+                    ("题目通过率", f"{float(problem_acceptance_rate):.1f}%")
+                )
+            except (TypeError, ValueError):
+                stats.append(
+                    ("题目通过率", _format_number(problem_acceptance_rate))
+                )
+        active_days_30 = analysis.get("active_days_30")
+        if active_days_30 is not None:
+            stats.append(("近30天活跃", f"{_format_number(active_days_30)}天"))
+    # 同一资料卡最多补充一组摘要分析，避免四个平台都绑定时统计项过密。
+    deduplicated: List[tuple[str, str]] = []
+    seen_labels = set()
+    for label, value in stats:
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        deduplicated.append((label, value))
+    return deduplicated
 
 
 def _difficulty_items(profile: object) -> List[tuple[str, int]]:
@@ -168,6 +205,11 @@ def _difficulty_title(profile: object) -> str:
     if not items:
         return ""
     total = sum(count for _, count in items)
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    if isinstance(analysis, dict):
+        title = str(analysis.get("difficulty_title") or "").strip()
+        if title:
+            return f"{title} · {total} 题"
     if _difficulty_scan_is_partial(profile):
         extra = _profile_field(profile, "extra", {}) or {}
         scan_limit = extra.get("difficulty_scan_limit")
@@ -203,6 +245,12 @@ def _difficulty_chart_height(profile: object) -> int:
     items = _difficulty_items(profile)
     if not items:
         return 0
+    return _distribution_chart_height(items)
+
+
+def _distribution_chart_height(items: List[tuple[str, int]]) -> int:
+    if not items:
+        return 0
     rows = (
         len(items) + DIFFICULTY_CHART_COLUMNS - 1
     ) // DIFFICULTY_CHART_COLUMNS
@@ -219,6 +267,199 @@ def _rating_chart_height(profile: object) -> int:
         if len(_rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)) >= 2
         else 0
     )
+
+
+def _analysis_distribution_items(profile: object) -> List[tuple[str, int]]:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    raw = analysis.get("category_distribution") if isinstance(analysis, dict) else []
+    if not isinstance(raw, list):
+        return []
+    items: List[tuple[str, int]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        try:
+            count = int(item.get("count"))
+        except (TypeError, ValueError):
+            continue
+        if label and count > 0:
+            items.append((label, count))
+    return items
+
+
+def _analysis_distribution_title(profile: object) -> str:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    if not isinstance(analysis, dict):
+        return ""
+    return str(analysis.get("category_title") or "").strip()
+
+
+def _analysis_summary_items(
+    profile: object,
+) -> List[tuple[str, str]]:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    if not isinstance(analysis, dict):
+        return []
+    raw = analysis.get("summary")
+    if not isinstance(raw, list):
+        return []
+    items: List[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if label and value:
+            items.append((label, value))
+    return items
+
+
+def _analysis_language_items(
+    profile: object,
+) -> List[tuple[str, int]]:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    raw = analysis.get("language_distribution") if isinstance(analysis, dict) else []
+    if not isinstance(raw, list):
+        return []
+    items: List[tuple[str, int]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        try:
+            count = int(item.get("count"))
+        except (TypeError, ValueError):
+            continue
+        if label and count > 0:
+            items.append((label, count))
+    return items
+
+
+def _analysis_activity_items(
+    profile: object,
+) -> List[tuple[str, int]]:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    raw = analysis.get("activity_distribution") if isinstance(analysis, dict) else []
+    if not isinstance(raw, list):
+        return []
+    items: List[tuple[str, int]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        try:
+            count = int(item.get("count"))
+        except (TypeError, ValueError):
+            continue
+        if label and count > 0:
+            items.append((label, count))
+    return items
+
+
+def _analysis_activity_title(profile: object) -> str:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    if not isinstance(analysis, dict):
+        return ""
+    return str(analysis.get("activity_title") or "").strip()
+
+
+def _analysis_chart_items(
+    profile: object,
+) -> tuple[List[tuple[str, int]], str]:
+    difficulty = _difficulty_items(profile)
+    if difficulty:
+        return difficulty, _difficulty_title(profile)
+    activity = _analysis_activity_items(profile)
+    if activity:
+        return (
+            activity,
+            _analysis_activity_title(profile) or "活跃度分析",
+        )
+    category = _analysis_distribution_items(profile)
+    if category:
+        return (
+            category,
+            _analysis_distribution_title(profile) or "数据分布",
+        )
+    return [], ""
+
+
+def _analysis_secondary_chart_items(
+    profile: object,
+) -> tuple[List[tuple[str, int]], str]:
+    # 牛客/AtCoder 的难度图已经是题目级主分析，知识点/系列只在摘要
+    # 中展示，避免单个平台卡片堆叠三张图。
+    if _difficulty_items(profile):
+        return [], ""
+    primary, _ = _analysis_chart_items(profile)
+    category = _analysis_distribution_items(profile)
+    if category and primary != category:
+        return (
+            category,
+            _analysis_distribution_title(profile) or "数据分布",
+        )
+    language = _analysis_language_items(profile)
+    if language and primary != language:
+        return language, "语言分布"
+    return [], ""
+
+
+def _analysis_chart_height(profile: object) -> int:
+    items, _ = _analysis_chart_items(profile)
+    return _distribution_chart_height(items)
+
+
+def _analysis_secondary_chart_height(profile: object) -> int:
+    items, _ = _analysis_secondary_chart_items(profile)
+    return _distribution_chart_height(items)
+
+
+def _analysis_source_text(profile: object) -> str:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    if not isinstance(analysis, dict):
+        return ""
+    source = str(analysis.get("source") or "").strip()
+    coverage = str(analysis.get("coverage") or "").strip()
+    if source and coverage:
+        return f"数据源：{source} · {coverage}"
+    if source:
+        return f"数据源：{source}"
+    return coverage
+
+
+def _rating_chart_title(profile: object) -> str:
+    return (
+        "Elo 趋势"
+        if _profile_field(profile, "platform", "") == "luogu"
+        else "Rating 趋势"
+    )
+
+
+def _analysis_summary_height(profile: object) -> int:
+    summary = _analysis_summary_items(profile)
+    source_text = _analysis_source_text(profile)
+    language_items = _analysis_language_items(profile)
+    category_items = _analysis_distribution_items(profile)
+    category_summary = (
+        bool(category_items)
+        and not _analysis_secondary_chart_items(profile)[0]
+    )
+    if not summary and not source_text and not language_items and not category_summary:
+        return 0
+    chip_rows = max(1, (len(summary) + 3) // 4) if summary else 0
+    height = 40 + chip_rows * 27
+    if language_items or category_summary:
+        height += 25
+    if source_text:
+        source_lines = max(1, min(3, (_text_width_for_layout(source_text) + 84) // 85))
+        height += 10 + source_lines * 17
+    return height
+
+
+def _text_width_for_layout(value: object) -> int:
+    text = str(value or "")
+    return sum(2 if not char.isascii() else 1 for char in text)
 
 
 def _difficulty_scan_is_partial(profile: object) -> bool:
@@ -637,17 +878,27 @@ class AccountCardRenderer:
             else PROFILE_CARD_MULTI_HEIGHT
         )
         stats = _profile_stats(profile)
-        stat_rows = max(1, (len(stats) + 1) // 2)
+        stat_columns = 4 if compact else 2
+        stat_rows = max(
+            1,
+            (len(stats) + stat_columns - 1) // stat_columns,
+        )
         height += max(0, stat_rows - 2) * 30
         # 多平台卡的排行信息通常会在窄卡片中换到下一行；单平台卡可横向容纳。
         if has_group_rank and not compact:
             height += 33
-        difficulty_height = _difficulty_chart_height(profile)
-        if difficulty_height:
-            height += difficulty_height + 10
+        analysis_height = _analysis_chart_height(profile)
+        if analysis_height:
+            height += analysis_height + 10
+        secondary_chart_height = _analysis_secondary_chart_height(profile)
+        if secondary_chart_height:
+            height += secondary_chart_height + 10
         rating_height = _rating_chart_height(profile)
         if rating_height:
             height += rating_height + 10
+        summary_height = _analysis_summary_height(profile)
+        if summary_height:
+            height += summary_height + 10
 
         # 单平台卡片使用整行宽度；这些阈值对应压缩后的 CSS 卡片宽度。
         handle_width = cls._text_width(values["handle"])
@@ -936,14 +1187,18 @@ class AccountCardRenderer:
 
     @classmethod
     def _difficulty_html(cls, profile: object) -> str:
-        items = _difficulty_items(profile)
+        items, title = _analysis_chart_items(profile)
         if not items:
             return ""
         maximum = max(count for _, count in items)
         bars = []
         for label, count in items:
             percent = count / maximum * 100 if maximum else 0
-            row_class = " difficulty-unknown" if label == "未标分" else ""
+            row_class = (
+                " difficulty-unknown"
+                if label in {"未标分", "未标星", "未标难度", "未建模", "未标注"}
+                else ""
+            )
             bars.append(
                 f'<div class="difficulty-row{row_class}">'
                 f'<span class="difficulty-label">{_escape(label)}</span>'
@@ -955,8 +1210,85 @@ class AccountCardRenderer:
             )
         return (
             '<div class="difficulty-panel">'
-            f'<div class="difficulty-title">{_escape(_difficulty_title(profile))}</div>'
+            f'<div class="difficulty-title">{_escape(title)}</div>'
             f'<div class="difficulty-bars">{"".join(bars)}</div>'
+            "</div>"
+        )
+
+    @classmethod
+    def _secondary_analysis_html(cls, profile: object) -> str:
+        items, title = _analysis_secondary_chart_items(profile)
+        if not items:
+            return ""
+        maximum = max(count for _, count in items)
+        bars = []
+        for label, count in items:
+            percent = count / maximum * 100 if maximum else 0
+            bars.append(
+                '<div class="difficulty-row">'
+                f'<span class="difficulty-label">{_escape(label)}</span>'
+                '<span class="difficulty-track">'
+                f'<i class="difficulty-fill secondary-fill" style="width:{percent:.2f}%"></i>'
+                "</span>"
+                f'<strong class="difficulty-count">{_escape(count)}</strong>'
+                "</div>"
+            )
+        return (
+            '<div class="difficulty-panel analysis-panel">'
+            f'<div class="difficulty-title">{_escape(title)}</div>'
+            f'<div class="difficulty-bars">{"".join(bars)}</div>'
+            "</div>"
+        )
+
+    @classmethod
+    def _analysis_summary_html(cls, profile: object) -> str:
+        summary = _analysis_summary_items(profile)
+        source_text = _analysis_source_text(profile)
+        language_items = _analysis_language_items(profile)
+        category_items = _analysis_distribution_items(profile)
+        category_summary = (
+            bool(category_items)
+            and not _analysis_secondary_chart_items(profile)[0]
+        )
+        if not summary and not source_text and not language_items and not category_summary:
+            return ""
+        chips = "".join(
+            f'<span class="analysis-chip"><b>{_escape(label)}</b>'
+            f'<strong>{_escape(value)}</strong></span>'
+            for label, value in summary
+        )
+        details = []
+        if language_items:
+            details.append(
+                "常用语言："
+                + " · ".join(
+                    f"{label} {count}"
+                    for label, count in language_items[:3]
+                )
+            )
+        if category_summary:
+            details.append(
+                "分类/知识点："
+                + " · ".join(
+                    f"{label} {count}"
+                    for label, count in category_items[:3]
+                )
+            )
+        detail_html = (
+            f'<div class="analysis-detail">{_escape(" · ".join(details))}</div>'
+            if details
+            else ""
+        )
+        source_html = (
+            f'<div class="analysis-source">{_escape(source_text)}</div>'
+            if source_text
+            else ""
+        )
+        return (
+            '<div class="analysis-summary">'
+            '<div class="difficulty-title">数据分析摘要</div>'
+            f'<div class="analysis-chips">{chips}</div>'
+            f"{detail_html}{source_html}"
             "</div>"
         )
 
@@ -990,11 +1322,11 @@ class AccountCardRenderer:
         return (
             '<div class="rating-chart">'
             '<div class="rating-chart-head">'
-            '<span class="rating-chart-title">Rating 趋势</span>'
+            f'<span class="rating-chart-title">{_escape(_rating_chart_title(profile))}</span>'
             f'<small>最近 {len(values)} 场</small>'
             "</div>"
             '<svg class="rating-chart-svg" viewBox="0 0 100 58" '
-            'preserveAspectRatio="none" role="img" aria-label="Rating 趋势">'
+            f'preserveAspectRatio="none" role="img" aria-label="{_escape(_rating_chart_title(profile))}">'
             '<line class="rating-chart-gridline" x1="10" y1="12" x2="90" y2="12"></line>'
             '<line class="rating-chart-gridline" x1="10" y1="29" x2="90" y2="29"></line>'
             '<line class="rating-chart-gridline" x1="10" y1="46" x2="90" y2="46"></line>'
@@ -1042,6 +1374,8 @@ class AccountCardRenderer:
             extras = _profile_extra_text(profile)
             latest = profile.recent_contests[0] if profile.recent_contests else {}
             difficulty_html = cls._difficulty_html(profile)
+            secondary_analysis_html = cls._secondary_analysis_html(profile)
+            analysis_summary_html = cls._analysis_summary_html(profile)
             rating_history_html = cls._rating_history_html(profile)
             latest_text = ""
             if isinstance(latest, dict) and latest.get("name"):
@@ -1106,7 +1440,9 @@ class AccountCardRenderer:
                   <div class="stats">{details_html}</div>
                   <div class="profile-meta">
                     {difficulty_html}
+                    {secondary_analysis_html}
                     {rating_history_html}
+                    {analysis_summary_html}
                     <div class="trend {delta_class}">本次变化：{_escape(_format_delta(delta))}</div>
                     {latest_text}
                     {f'<div class="extra">{_escape(extras)}</div>' if extras else ""}
@@ -1381,6 +1717,15 @@ class AccountCardRenderer:
     .difficulty-count {{ color:#452852; font-size:14px; font-weight:800; text-align:right; }}
     .difficulty-unknown .difficulty-label {{ color:#5f8ea2; }}
     .difficulty-unknown .difficulty-fill {{ background:linear-gradient(90deg,#6ea6b7,#b4eaf1); box-shadow:0 0 8px rgba(110,166,183,.35); }}
+    .analysis-panel {{ background:linear-gradient(105deg,rgba(248,246,255,.84),rgba(228,247,252,.66)); }}
+    .secondary-fill {{ background:linear-gradient(90deg,#9d7fd1,#c6b5ed); }}
+    .analysis-summary {{ flex:1 1 100%; min-width:0; padding:11px 14px 12px; border:1px solid rgba(205,145,184,.34); border-radius:14px; background:linear-gradient(105deg,rgba(255,248,252,.82),rgba(242,239,255,.7)); }}
+    .analysis-chips {{ display:flex; flex-wrap:wrap; gap:6px 8px; margin-top:7px; }}
+    .analysis-chip {{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:9px; background:rgba(255,255,255,.78); border:1px solid rgba(224,177,206,.42); color:#795572; font-size:12px; line-height:1.2; }}
+    .analysis-chip b {{ color:#8a60a7; font-weight:700; }}
+    .analysis-chip strong {{ color:#452852; font-size:13px; font-weight:800; }}
+    .analysis-detail {{ margin-top:8px; color:#795572; font-size:12px; font-weight:600; overflow-wrap:anywhere; }}
+    .analysis-source {{ margin-top:7px; color:#7d7184; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }}
     .rating-chart {{ padding-bottom:10px; }}
     .rating-chart-head {{ display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:5px; }}
     .rating-chart-title {{ color:#79516f; font-size:14px; font-weight:800; letter-spacing:.2px; }}
@@ -1452,6 +1797,7 @@ class AccountCardRenderer:
     .profile-document .profile-grid.profile-single .stats {{
       grid-column:2;
       align-self:center;
+      grid-template-columns:repeat(4,minmax(0,1fr));
     }}
     .profile-document .profile-grid.profile-single .profile-meta {{
       margin-top:2px;
@@ -1619,10 +1965,12 @@ class AccountCardRenderer:
             return text
 
     @classmethod
-    def _pillow_difficulty_chart(
+    def _pillow_distribution_chart(
         cls,
         draw,
         profile: object,
+        items: List[tuple[str, int]],
+        title: str,
         x: int,
         y: int,
         width: int,
@@ -1631,8 +1979,7 @@ class AccountCardRenderer:
         label_font,
         value_font,
     ) -> int:
-        items = _difficulty_items(profile)
-        height = _difficulty_chart_height(profile)
+        height = _distribution_chart_height(items)
         if not items or not height:
             return 0
 
@@ -1646,7 +1993,7 @@ class AccountCardRenderer:
         )
         title = cls._fit_pillow_text(
             draw,
-            _difficulty_title(profile),
+            title,
             title_font,
             max(80, width - 24),
         )
@@ -1670,7 +2017,14 @@ class AccountCardRenderer:
             row = index // columns
             cell_x = x + 12 + column * (column_width + column_gap)
             row_y = content_top + row * DIFFICULTY_CHART_ROW_HEIGHT
-            label_color = "#5f8ea2" if label == "未标分" else "#795572"
+            unknown = label in {
+                "未标分",
+                "未标星",
+                "未标难度",
+                "未建模",
+                "未标注",
+            }
+            label_color = "#5f8ea2" if unknown else "#795572"
             draw.text(
                 (cell_x, row_y + 3),
                 label,
@@ -1690,7 +2044,7 @@ class AccountCardRenderer:
             ) if maximum else 0
             fill_color = (
                 "#83b8c5"
-                if label == "未标分"
+                if unknown
                 else PLATFORM_COLORS.get(
                     str(_profile_field(profile, "platform", "") or ""),
                     ("#d34f93", "#f4a7c6"),
@@ -1712,6 +2066,187 @@ class AccountCardRenderer:
                 font=value_font,
                 fill="#452852",
             )
+        return height
+
+    @classmethod
+    def _pillow_difficulty_chart(
+        cls,
+        draw,
+        profile: object,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        title_font,
+        label_font,
+        value_font,
+    ) -> int:
+        items, title = _analysis_chart_items(profile)
+        return cls._pillow_distribution_chart(
+            draw,
+            profile,
+            items,
+            title,
+            x,
+            y,
+            width,
+            title_font=title_font,
+            label_font=label_font,
+            value_font=value_font,
+        )
+
+    @classmethod
+    def _pillow_secondary_chart(
+        cls,
+        draw,
+        profile: object,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        title_font,
+        label_font,
+        value_font,
+    ) -> int:
+        items, title = _analysis_secondary_chart_items(profile)
+        return cls._pillow_distribution_chart(
+            draw,
+            profile,
+            items,
+            title,
+            x,
+            y,
+            width,
+            title_font=title_font,
+            label_font=label_font,
+            value_font=value_font,
+        )
+
+    @classmethod
+    def _pillow_analysis_summary(
+        cls,
+        draw,
+        profile: object,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        title_font,
+        label_font,
+    ) -> int:
+        summary = _analysis_summary_items(profile)
+        source_text = _analysis_source_text(profile)
+        language_items = _analysis_language_items(profile)
+        category_items = _analysis_distribution_items(profile)
+        category_summary = (
+            bool(category_items)
+            and not _analysis_secondary_chart_items(profile)[0]
+        )
+        height = _analysis_summary_height(profile)
+        if height <= 0:
+            return 0
+
+        draw.rounded_rectangle(
+            (x, y, x + width, y + height),
+            radius=14,
+            fill="#fff8fc",
+            outline="#e0bfd7",
+            width=1,
+        )
+        draw.text(
+            (x + 12, y + 7),
+            "数据分析摘要",
+            font=title_font,
+            fill="#79516f",
+        )
+        if summary:
+            columns = min(4, len(summary))
+            column_gap = 8
+            column_width = max(
+                80,
+                (width - 24 - column_gap * (columns - 1)) // columns,
+            )
+            for index, (label, value) in enumerate(summary):
+                column = index % columns
+                row = index // columns
+                cell_x = x + 12 + column * (column_width + column_gap)
+                cell_y = y + 32 + row * 27
+                text = f"{label} {value}"
+                text = cls._fit_pillow_text(
+                    draw,
+                    text,
+                    label_font,
+                    column_width,
+                )
+                draw.text(
+                    (cell_x, cell_y),
+                    text,
+                    font=label_font,
+                    fill="#5c3564",
+                )
+
+        detail_y = y + 32 + (
+            max(1, (len(summary) + 3) // 4) * 27
+            if summary
+            else 0
+        )
+        detail_parts = []
+        if language_items:
+            detail_parts.append(
+                "常用语言：" + " · ".join(
+                    f"{label} {count}"
+                    for label, count in language_items[:3]
+                )
+            )
+        if category_summary:
+            detail_parts.append(
+                "分类/知识点：" + " · ".join(
+                    f"{label} {count}"
+                    for label, count in category_items[:3]
+                )
+            )
+        if detail_parts:
+            draw.text(
+                (x + 12, detail_y),
+                cls._fit_pillow_text(
+                    draw,
+                    " · ".join(detail_parts),
+                    label_font,
+                    width - 24,
+                ),
+                font=label_font,
+                fill="#795572",
+            )
+            detail_y += 25
+
+        if source_text:
+            source_lines = []
+            current = ""
+            for char in source_text:
+                candidate = current + char
+                if (
+                    current
+                    and draw.textbbox(
+                        (0, 0),
+                        candidate,
+                        font=label_font,
+                    )[2]
+                    > width - 24
+                ):
+                    source_lines.append(current)
+                    current = char
+                else:
+                    current = candidate
+            if current:
+                source_lines.append(current)
+            for line in source_lines[:3]:
+                draw.text(
+                    (x + 12, detail_y),
+                    line,
+                    font=label_font,
+                    fill="#7d7184",
+                )
+                detail_y += 17
         return height
 
     @classmethod
@@ -1750,7 +2285,12 @@ class AccountCardRenderer:
             outline="#e0bfd7",
             width=1,
         )
-        draw.text((x + 12, y + 8), "Rating 趋势", font=title_font, fill="#79516f")
+        draw.text(
+            (x + 12, y + 8),
+            _rating_chart_title(profile),
+            font=title_font,
+            fill="#79516f",
+        )
         recent_text = f"最近 {len(values)} 场"
         recent_box = draw.textbbox((0, 0), recent_text, font=label_font)
         draw.text(
@@ -2087,6 +2627,18 @@ class AccountCardRenderer:
             )
             if difficulty_height:
                 meta_y += difficulty_height + 10
+            secondary_height = cls._pillow_secondary_chart(
+                draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+                value_font=chart_value_font,
+            )
+            if secondary_height:
+                meta_y += secondary_height + 10
             rating_height = cls._pillow_rating_chart(
                 draw,
                 profile,
@@ -2098,6 +2650,17 @@ class AccountCardRenderer:
             )
             if rating_height:
                 meta_y += rating_height + 10
+            summary_height = cls._pillow_analysis_summary(
+                draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+            )
+            if summary_height:
+                meta_y += summary_height + 10
             change_value = weekly_changes.get(
                 profile.platform,
                 profile.recent_delta,

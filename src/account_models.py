@@ -63,6 +63,7 @@ class AccountProfile:
     recent_contests: List[Dict[str, Any]] = field(default_factory=list)
     recent_submissions: List[Dict[str, Any]] = field(default_factory=list)
     difficulty_distribution: List[Dict[str, Any]] = field(default_factory=list)
+    analysis: Dict[str, Any] = field(default_factory=dict)
     avatar_url: str = ""
     source_url: str = ""
     fetched_at: float = 0.0
@@ -94,6 +95,7 @@ class AccountProfile:
             "recent_contests": list(self.recent_contests),
             "recent_submissions": list(self.recent_submissions),
             "difficulty_distribution": list(self.difficulty_distribution),
+            "analysis": dict(self.analysis),
             "avatar_url": self.avatar_url,
             "source_url": self.source_url,
             "fetched_at": self.fetched_at,

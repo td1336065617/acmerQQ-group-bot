@@ -6,7 +6,7 @@ import html
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
@@ -20,10 +20,15 @@ from .account_models import (
     AccountFetchError,
     AccountProfile,
 )
+from .models import CN_TZ
 from .utils import LENTILLE_RE, USER_AGENT, fetch_text_with_retry
 
 CF_API_URL = "https://codeforces.com/api"
 NOWCODER_PROFILE_URL = "https://ac.nowcoder.com/acm/contest/profile/{uid}"
+NOWCODER_PRACTICE_URL = (
+    "https://ac.nowcoder.com/acm/contest/profile/{uid}/practice-coding"
+)
+NOWCODER_PROBLEM_LIST_URL = "https://ac.nowcoder.com/acm/problem/list"
 NOWCODER_RATING_BASIC_URL = (
     "https://ac.nowcoder.com/acm/contest/rating-basic?uid={uid}"
 )
@@ -41,12 +46,45 @@ LUOGU_LEGACY_PROFILE_URL = "https://www.luogu.com.cn/user/{uid}"
 LUOGU_API_URL = "https://www.luogu.com.cn/api/user/show?uid={uid}"
 ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}?lang=en"
 ATCODER_HISTORY_JSON_URL = "https://atcoder.jp/users/{handle}/history/json"
+ATCODER_PROBLEM_MODELS_URL = (
+    "https://kenkoooo.com/atcoder/resources/problem-models.json"
+)
+ATCODER_SUBMISSIONS_URL = (
+    "https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions"
+)
 
 PROFILE_CACHE_TTL = 10 * 60
 DETAIL_CACHE_TTL = 10 * 60
+ANALYSIS_CACHE_TTL = 12 * 60 * 60
+ANALYSIS_FAILURE_CACHE_TTL = 5 * 60
+RESOURCE_CACHE_TTL = 24 * 60 * 60
 CF_MIN_REQUEST_INTERVAL = 2.1
 RATING_HISTORY_LIMIT = 200
 CF_SUBMISSION_SCAN_LIMIT = 10000
+NOWCODER_ANALYSIS_PAGE_SIZE = 100
+NOWCODER_ANALYSIS_MAX_PAGES = 20
+NOWCODER_PROBLEM_META_LIMIT = 300
+NOWCODER_PROBLEM_META_CONCURRENCY = 6
+NOWCODER_DIFFICULTY_BUCKETS = (
+    ("≤599", None, 599),
+    ("600–999", 600, 999),
+    ("1000–1399", 1000, 1399),
+    ("1400–1799", 1400, 1799),
+    ("1800–2199", 1800, 2199),
+    ("2200–2599", 2200, 2599),
+    ("2600+", 2600, None),
+)
+ATCODER_SUBMISSION_PAGE_SIZE = 500
+ATCODER_SUBMISSION_SCAN_LIMIT = 10000
+ATCODER_DIFFICULTY_BUCKETS = (
+    ("≤399", None, 399),
+    ("400–799", 400, 799),
+    ("800–1199", 800, 1199),
+    ("1200–1599", 1200, 1599),
+    ("1600–1999", 1600, 1999),
+    ("2000–2399", 2000, 2399),
+    ("2400+", 2400, None),
+)
 CF_DIFFICULTY_BUCKETS = (
     ("≤999", None, 999),
     ("1000–1199", 1000, 1199),
@@ -71,6 +109,20 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>", re.S)
 _ATCODER_HISTORY_RE = re.compile(
     r"var\s+rating_history\s*=\s*(\[.*?\])\s*;\s*</script>",
     re.S,
+)
+_NOWCODER_PRACTICE_ROW_RE = re.compile(
+    r"<tr\b[^>]*>(.*?)</tr>",
+    re.I | re.S,
+)
+_NOWCODER_STATE_RE = re.compile(
+    r'<div\s+class=["\']my-state-item["\'][^>]*>.*?'
+    r'<div\s+class=["\']state-num["\']>(.*?)</div>\s*'
+    r"<span>(.*?)</span>",
+    re.I | re.S,
+)
+_NOWCODER_PAGE_TOTAL_RE = re.compile(
+    r'<ul\b[^>]*\bdata-total=["\'](\d+)["\']',
+    re.I,
 )
 
 
@@ -108,7 +160,46 @@ def _parse_timestamp(value: object) -> Optional[float]:
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError:
-        return None
+        pass
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, pattern).replace(
+                tzinfo=CN_TZ
+            ).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _distribution_rows(
+    counts: Dict[str, int],
+    *,
+    limit: Optional[int] = None,
+    unknown_labels: tuple[str, ...] = (),
+) -> List[Dict[str, Any]]:
+    items = sorted(
+        (
+            (str(label), int(count))
+            for label, count in counts.items()
+            if count > 0
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if unknown_labels:
+        unknown = set(unknown_labels)
+        items.sort(
+            key=lambda item: (
+                1 if item[0] in unknown else 0,
+                -item[1],
+                item[0],
+            )
+        )
+    if limit is not None:
+        items = items[:max(1, int(limit))]
+    return [
+        {"label": label, "count": count}
+        for label, count in items
+    ]
 
 
 def _nested_dicts(value: object):
@@ -185,6 +276,12 @@ class AccountFetcher:
             Tuple[str, str, bool, bool, bool],
             asyncio.Lock,
         ] = {}
+        self._resource_cache: Dict[str, Tuple[float, object]] = {}
+        self._resource_locks: Dict[str, asyncio.Lock] = {}
+        self._analysis_semaphore = asyncio.Semaphore(2)
+        self._nowcoder_problem_cache: Dict[
+            str, Tuple[float, Dict[str, Any]]
+        ] = {}
         self._cf_lock = asyncio.Lock()
         self._cf_last_request = 0.0
 
@@ -215,36 +312,57 @@ class AccountFetcher:
         force: bool = False,
         include_submissions: bool = True,
         include_difficulty: bool = False,
+        include_analysis: bool = False,
     ) -> AccountProfile:
         if platform not in ACCOUNT_PLATFORMS:
             raise AccountFetchError("不支持的平台")
         normalized = normalize_account_identifier(platform, identifier)
         if not normalized:
             raise AccountFetchError(self.invalid_identifier_message(platform), temporary=False)
+        analysis_requested = bool(
+            detail and (include_difficulty or include_analysis)
+        )
         key = (
             platform,
             normalized.casefold(),
             detail,
             bool(detail and include_submissions),
-            bool(detail and include_difficulty),
+            analysis_requested,
         )
         now = time.time()
         cached = self._cache.get(key)
-        ttl = DETAIL_CACHE_TTL if detail else self.cache_ttl
-        if not force and cached and now - cached[0] < ttl:
+        ttl = (
+            ANALYSIS_CACHE_TTL
+            if analysis_requested
+            else DETAIL_CACHE_TTL
+            if detail
+            else self.cache_ttl
+        )
+        if (
+            not force
+            and cached
+            and now - cached[0]
+            < self._cache_ttl_for_profile(cached[1], ttl)
+        ):
             return cached[1]
 
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             cached = self._cache.get(key)
-            if not force and cached and time.time() - cached[0] < ttl:
+            if (
+                not force
+                and cached
+                and time.time() - cached[0]
+                < self._cache_ttl_for_profile(cached[1], ttl)
+            ):
                 return cached[1]
             profile = await self._fetch_profile(
                 platform,
                 normalized,
                 detail,
                 include_submissions=include_submissions,
-                include_difficulty=include_difficulty,
+                include_difficulty=analysis_requested,
+                include_analysis=analysis_requested,
             )
             profile.fetched_at = time.time()
             self._cache[key] = (profile.fetched_at, profile)
@@ -264,6 +382,19 @@ class AccountFetcher:
                 )
             return profile
 
+    @staticmethod
+    def _cache_ttl_for_profile(
+        profile: object,
+        default_ttl: int,
+    ) -> int:
+        analysis = getattr(profile, "analysis", {}) or {}
+        if (
+            isinstance(analysis, dict)
+            and analysis.get("analysis_status") == "unavailable"
+        ):
+            return min(default_ttl, ANALYSIS_FAILURE_CACHE_TTL)
+        return default_ttl
+
     async def get_profiles(
         self,
         platform: str,
@@ -273,6 +404,7 @@ class AccountFetcher:
         force: bool = False,
         include_submissions: bool = True,
         include_difficulty: bool = False,
+        include_analysis: bool = False,
     ) -> Dict[str, AccountProfile]:
         """批量读取账号资料；Codeforces 摘要使用一次 user.info 请求。"""
         normalized = []
@@ -294,6 +426,7 @@ class AccountFetcher:
                         force=force,
                         include_submissions=include_submissions,
                         include_difficulty=include_difficulty,
+                        include_analysis=include_analysis,
                     )
                     for identifier in normalized
                 )
@@ -397,20 +530,33 @@ class AccountFetcher:
         *,
         include_submissions: bool = True,
         include_difficulty: bool = False,
+        include_analysis: bool = False,
     ) -> AccountProfile:
         if platform == "codeforces":
             return await self._fetch_codeforces(
                 identifier,
                 detail,
                 include_submissions=include_submissions,
-                include_difficulty=include_difficulty,
+                include_difficulty=include_difficulty or include_analysis,
             )
         if platform == "nowcoder":
-            return await self._fetch_nowcoder(identifier, detail)
+            return await self._fetch_nowcoder(
+                identifier,
+                detail,
+                include_analysis=include_analysis,
+            )
         if platform == "luogu":
-            return await self._fetch_luogu(identifier, detail)
+            return await self._fetch_luogu(
+                identifier,
+                detail,
+                include_analysis=include_analysis,
+            )
         if platform == "atcoder":
-            return await self._fetch_atcoder(identifier, detail)
+            return await self._fetch_atcoder(
+                identifier,
+                detail,
+                include_analysis=include_analysis,
+            )
         raise AccountFetchError("不支持的平台", temporary=False)
 
     async def _fetch_text(
@@ -419,6 +565,7 @@ class AccountFetcher:
         *,
         headers: Optional[Dict[str, str]] = None,
         retries: int = 2,
+        timeout: float = 10.0,
     ) -> str:
         if self.session is None:
             raise AccountFetchError("账号抓取器尚未初始化")
@@ -427,6 +574,7 @@ class AccountFetcher:
                 self.session,
                 url,
                 retries=retries,
+                timeout=timeout,
                 headers=headers or {},
             )
         except asyncio.TimeoutError as exc:
@@ -446,8 +594,14 @@ class AccountFetcher:
         *,
         headers: Optional[Dict[str, str]] = None,
         retries: int = 2,
+        timeout: float = 10.0,
     ) -> object:
-        text = await self._fetch_text(url, headers=headers, retries=retries)
+        text = await self._fetch_text(
+            url,
+            headers=headers,
+            retries=retries,
+            timeout=timeout,
+        )
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
@@ -553,6 +707,11 @@ class AccountFetcher:
                         )
                         profile.extra["difficulty_scanned_submissions"] = len(
                             rows
+                        )
+                        profile.analysis = self._build_cf_analysis(
+                            rows,
+                            profile.difficulty_distribution,
+                            profile.solved_count,
                         )
         return profile
 
@@ -678,7 +837,7 @@ class AccountFetcher:
                 key = ("name", name)
             else:
                 # 没有稳定题目标识时不把多次提交重复计数。
-                key = ("row", str(row.get("id") or len(accepted_keys)))
+                key = ("row", str(row.get("id") or len(accepted_ratings)))
             rating = _parse_int(problem.get("rating"))
             previous = accepted_ratings.get(key)
             if key in accepted_ratings and (
@@ -720,8 +879,99 @@ class AccountFetcher:
             )
         return distribution, len(accepted_ratings)
 
+    @staticmethod
+    def _build_cf_analysis(
+        rows: list,
+        difficulty_distribution: List[Dict[str, Any]],
+        solved_count: Optional[int],
+    ) -> Dict[str, Any]:
+        accepted_rows = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("verdict") or "").upper() == "OK"
+        ]
+        language_counts: Dict[str, int] = {}
+        active_days_30 = set()
+        active_days_90 = set()
+        now = time.time()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            language = (
+                str(row.get("programmingLanguage") or "").strip()
+                or "未标注"
+            )
+            language_counts[language] = language_counts.get(language, 0) + 1
+            timestamp = _parse_timestamp(row.get("creationTimeSeconds"))
+            if timestamp is None:
+                continue
+            age = now - timestamp
+            day = datetime.fromtimestamp(timestamp, tz=CN_TZ).date()
+            if 0 <= age <= 30 * 86400:
+                active_days_30.add(day)
+            if 0 <= age <= 90 * 86400:
+                active_days_90.add(day)
+        complete = len(rows) < CF_SUBMISSION_SCAN_LIMIT
+        acceptance_rate = (
+            round(len(accepted_rows) / len(rows) * 100, 1)
+            if rows and complete
+            else None
+        )
+        return {
+            "source": "Codeforces 官方 user.status API",
+            "coverage": (
+                f"最近 {len(rows)} 条公开提交"
+                + (
+                    "（已读完当前公开记录）"
+                    if complete
+                    else f"（最多读取 {CF_SUBMISSION_SCAN_LIMIT} 条）"
+                )
+            ),
+            "submission_count": len(rows),
+            "accepted_submission_count": (
+                len(accepted_rows) if complete else None
+            ),
+            "solved_count": solved_count,
+            "acceptance_rate": acceptance_rate,
+            "active_days_30": len(active_days_30),
+            "active_days_90": len(active_days_90),
+            "difficulty_title": "Codeforces 题目难度分布",
+            "difficulty_distribution": list(difficulty_distribution),
+            "language_distribution": _distribution_rows(
+                language_counts,
+                limit=8,
+            ),
+            "summary": [
+                item
+                for item in (
+                    {"label": "提交", "value": len(rows)},
+                    (
+                        {"label": "通过题", "value": solved_count}
+                        if solved_count is not None
+                        else None
+                    ),
+                    (
+                        {
+                            "label": "提交通过率",
+                            "value": f"{acceptance_rate:.1f}%",
+                        }
+                        if acceptance_rate is not None
+                        else None
+                    ),
+                    {"label": "30日活跃", "value": f"{len(active_days_30)}天"},
+                    {"label": "90日活跃", "value": f"{len(active_days_90)}天"},
+                )
+                if item is not None
+            ],
+        }
+
     async def _fetch_nowcoder(
-        self, uid: str, detail: bool
+        self,
+        uid: str,
+        detail: bool,
+        *,
+        include_analysis: bool = False,
     ) -> AccountProfile:
         profile_url = NOWCODER_PROFILE_URL.format(uid=uid)
         text = await self._fetch_text(
@@ -837,7 +1087,704 @@ class AccountFetcher:
                         profile.recent_delta = parsed_history[0].get("delta")
             except AccountFetchError:
                 pass
+        if detail and include_analysis:
+            try:
+                async with self._analysis_semaphore:
+                    analysis = await self._fetch_nowcoder_analysis(uid)
+            except AccountFetchError as exc:
+                logger.warning(
+                    "读取牛客用户 %s 题目分析失败：%s",
+                    uid,
+                    exc,
+                )
+                analysis = {
+                    "source": "牛客公开练习页 + 牛客题库列表",
+                    "coverage": "题目分析暂时无法读取，保留官方资料与 Rating 历史",
+                    "analysis_status": "unavailable",
+                }
+            self._apply_analysis(profile, analysis)
         return profile
+
+    @staticmethod
+    def _apply_analysis(
+        profile: AccountProfile,
+        analysis: Optional[Dict[str, Any]],
+    ) -> None:
+        if not isinstance(analysis, dict):
+            return
+        profile.analysis = dict(analysis)
+        difficulty = analysis.get("difficulty_distribution")
+        if isinstance(difficulty, list):
+            profile.difficulty_distribution = list(difficulty)
+        solved_count = analysis.get("solved_count")
+        if solved_count is not None:
+            profile.solved_count = _parse_int(solved_count)
+        rating_history = analysis.get("rating_history")
+        if isinstance(rating_history, list):
+            profile.rating_history = list(rating_history)
+            profile.recent_contests = list(rating_history[:5])
+            if rating_history:
+                latest = rating_history[0]
+                if isinstance(latest, dict):
+                    profile.recent_delta = _parse_int(
+                        latest.get("delta")
+                    )
+        max_rating = analysis.get("max_rating")
+        if max_rating is not None:
+            profile.max_rating = _parse_int(max_rating)
+        contest_count = analysis.get("contest_count")
+        if profile.contest_count is None and contest_count is not None:
+            profile.contest_count = _parse_int(contest_count)
+        profile.extra["analysis_source"] = str(
+            analysis.get("source") or ""
+        )
+        profile.extra["analysis_coverage"] = str(
+            analysis.get("coverage") or ""
+        )
+
+    async def _fetch_resource_json(
+        self,
+        key: str,
+        url: str,
+    ) -> object:
+        now = time.time()
+        cached = self._resource_cache.get(key)
+        if cached and now - cached[0] < RESOURCE_CACHE_TTL:
+            return cached[1]
+        lock = self._resource_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._resource_cache.get(key)
+            if cached and time.time() - cached[0] < RESOURCE_CACHE_TTL:
+                return cached[1]
+            value = await self._fetch_json(url, timeout=30.0)
+            self._resource_cache[key] = (time.time(), value)
+            return value
+
+    @staticmethod
+    def _parse_nowcoder_practice_page(
+        text: str,
+    ) -> Tuple[Dict[str, int], List[Dict[str, Any]], int]:
+        stats: Dict[str, int] = {}
+        for value_text, label_text in _NOWCODER_STATE_RE.findall(text):
+            value = _parse_int(_clean_text(value_text))
+            label = _clean_text(label_text)
+            if value is None:
+                continue
+            if "题已挑战" in label:
+                stats["challenged_count"] = value
+            elif "题已通过" in label:
+                stats["solved_count"] = value
+            elif "次提交" in label:
+                stats["submission_count"] = value
+
+        page_match = _NOWCODER_PAGE_TOTAL_RE.search(text)
+        page_total = _parse_int(page_match.group(1)) if page_match else 1
+        rows: List[Dict[str, Any]] = []
+        for row_html in _NOWCODER_PRACTICE_ROW_RE.findall(text):
+            cells = re.findall(
+                r"<td\b[^>]*>(.*?)</td>",
+                row_html,
+                re.I | re.S,
+            )
+            if len(cells) < 9:
+                continue
+            links = re.findall(
+                r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+                row_html,
+                re.I | re.S,
+            )
+            submission_id = ""
+            problem_id = ""
+            problem_name = ""
+            for href, label in links:
+                if not submission_id:
+                    submission_match = re.search(
+                        r"submissionId=(\d+)",
+                        href,
+                        re.I,
+                    )
+                    if submission_match:
+                        submission_id = submission_match.group(1)
+                problem_match = re.search(
+                    r"/acm/problem/(\d+)",
+                    href,
+                    re.I,
+                )
+                if problem_match:
+                    problem_id = problem_match.group(1)
+                    if not problem_name:
+                        problem_name = _clean_text(label)
+            if not problem_id:
+                continue
+            result = _clean_text(cells[2])
+            score_text = _clean_text(cells[3])
+            score = None
+            try:
+                score = float(score_text)
+            except (TypeError, ValueError):
+                pass
+            language = _clean_text(cells[7])
+            submitted_at = _parse_timestamp(_clean_text(cells[8]))
+            accepted = (
+                result.casefold() in {"ac", "accepted", "答案正确", "通过"}
+                or "答案正确" in result
+            )
+            rows.append(
+                {
+                    "submission_id": submission_id,
+                    "problem_id": problem_id,
+                    "problem_name": problem_name,
+                    "result": result,
+                    "score": score,
+                    "language": language,
+                    "timestamp": submitted_at,
+                    "accepted": accepted,
+                }
+            )
+        return stats, rows, max(1, page_total or 1)
+
+    @staticmethod
+    def _parse_nowcoder_problem_metadata(
+        text: str,
+        expected_problem_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        match = re.search(
+            r'<tr\b[^>]*\bdata-problemid=["\'](\d+)["\'][^>]*>'
+            r"(.*?)</tr>",
+            text,
+            re.I | re.S,
+        )
+        if not match:
+            return None
+        problem_id = match.group(1)
+        if expected_problem_id and problem_id != str(expected_problem_id):
+            return None
+        row_html = match.group(2)
+        cells = re.findall(
+            r"<td\b[^>]*>(.*?)</td>",
+            row_html,
+            re.I | re.S,
+        )
+        if len(cells) < 4:
+            return None
+        title_match = re.search(
+            r'<a\b[^>]*class=["\'][^"\']*\btitle\b[^"\']*["\'][^>]*>'
+            r"(.*?)</a>",
+            cells[1],
+            re.I | re.S,
+        )
+        title = _clean_text(title_match.group(1)) if title_match else ""
+        tags = [
+            _clean_text(value)
+            for value in re.findall(
+                r'<a\b[^>]*class=["\'][^"\']*\btag-label\b[^"\']*["\'][^>]*>'
+                r"(.*?)</a>",
+                cells[1],
+                re.I | re.S,
+            )
+        ]
+        return {
+            "problem_id": problem_id,
+            "title": title,
+            "difficulty": _parse_int(_clean_text(cells[2])),
+            "tags": [tag for tag in tags if tag],
+        }
+
+    async def _fetch_nowcoder_problem_metadata(
+        self,
+        problem_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        unique_ids = list(dict.fromkeys(str(item) for item in problem_ids))
+        unique_ids = unique_ids[:NOWCODER_PROBLEM_META_LIMIT]
+        now = time.time()
+        result: Dict[str, Dict[str, Any]] = {}
+        missing = []
+        for problem_id in unique_ids:
+            cached = self._nowcoder_problem_cache.get(problem_id)
+            if cached and now - cached[0] < RESOURCE_CACHE_TTL:
+                result[problem_id] = cached[1]
+            else:
+                missing.append(problem_id)
+        semaphore = asyncio.Semaphore(NOWCODER_PROBLEM_META_CONCURRENCY)
+
+        async def fetch_one(problem_id: str):
+            params = urlencode(
+                {
+                    "keyword": problem_id,
+                    "pageSize": "1",
+                    "page": "1",
+                }
+            )
+            url = f"{NOWCODER_PROBLEM_LIST_URL}?{params}"
+            async with semaphore:
+                try:
+                    text = await self._fetch_text(url)
+                    metadata = self._parse_nowcoder_problem_metadata(
+                        text,
+                        problem_id,
+                    )
+                except AccountFetchError:
+                    metadata = None
+                return problem_id, metadata
+
+        if missing:
+            fetched = await asyncio.gather(
+                *(fetch_one(problem_id) for problem_id in missing)
+            )
+            for problem_id, metadata in fetched:
+                if not isinstance(metadata, dict):
+                    continue
+                self._nowcoder_problem_cache[problem_id] = (
+                    time.time(),
+                    metadata,
+                )
+                result[problem_id] = metadata
+        return result
+
+    async def _fetch_nowcoder_analysis(
+        self,
+        uid: str,
+    ) -> Dict[str, Any]:
+        base_params = {
+            "pageSize": str(NOWCODER_ANALYSIS_PAGE_SIZE),
+            "search": "",
+            "statusTypeFilter": "-1",
+            "languageCategoryFilter": "-1",
+            "orderType": "DESC",
+        }
+
+        async def fetch_page(page: int) -> str:
+            params = dict(base_params)
+            params["page"] = str(page)
+            return await self._fetch_text(
+                f"{NOWCODER_PRACTICE_URL.format(uid=uid)}?"
+                f"{urlencode(params)}",
+                headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+
+        first_text = await fetch_page(1)
+        stats, first_rows, page_total = (
+            self._parse_nowcoder_practice_page(first_text)
+        )
+        pages_to_fetch = min(
+            max(1, page_total),
+            NOWCODER_ANALYSIS_MAX_PAGES,
+        )
+        rows = list(first_rows)
+        pages_missing = False
+        if pages_to_fetch > 1:
+            page_semaphore = asyncio.Semaphore(6)
+
+            async def fetch_rest_page(page: int):
+                async with page_semaphore:
+                    try:
+                        return await fetch_page(page)
+                    except AccountFetchError:
+                        return None
+
+            rest = await asyncio.gather(
+                *(
+                    fetch_rest_page(page)
+                    for page in range(2, pages_to_fetch + 1)
+                )
+            )
+            for text in rest:
+                if not text:
+                    pages_missing = True
+                    continue
+                _, page_rows, _ = self._parse_nowcoder_practice_page(text)
+                rows.extend(page_rows)
+
+        submission_count = stats.get("submission_count", len(rows))
+        solved_count = stats.get("solved_count")
+        challenged_count = stats.get("challenged_count")
+        accepted_rows = [
+            row for row in rows if bool(row.get("accepted"))
+        ]
+        unique_solved = {
+            str(row.get("problem_id"))
+            for row in accepted_rows
+            if row.get("problem_id")
+        }
+        language_counts: Dict[str, int] = {}
+        for row in rows:
+            language = str(row.get("language") or "").strip() or "未标注"
+            language_counts[language] = language_counts.get(language, 0) + 1
+
+        now = time.time()
+        active_days_30 = set()
+        active_days_90 = set()
+        submissions_30 = 0
+        submissions_90 = 0
+        for row in rows:
+            timestamp = row.get("timestamp")
+            try:
+                timestamp = float(timestamp)
+            except (TypeError, ValueError):
+                continue
+            age = now - timestamp
+            if 0 <= age <= 30 * 86400:
+                submissions_30 += 1
+                active_days_30.add(datetime.fromtimestamp(
+                    timestamp, tz=CN_TZ
+                ).date())
+            if 0 <= age <= 90 * 86400:
+                submissions_90 += 1
+                active_days_90.add(datetime.fromtimestamp(
+                    timestamp, tz=CN_TZ
+                ).date())
+
+        metadata = await self._fetch_nowcoder_problem_metadata(
+            list(unique_solved)
+        )
+        difficulty_counts: Dict[str, int] = {}
+        topic_counts: Dict[str, int] = {}
+        for problem_id in unique_solved:
+            item = metadata.get(problem_id)
+            if not item:
+                difficulty_label = "未标难度"
+            else:
+                difficulty = _parse_int(item.get("difficulty"))
+                difficulty_label = "未标难度"
+                for label, minimum, maximum in NOWCODER_DIFFICULTY_BUCKETS:
+                    if (
+                        difficulty is not None
+                        and (minimum is None or difficulty >= minimum)
+                        and (maximum is None or difficulty <= maximum)
+                    ):
+                        difficulty_label = label
+                        break
+                for tag in item.get("tags") or []:
+                    topic_counts[str(tag)] = (
+                        topic_counts.get(str(tag), 0) + 1
+                    )
+            difficulty_counts[difficulty_label] = (
+                difficulty_counts.get(difficulty_label, 0) + 1
+            )
+
+        complete = (
+            page_total <= NOWCODER_ANALYSIS_MAX_PAGES
+            and not pages_missing
+        )
+        acceptance_rate = (
+            round(len(accepted_rows) / max(1, len(rows)) * 100, 1)
+            if complete and rows
+            else None
+        )
+        problem_acceptance_rate = (
+            round(len(unique_solved) / challenged_count * 100, 1)
+            if challenged_count
+            and challenged_count > 0
+            else None
+        )
+        coverage = (
+            f"练习页读取 {len(rows)}/{submission_count} 条提交；"
+            f"题目元数据 {len(metadata)}/{len(unique_solved)}"
+        )
+        if not complete:
+            if page_total > NOWCODER_ANALYSIS_MAX_PAGES:
+                coverage += (
+                    f"（最多读取 {NOWCODER_ANALYSIS_MAX_PAGES} 页）"
+                )
+            elif pages_missing:
+                coverage += "（部分分页读取失败）"
+        return {
+            "source": "牛客公开练习页 + 牛客题库列表",
+            "coverage": coverage,
+            "submission_count": submission_count,
+            "accepted_submission_count": (
+                len(accepted_rows) if complete else None
+            ),
+            "challenged_count": challenged_count,
+            "solved_count": solved_count or len(unique_solved),
+            "acceptance_rate": acceptance_rate,
+            "problem_acceptance_rate": problem_acceptance_rate,
+            "active_days_30": len(active_days_30),
+            "active_days_90": len(active_days_90),
+            "submissions_30": submissions_30,
+            "submissions_90": submissions_90,
+            "difficulty_title": "牛客题目难度分布",
+            "difficulty_distribution": [
+                {"label": label, "count": difficulty_counts[label]}
+                for label, _, _ in NOWCODER_DIFFICULTY_BUCKETS
+                if difficulty_counts.get(label, 0) > 0
+            ]
+            + (
+                [{"label": "未标难度", "count": difficulty_counts["未标难度"]}]
+                if difficulty_counts.get("未标难度", 0) > 0
+                else []
+            ),
+            "category_title": "牛客通过题知识点",
+            "category_distribution": [
+                {"label": label, "count": count}
+                for label, count in sorted(
+                    topic_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:8]
+            ],
+            "language_distribution": [
+                {"label": label, "count": count}
+                for label, count in sorted(
+                    language_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:8]
+            ],
+            "summary": [
+                item
+                for item in (
+                    (
+                        {"label": "挑战题", "value": challenged_count}
+                        if challenged_count is not None
+                        else None
+                    ),
+                    {"label": "提交", "value": submission_count},
+                    (
+                        {
+                            "label": "AC率",
+                            "value": f"{acceptance_rate:.1f}%",
+                        }
+                        if acceptance_rate is not None
+                        else None
+                    ),
+                    (
+                        {
+                            "label": "题目通过率",
+                            "value": f"{problem_acceptance_rate:.1f}%",
+                        }
+                        if problem_acceptance_rate is not None
+                        else None
+                    ),
+                    {"label": "30日活跃", "value": f"{len(active_days_30)}天"},
+                    {"label": "90日活跃", "value": f"{len(active_days_90)}天"},
+                )
+                if item is not None
+            ],
+        }
+
+    @staticmethod
+    def _build_luogu_analysis(payload: object) -> Dict[str, Any]:
+        data = None
+        if isinstance(payload, dict):
+            data = payload.get("data")
+        if not isinstance(data, dict):
+            return {
+                "source": "洛谷公开个人页 #lentille-context",
+                "coverage": "仅取得账号公开摘要，未取得题目级记录",
+            }
+
+        daily_counts = data.get("dailyCounts")
+        activity_dates: List[date] = []
+        activity_values: List[int] = []
+        if isinstance(daily_counts, dict):
+            for date_text, value in daily_counts.items():
+                try:
+                    activity_date = datetime.strptime(
+                        str(date_text),
+                        "%Y-%m-%d",
+                    ).date()
+                except ValueError:
+                    continue
+                activity_dates.append(activity_date)
+                if isinstance(value, (list, tuple)) and value:
+                    count = _parse_int(value[0])
+                elif isinstance(value, dict):
+                    count = _parse_int(
+                        value.get("count")
+                        or value.get("submissionCount")
+                        or value.get("value")
+                    )
+                else:
+                    count = _parse_int(value)
+                if count is not None:
+                    activity_values.append(count)
+
+        today = datetime.now(CN_TZ).date()
+        active_days_30 = sum(
+            1 for item in activity_dates
+            if 0 <= (today - item).days <= 30
+        )
+        active_days_90 = sum(
+            1 for item in activity_dates
+            if 0 <= (today - item).days <= 90
+        )
+        month_counts: Dict[str, int] = {}
+        for activity_date in activity_dates:
+            age_days = (today - activity_date).days
+            if 0 <= age_days <= 180:
+                label = activity_date.strftime("%m月")
+                month_counts[label] = month_counts.get(label, 0) + 1
+        month_order = {
+            label: index
+            for index, label in enumerate(
+                (
+                    (today - timedelta(days=30 * offset)).strftime("%m月")
+                    for offset in range(5, -1, -1)
+                )
+            )
+        }
+
+        scores = {}
+        gu = data.get("gu")
+        if isinstance(gu, dict) and isinstance(gu.get("scores"), dict):
+            scores = gu["scores"]
+        user = data.get("user") if isinstance(data.get("user"), dict) else {}
+        solved_count = _parse_int(
+            user.get("passedProblemCount")
+            or user.get("passed")
+            or user.get("solved")
+            or user.get("ac")
+        )
+        submitted_problem_count = _parse_int(
+            user.get("submittedProblemCount")
+            or user.get("submitted")
+            or user.get("attempted")
+        )
+        problem_acceptance_rate = (
+            round(solved_count / submitted_problem_count * 100, 1)
+            if solved_count is not None
+            and submitted_problem_count
+            and submitted_problem_count > 0
+            else None
+        )
+        score_labels = {
+            "basic": "基础信用",
+            "practice": "练习情况",
+            "social": "社区贡献",
+            "contest": "比赛情况",
+            "prize": "获得成就",
+            "rating": "综合评分",
+        }
+        score_distribution = {}
+        for key, label in score_labels.items():
+            value = _parse_int(scores.get(key))
+            if value is not None and value > 0:
+                score_distribution[label] = value
+
+        rating_history: List[Dict[str, Any]] = []
+        elo = data.get("elo")
+        if isinstance(elo, list):
+            for row in elo[:RATING_HISTORY_LIMIT]:
+                if not isinstance(row, dict):
+                    continue
+                contest = row.get("contest")
+                contest_name = (
+                    contest.get("name")
+                    if isinstance(contest, dict)
+                    else ""
+                )
+                rating = _parse_int(row.get("rating"))
+                if rating is None:
+                    continue
+                previous = row.get("previous")
+                old_rating = (
+                    _parse_int(previous.get("rating"))
+                    if isinstance(previous, dict)
+                    else None
+                )
+                delta = _parse_int(row.get("prevDiff"))
+                if delta is None and old_rating is not None:
+                    delta = rating - old_rating
+                rating_history.append(
+                    {
+                        "name": str(contest_name or "洛谷比赛"),
+                        "rank": None,
+                        "delta": delta,
+                        "old_rating": old_rating,
+                        "rating": rating,
+                        "timestamp": _parse_timestamp(row.get("time")),
+                        "url": (
+                            f"https://www.luogu.com.cn/contest/"
+                            f"{contest.get('id')}"
+                            if isinstance(contest, dict)
+                            and contest.get("id")
+                            else ""
+                        ),
+                    }
+                )
+
+        return {
+            "source": "洛谷公开个人页 #lentille-context",
+            "coverage": (
+                "账号摘要、公开活动日历和 Elo 历史；"
+                "洛谷个人页未稳定提供题目级通过记录"
+            ),
+            "active_days_total": len(set(activity_dates)),
+            "active_days_30": active_days_30,
+            "active_days_90": active_days_90,
+            "activity_peak": max(activity_values, default=None),
+            "solved_count": solved_count,
+            "submitted_problem_count": submitted_problem_count,
+            "problem_acceptance_rate": problem_acceptance_rate,
+            "activity_title": "洛谷近半年活跃天数",
+            "activity_distribution": [
+                {"label": label, "count": count}
+                for label, count in sorted(
+                    month_counts.items(),
+                    key=lambda item: (month_order.get(item[0], 99), item[0]),
+                )
+            ],
+            "summary": [
+                item
+                for item in (
+                    (
+                        {
+                            "label": "练习评分",
+                            "value": scores.get("practice"),
+                        }
+                        if scores.get("practice") is not None
+                        else None
+                    ),
+                    (
+                        {
+                            "label": "通过题",
+                            "value": solved_count,
+                        }
+                        if solved_count is not None
+                        else None
+                    ),
+                    (
+                        {
+                            "label": "提交题",
+                            "value": submitted_problem_count,
+                        }
+                        if submitted_problem_count is not None
+                        else None
+                    ),
+                    (
+                        {
+                            "label": "活跃天数",
+                            "value": len(set(activity_dates)),
+                        }
+                        if activity_dates
+                        else None
+                    ),
+                    {"label": "30日活跃", "value": f"{active_days_30}天"},
+                    {"label": "90日活跃", "value": f"{active_days_90}天"},
+                )
+                if item is not None
+            ],
+            "score_title": "洛谷资料分项",
+            "category_title": "洛谷资料分项",
+            "category_distribution": [
+                {"label": label, "count": count}
+                for label, count in score_distribution.items()
+            ],
+            "rating_history": rating_history,
+            "current_rating": (
+                rating_history[0].get("rating")
+                if rating_history
+                else None
+            ),
+            "contest_count": len(rating_history) or None,
+            "max_rating": max(
+                (
+                    item.get("rating")
+                    for item in rating_history
+                    if isinstance(item.get("rating"), int)
+                ),
+                default=None,
+            ),
+        }
 
     @staticmethod
     def _nowcoder_color(rating: Optional[int]) -> str:
@@ -883,7 +1830,11 @@ class AccountFetcher:
         return out
 
     async def _fetch_luogu(
-        self, uid: str, detail: bool
+        self,
+        uid: str,
+        detail: bool,
+        *,
+        include_analysis: bool = False,
     ) -> AccountProfile:
         candidates = [
             LUOGU_PROFILE_URL.format(uid=uid),
@@ -1005,6 +1956,9 @@ class AccountFetcher:
                 "verification_field_source": verification_field_source,
             },
         )
+        if detail and include_analysis:
+            analysis = self._build_luogu_analysis(payload)
+            self._apply_analysis(profile, analysis)
         return profile
 
     @staticmethod
@@ -1028,7 +1982,11 @@ class AccountFetcher:
         return best if best_score >= 2 else None
 
     async def _fetch_atcoder(
-        self, handle: str, detail: bool
+        self,
+        handle: str,
+        detail: bool,
+        *,
+        include_analysis: bool = False,
     ) -> AccountProfile:
         profile_url = ATCODER_PROFILE_URL.format(handle=quote(handle))
         text = await self._fetch_text(
@@ -1092,7 +2050,244 @@ class AccountFetcher:
             avatar_url=avatar,
             source_url=profile_url,
         )
+        if detail and include_analysis:
+            try:
+                async with self._analysis_semaphore:
+                    analysis = await self._fetch_atcoder_analysis(canonical)
+            except AccountFetchError as exc:
+                logger.warning(
+                    "读取 AtCoder 用户 %s 题目分析失败：%s",
+                    canonical,
+                    exc,
+                )
+                analysis = {
+                    "source": "AtCoder Problems（估计难度）",
+                    "coverage": "题目分析暂时无法读取，保留官方资料与 Rating 历史",
+                    "analysis_status": "unavailable",
+                }
+            self._apply_analysis(profile, analysis)
         return profile
+
+    async def _fetch_atcoder_analysis(
+        self,
+        handle: str,
+    ) -> Dict[str, Any]:
+        submissions: List[Dict[str, Any]] = []
+        from_second = 0
+        truncated = False
+        while len(submissions) < ATCODER_SUBMISSION_SCAN_LIMIT:
+            params = urlencode(
+                {
+                    "user": handle,
+                    "from_second": str(from_second),
+                }
+            )
+            data = await self._fetch_json(
+                f"{ATCODER_SUBMISSIONS_URL}?{params}"
+            )
+            if not isinstance(data, list):
+                raise AccountFetchError(
+                    "AtCoder Problems 返回的数据格式异常"
+                )
+            if not data:
+                break
+            remaining = ATCODER_SUBMISSION_SCAN_LIMIT - len(submissions)
+            submissions.extend(
+                item for item in data[:remaining]
+                if isinstance(item, dict)
+            )
+            if len(submissions) >= ATCODER_SUBMISSION_SCAN_LIMIT:
+                truncated = True
+                break
+            timestamps = [
+                _parse_int(item.get("epoch_second"))
+                for item in data
+                if isinstance(item, dict)
+            ]
+            timestamps = [item for item in timestamps if item is not None]
+            if not timestamps:
+                break
+            next_from = max(timestamps) + 1
+            if next_from <= from_second:
+                break
+            from_second = next_from
+            if len(data) < ATCODER_SUBMISSION_PAGE_SIZE:
+                break
+
+        if not submissions:
+            return {
+                "source": "AtCoder Problems（提交记录 + 估计难度）",
+                "coverage": "未取得公开提交记录",
+                "submission_count": 0,
+                "accepted_submission_count": 0,
+                "solved_count": 0,
+                "acceptance_rate": None,
+                "difficulty_title": "AtCoder 估计难度分布",
+                "difficulty_distribution": [],
+                "category_title": "AtCoder 题目系列",
+                "category_distribution": [],
+                "language_distribution": [],
+                "summary": [],
+            }
+
+        try:
+            models_data = await self._fetch_resource_json(
+                "atcoder-problem-models",
+                ATCODER_PROBLEM_MODELS_URL,
+            )
+        except AccountFetchError:
+            models_data = {}
+        model_map = (
+            {
+                str(key): value
+                for key, value in models_data.items()
+                if isinstance(value, dict)
+            }
+            if isinstance(models_data, dict)
+            else {}
+        )
+
+        accepted = [
+            item
+            for item in submissions
+            if str(item.get("result") or "").upper() == "AC"
+        ]
+        unique_accepted: Dict[str, Dict[str, Any]] = {}
+        for item in accepted:
+            problem_id = str(item.get("problem_id") or "").strip()
+            if problem_id:
+                unique_accepted[problem_id] = item
+
+        difficulty_counts: Dict[str, int] = {}
+        series_counts: Dict[str, int] = {}
+        language_counts: Dict[str, int] = {}
+        modeled_count = 0
+        for problem_id in unique_accepted:
+            submission = unique_accepted[problem_id]
+            model = model_map.get(problem_id) or {}
+            difficulty = _parse_int(model.get("difficulty"))
+            if difficulty is None:
+                difficulty_label = "未建模"
+            else:
+                modeled_count += 1
+                difficulty_label = "未建模"
+                for label, minimum, maximum in ATCODER_DIFFICULTY_BUCKETS:
+                    if (
+                        (minimum is None or difficulty >= minimum)
+                        and (maximum is None or difficulty <= maximum)
+                    ):
+                        difficulty_label = label
+                        break
+            difficulty_counts[difficulty_label] = (
+                difficulty_counts.get(difficulty_label, 0) + 1
+            )
+            contest_id = str(
+                submission.get("contest_id")
+                or ""
+            ).casefold()
+            if contest_id.startswith("abc"):
+                series = "ABC"
+            elif contest_id.startswith("arc"):
+                series = "ARC"
+            elif contest_id.startswith("agc"):
+                series = "AGC"
+            elif contest_id.startswith("ahc"):
+                series = "AHC"
+            elif contest_id.startswith("joi"):
+                series = "JOI"
+            elif contest_id:
+                series = "其他赛制"
+            else:
+                series = "未标注"
+            series_counts[series] = series_counts.get(series, 0) + 1
+
+        for item in submissions:
+            language = str(item.get("language") or "").strip() or "未标注"
+            language_counts[language] = language_counts.get(language, 0) + 1
+
+        now = time.time()
+        active_days_30 = set()
+        active_days_90 = set()
+        submissions_30 = 0
+        submissions_90 = 0
+        for item in submissions:
+            timestamp = _parse_timestamp(item.get("epoch_second"))
+            if timestamp is None:
+                continue
+            age = now - timestamp
+            if 0 <= age <= 30 * 86400:
+                submissions_30 += 1
+                active_days_30.add(datetime.fromtimestamp(
+                    timestamp,
+                    tz=CN_TZ,
+                ).date())
+            if 0 <= age <= 90 * 86400:
+                submissions_90 += 1
+                active_days_90.add(datetime.fromtimestamp(
+                    timestamp,
+                    tz=CN_TZ,
+                ).date())
+
+        acceptance_rate = (
+            round(len(accepted) / len(submissions) * 100, 1)
+            if submissions and not truncated
+            else None
+        )
+        difficulty_distribution = [
+            {"label": label, "count": difficulty_counts[label]}
+            for label, _, _ in ATCODER_DIFFICULTY_BUCKETS
+            if difficulty_counts.get(label, 0) > 0
+        ]
+        if difficulty_counts.get("未建模", 0) > 0:
+            difficulty_distribution.append(
+                {"label": "未建模", "count": difficulty_counts["未建模"]}
+            )
+        coverage = (
+            f"AtCoder Problems 提交记录 {len(submissions)} 条；"
+            f"题目模型 {modeled_count}/{len(unique_accepted)}"
+        )
+        if truncated:
+            coverage += f"（最多统计 {ATCODER_SUBMISSION_SCAN_LIMIT} 条提交）"
+        if not model_map:
+            coverage += "；题目模型资源暂不可用"
+        return {
+            "source": "AtCoder Problems（提交记录 + 估计难度）",
+            "coverage": coverage,
+            "submission_count": len(submissions),
+            "accepted_submission_count": len(accepted),
+            "solved_count": len(unique_accepted),
+            "acceptance_rate": acceptance_rate,
+            "active_days_30": len(active_days_30),
+            "active_days_90": len(active_days_90),
+            "submissions_30": submissions_30,
+            "submissions_90": submissions_90,
+            "difficulty_title": "AtCoder 估计难度分布",
+            "difficulty_distribution": difficulty_distribution,
+            "category_title": "AtCoder 题目系列",
+            "category_distribution": _distribution_rows(series_counts),
+            "language_distribution": _distribution_rows(
+                language_counts,
+                limit=8,
+            ),
+            "summary": [
+                item
+                for item in (
+                    {"label": "提交", "value": len(submissions)},
+                    {"label": "通过题", "value": len(unique_accepted)},
+                    (
+                        {
+                            "label": "提交通过率",
+                            "value": f"{acceptance_rate:.1f}%",
+                        }
+                        if acceptance_rate is not None
+                        else None
+                    ),
+                    {"label": "30日活跃", "value": f"{len(active_days_30)}天"},
+                    {"label": "90日活跃", "value": f"{len(active_days_90)}天"},
+                )
+                if item is not None
+            ],
+        }
 
     @staticmethod
     def _extract_atcoder_avatar(text: str) -> str:
