@@ -22,7 +22,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 12
+CARD_FORMAT_VERSION = 13
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -34,7 +34,7 @@ PROFILE_CARD_MULTI_HEIGHT = 351
 PROFILE_GRID_GAP = 18
 RANKING_PAGE_START = 215
 RANKING_LIST_OVERHEAD = 21
-RANKING_HEADER_HEIGHT = 50
+RANKING_HEADER_HEIGHT = 58
 RANKING_ROW_HEIGHT = 112
 RANKING_PILLOW_ROW_STEP = 90
 RANKING_NOTE_MARGIN = 18
@@ -1183,6 +1183,120 @@ class AccountCardRenderer:
         text = str(value or "")
         return sum(2 if not char.isascii() else 1 for char in text)
 
+    @staticmethod
+    def _pillow_text_width(value: object, font) -> float:
+        """读取 Pillow 字体的实际绘制宽度。"""
+        text = "" if value is None else str(value)
+        try:
+            return float(font.getlength(text))
+        except (AttributeError, TypeError, ValueError):
+            try:
+                left, _, right, _ = font.getbbox(text)
+                return float(max(0, right - left))
+            except (AttributeError, TypeError, ValueError):
+                return float(len(text))
+
+    @classmethod
+    def _fit_rank_pillow_text(
+        cls,
+        value: object,
+        font,
+        max_width: float,
+        *,
+        ellipsis: str = "…",
+    ) -> str:
+        """把 Pillow 文本限制在列宽内，避免长昵称压住相邻列。"""
+        text = "" if value is None else str(value)
+        if max_width <= 0:
+            return ""
+        if cls._pillow_text_width(text, font) <= max_width:
+            return text
+        if cls._pillow_text_width(ellipsis, font) > max_width:
+            return ""
+        fitted = ellipsis
+        for index in range(1, len(text) + 1):
+            candidate = text[:index] + ellipsis
+            if cls._pillow_text_width(candidate, font) <= max_width:
+                fitted = candidate
+            else:
+                break
+        return fitted
+
+    @classmethod
+    def _pillow_header_lines(
+        cls,
+        value: object,
+        font,
+        max_width: float,
+    ) -> List[str]:
+        """把过长的 Pillow 表头拆成多行，保留完整指标含义。"""
+        text = "" if value is None else str(value)
+        if not text:
+            return [""]
+        if cls._pillow_text_width(text, font) <= max_width:
+            return [text]
+
+        parts = [part.strip() for part in text.split(" / ")]
+        if len(parts) > 1 and all(
+            cls._pillow_text_width(part, font) <= max_width
+            for part in parts
+        ):
+            return parts
+
+        lines: List[str] = []
+        current = ""
+        for char in text:
+            candidate = current + char
+            if current and cls._pillow_text_width(candidate, font) > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines or [cls._fit_rank_pillow_text(text, font, max_width)]
+
+    @staticmethod
+    def _pillow_draw_right_lines(
+        draw,
+        x: int,
+        y: int,
+        lines: List[str],
+        font,
+        fill: str,
+        *,
+        line_gap: int = 2,
+    ) -> None:
+        """按右上角绘制多行文字，避免 Pillow 表头互相覆盖。"""
+        try:
+            _, top, _, bottom = font.getbbox("Ag")
+            line_height = max(1, bottom - top)
+        except (AttributeError, TypeError, ValueError):
+            line_height = max(1, int(getattr(font, "size", 20)))
+        line_step = line_height + line_gap
+        for index, line in enumerate(lines):
+            draw.text(
+                (x, y + index * line_step),
+                line,
+                font=font,
+                fill=fill,
+                anchor="rt",
+            )
+
+    @classmethod
+    def _overview_row_height(cls, row: object) -> int:
+        """按总览小卡片中的昵称/账号换行情况估算行高。"""
+        if not isinstance(row, dict):
+            return OVERVIEW_ROW_HEIGHT
+        name_width = cls._ranking_text_width(
+            row.get("display_name") or row.get("qq_name") or "未知用户"
+        )
+        handle_width = cls._ranking_text_width(row.get("handle") or "")
+        name_lines = max(1, (name_width + 19) // 20)
+        handle_lines = max(1, (handle_width + 26) // 27)
+        content_height = name_lines * 25 + 4 + handle_lines * 19
+        return max(OVERVIEW_ROW_HEIGHT, content_height + 14)
+
     @classmethod
     def _ranking_row_height(cls, row: object) -> int:
         """估算排行行高，避免长昵称换行后挤压下一行。"""
@@ -1253,7 +1367,10 @@ class AccountCardRenderer:
                 else (
                     OVERVIEW_SECTION_BASE
                     + OVERVIEW_HEADER_HEIGHT
-                    + count * OVERVIEW_ROW_HEIGHT
+                    + sum(
+                        cls._overview_row_height(row)
+                        for row in rows[:5]
+                    )
                 )
             )
         if not section_heights:
@@ -1913,12 +2030,12 @@ class AccountCardRenderer:
     .rank-row:last-child {{ border-bottom:0; }}
     .rank-no {{ color:#d34f93; font-size:30px; line-height:1; font-weight:900; }}
     .rank-user {{ min-width:0; }}
-    .rank-user b {{ display:block; color:#4b2b5c; font-size:24px; line-height:1.3; font-weight:800; overflow-wrap:anywhere; }}
-    .rank-user span {{ display:block; color:#79566f; margin-top:6px; font-size:17px; line-height:1.35; overflow-wrap:anywhere; }}
+    .rank-user b {{ display:block; color:#4b2b5c; font-size:24px; line-height:1.3; font-weight:800; letter-spacing:.2px; overflow-wrap:anywhere; word-break:break-word; }}
+    .rank-user span {{ display:block; color:#79566f; margin-top:6px; font-size:17px; line-height:1.35; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
     .rank-value {{ min-width:0; text-align:right; white-space:nowrap; }}
-    .rank-value strong {{ display:block; color:#4b2b5c; font-size:31px; line-height:1.05; font-weight:900; }}
-    .rank-value small {{ color:#79566f; font-size:15px; line-height:1.3; font-weight:700; }}
-    .rank-delta {{ min-width:0; color:#79566f; text-align:right; font-size:22px; line-height:1.2; font-weight:800; white-space:nowrap; }}
+    .rank-value strong {{ display:block; color:#4b2b5c; font-size:31px; line-height:1.05; font-weight:900; letter-spacing:.25px; }}
+    .rank-value small {{ color:#79566f; font-size:15px; line-height:1.3; font-weight:700; letter-spacing:.2px; }}
+    .rank-delta {{ min-width:0; color:#79566f; text-align:right; font-size:22px; line-height:1.2; font-weight:800; letter-spacing:.25px; white-space:nowrap; }}
     .overview-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start; }}
     .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92)); border:1px solid rgba(255,211,235,.9); border-radius:20px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .mini-section:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 18px var(--accent); }}
@@ -1931,10 +2048,10 @@ class AccountCardRenderer:
     .mini-row:last-child {{ border-bottom:0; }}
     .mini-no {{ color:#d34f93; font-size:20px; line-height:1.1; font-weight:800; }}
     .mini-user {{ min-width:0; }}
-    .mini-user b {{ display:block; color:#4b2b5c; font-size:18px; line-height:1.35; font-weight:800; overflow-wrap:anywhere; }}
-    .mini-user small {{ display:block; color:#79566f; margin-top:4px; font-size:14px; line-height:1.3; overflow-wrap:anywhere; }}
-    .mini-value {{ color:#4b2b5c; font-size:23px; line-height:1.1; font-weight:800; text-align:right; white-space:nowrap; }}
-    .mini-delta {{ color:#79566f; font-size:16px; line-height:1.25; font-weight:700; text-align:right; white-space:nowrap; }}
+    .mini-user b {{ display:block; color:#4b2b5c; font-size:18px; line-height:1.35; font-weight:800; letter-spacing:.2px; overflow-wrap:anywhere; word-break:break-word; }}
+    .mini-user small {{ display:block; color:#79566f; margin-top:4px; font-size:14px; line-height:1.3; letter-spacing:.2px; overflow-wrap:anywhere; word-break:break-word; }}
+    .mini-value {{ color:#4b2b5c; font-size:23px; line-height:1.1; font-weight:800; letter-spacing:.25px; text-align:right; white-space:nowrap; }}
+    .mini-delta {{ color:#79566f; font-size:16px; line-height:1.25; font-weight:700; letter-spacing:.2px; text-align:right; white-space:nowrap; }}
     .mini-delta.positive {{ color:#61f0ad; }}
     .mini-delta.negative {{ color:#ff7899; }}
     .mini-empty {{ color:#a17a95; padding:20px 0; }}
@@ -2958,24 +3075,44 @@ class AccountCardRenderer:
             rows,
             metric_label=metric_label,
         )
-        draw.text(
-            (value_right, y),
+        value_header_font = subtitle_font
+        if cls._pillow_text_width(resolved_header, value_header_font) > 170:
+            value_header_font = cls._find_font(18) or subtitle_font
+        value_header_lines = cls._pillow_header_lines(
             resolved_header,
-            font=subtitle_font,
-            fill=header_fill,
-            anchor="rt",
+            value_header_font,
+            170,
         )
-        draw.text(
-            (delta_right, y),
-            _resolved_secondary_header(
-                secondary_label,
-                rows,
-                metric_label=metric_label,
-                secondary_value_key=secondary_value_key,
-            ),
-            font=subtitle_font,
-            fill=header_fill,
-            anchor="rt",
+        user_max_width = 635
+        cls._pillow_draw_right_lines(
+            draw,
+            value_right,
+            y,
+            value_header_lines,
+            value_header_font,
+            header_fill,
+        )
+        secondary_header = _resolved_secondary_header(
+            secondary_label,
+            rows,
+            metric_label=metric_label,
+            secondary_value_key=secondary_value_key,
+        )
+        secondary_header_font = subtitle_font
+        if cls._pillow_text_width(secondary_header, secondary_header_font) > 125:
+            secondary_header_font = cls._find_font(18) or subtitle_font
+        secondary_header_lines = cls._pillow_header_lines(
+            secondary_header,
+            secondary_header_font,
+            125,
+        )
+        cls._pillow_draw_right_lines(
+            draw,
+            delta_right,
+            y,
+            secondary_header_lines,
+            secondary_header_font,
+            header_fill,
         )
         y += RANKING_HEADER_HEIGHT
         for index, row in enumerate(rows, start=1):
@@ -2989,19 +3126,33 @@ class AccountCardRenderer:
             draw.text((95, y + 15), f"{index:02d}", font=value_font, fill="#d34f93")
             draw.text(
                 (185, y + 11),
-                str(row.get("display_name") or row.get("qq_name") or "未知用户"),
+                cls._fit_rank_pillow_text(
+                    row.get("display_name")
+                    or row.get("qq_name")
+                    or "未知用户",
+                    body_font,
+                    user_max_width,
+                ),
                 font=body_font,
                 fill="#51315d",
             )
             draw.text(
-                (185, y + 38),
-                str(row.get("handle") or "未绑定"),
+                (185, y + 43),
+                cls._fit_rank_pillow_text(
+                    row.get("handle") or "未绑定",
+                    subtitle_font,
+                    user_max_width,
+                ),
                 font=subtitle_font,
                 fill="#79566f",
             )
             draw.text(
                 (value_right, y + 13),
-                _format_number(row.get("display_value", row.get("value"))),
+                cls._fit_rank_pillow_text(
+                    _format_number(row.get("display_value", row.get("value"))),
+                    value_font,
+                    170,
+                ),
                 font=value_font,
                 fill="#51315d",
                 anchor="rt",
@@ -3016,7 +3167,11 @@ class AccountCardRenderer:
             )
             draw.text(
                 (delta_right, y + 22),
-                secondary_text,
+                cls._fit_rank_pillow_text(
+                    secondary_text,
+                    body_font,
+                    125,
+                ),
                 font=body_font,
                 fill="#61f0ad"
                 if (row.get("delta") or 0) >= 0
@@ -3136,37 +3291,84 @@ class AccountCardRenderer:
                 metric_label=section_metric_label,
                 secondary_value_key=secondary_value_key,
             ) if is_progress else secondary_label or "近7日变化"
-            draw.text((x + 20, y + 43), "名次", font=subtitle_font, fill=header_fill)
-            draw.text((x + 75, y + 43), "成员", font=subtitle_font, fill=header_fill)
+            section_header_y = y + 56
+            draw.text(
+                (x + 20, section_header_y),
+                "名次",
+                font=subtitle_font,
+                fill=header_fill,
+            )
+            draw.text(
+                (x + 75, section_header_y),
+                "成员",
+                font=subtitle_font,
+                fill=header_fill,
+            )
             value_right = x + section_w - 110
             delta_right = x + section_w - 22
-            draw.text(
-                (value_right, y + 43),
+            value_header_font = subtitle_font
+            value_header_lines = cls._pillow_header_lines(
                 value_header,
-                font=subtitle_font,
-                fill=header_fill,
-                anchor="rt",
+                value_header_font,
+                132,
             )
-            draw.text(
-                (delta_right, y + 43),
+            delta_header_font = subtitle_font
+            delta_header_lines = cls._pillow_header_lines(
                 delta_header,
-                font=subtitle_font,
-                fill=header_fill,
-                anchor="rt",
+                delta_header_font,
+                84,
             )
-            row_y = y + 82
+            cls._pillow_draw_right_lines(
+                draw,
+                value_right,
+                section_header_y,
+                value_header_lines,
+                value_header_font,
+                header_fill,
+            )
+            cls._pillow_draw_right_lines(
+                draw,
+                delta_right,
+                section_header_y,
+                delta_header_lines,
+                delta_header_font,
+                header_fill,
+            )
+            value_left = value_right - 132
+            user_max_width = max(80, value_left - (x + 75) - 14)
+            row_y = y + 100 + (
+                max(len(value_header_lines), len(delta_header_lines)) - 1
+            ) * 24
             for rank, item in enumerate(rows_data[:5], start=1):
                 draw.text((x + 20, row_y), f"{rank:02d}", font=body_font, fill="#d34f93")
                 draw.text(
                     (x + 75, row_y),
-                    str(item.get("display_name") or item.get("qq_name") or "未知用户"),
+                    cls._fit_rank_pillow_text(
+                        item.get("display_name")
+                        or item.get("qq_name")
+                        or "未知用户",
+                        body_font,
+                        user_max_width,
+                    ),
                     font=body_font,
                     fill="#51315d",
                 )
+                value_text = _format_number(
+                    item.get("display_value", item.get("value"))
+                )
+                value_font_for_item = value_font
+                if cls._pillow_text_width(value_text, value_font) > 132:
+                    value_font_for_item = (
+                        cls._find_font(22, bold=True) or value_font
+                    )
                 draw.text(
                     (value_right, row_y),
-                    _format_number(item.get("display_value", item.get("value"))),
-                    font=value_font,
+                    cls._fit_rank_pillow_text(
+                        value_text,
+                        value_font_for_item,
+                        132,
+                    ),
+                    font=value_font_for_item,
                     fill="#51315d",
                     anchor="rt",
                 )
@@ -3179,14 +3381,21 @@ class AccountCardRenderer:
                     if is_progress
                     else _format_delta(item.get("delta"))
                 )
+                delta_font = subtitle_font
+                if cls._pillow_text_width(delta_value, delta_font) > 84:
+                    delta_font = cls._find_font(16) or subtitle_font
                 draw.text(
                     (delta_right, row_y + 3),
-                    (
-                        _format_number(delta_value)
-                        if is_progress
-                        else str(delta_value)
+                    cls._fit_rank_pillow_text(
+                        (
+                            _format_number(delta_value)
+                            if is_progress
+                            else str(delta_value)
+                        ),
+                        delta_font,
+                        84,
                     ),
-                    font=subtitle_font,
+                    font=delta_font,
                     fill="#79566f",
                     anchor="rt",
                 )

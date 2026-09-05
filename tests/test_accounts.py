@@ -1037,6 +1037,48 @@ def test_ranking_typography_is_readable(tmp_path):
     )
 
 
+def test_pillow_ranking_text_stays_inside_columns(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    font = renderer._find_font(21)
+    assert font is not None
+    long_name = "一长串测试昵称用来观察是否会压到指标列"
+    fitted = renderer._fit_rank_pillow_text(long_name, font, 190)
+
+    assert fitted.endswith("…")
+    assert renderer._pillow_text_width(fitted, font) <= 190
+    assert renderer._pillow_header_lines(
+        "当前 Elo / 平台排名",
+        renderer._find_font(20),
+        84,
+    ) == ["当前 Elo", "平台排名"]
+
+
+def test_overview_height_grows_for_wrapped_member_text(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    short_row = {
+        "display_name": "用户",
+        "handle": "demo",
+        "value": 1800,
+        "display_value": "1800",
+        "metric_label": "Rating",
+        "current_metric_label": "Rating",
+    }
+    long_row = {
+        **short_row,
+        "display_name": "超长中文昵称" * 8,
+        "handle": "very_long_handle_" * 8,
+    }
+    short_height = renderer._overview_height(
+        {"codeforces": [short_row]},
+    )
+    long_height = renderer._overview_height(
+        {"codeforces": [long_row]},
+    )
+
+    assert renderer._overview_row_height(long_row) > 74
+    assert long_height > short_height
+
+
 def test_progress_ranking_uses_current_value_in_fourth_column(tmp_path):
     renderer = AccountCardRenderer(cache_dir=tmp_path)
     rows = [
