@@ -977,6 +977,66 @@ def test_ranking_metric_headers_are_platform_specific():
     )
 
 
+def test_ranking_typography_is_readable(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    ranking_html = renderer._ranking_html(
+        [
+            {
+                "display_name": "测试用户",
+                "handle": "demo",
+                "value": 1800,
+                "display_value": "1800",
+                "metric_label": "Rating",
+                "current_metric_label": "Rating",
+                "delta": 20,
+            }
+        ],
+        title="排行",
+        subtitle="测试",
+        metric_label="Rating",
+        note="",
+    )
+    overview_html = renderer._overview_html(
+        {
+            "codeforces": [
+                {
+                    "display_name": "测试用户",
+                    "handle": "demo",
+                    "value": 1800,
+                    "display_value": "1800",
+                    "metric_label": "Rating",
+                    "current_metric_label": "Rating",
+                    "delta": 20,
+                }
+            ]
+        },
+        title="总览",
+        subtitle="测试",
+        metric_label="Rating",
+        note="",
+    )
+
+    assert (
+        ".rank-user b { display:block; color:#4b2b5c; "
+        "font-size:24px;" in ranking_html
+    )
+    assert (
+        ".rank-value strong { display:block; color:#4b2b5c; "
+        "font-size:31px;" in ranking_html
+    )
+    assert (
+        ".mini-header { display:grid; "
+        "grid-template-columns:50px minmax(0,1fr) 132px 84px;" in overview_html
+    )
+    assert (
+        ".mini-user b { display:block; color:#4b2b5c; "
+        "font-size:18px;" in overview_html
+    )
+    assert (
+        ".mini-value { color:#4b2b5c; font-size:23px;" in overview_html
+    )
+
+
 def test_progress_ranking_uses_current_value_in_fourth_column(tmp_path):
     renderer = AccountCardRenderer(cache_dir=tmp_path)
     rows = [
@@ -1466,8 +1526,8 @@ def test_pillow_overview_layout_uses_previous_row_max_height(tmp_path):
         "luogu",
         "atcoder",
     ]
-    assert section_heights[:2] == [433, 433]
-    assert section_heights[2:] == [153, 153]
+    assert section_heights[:2] == [487, 487]
+    assert section_heights[2:] == [175, 175]
     assert row_tops[1] >= row_tops[0] + max(section_heights[:2]) + 24
 
 

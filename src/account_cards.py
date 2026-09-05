@@ -22,7 +22,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 11
+CARD_FORMAT_VERSION = 12
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -34,8 +34,9 @@ PROFILE_CARD_MULTI_HEIGHT = 351
 PROFILE_GRID_GAP = 18
 RANKING_PAGE_START = 215
 RANKING_LIST_OVERHEAD = 21
-RANKING_HEADER_HEIGHT = 42
-RANKING_ROW_HEIGHT = 104
+RANKING_HEADER_HEIGHT = 50
+RANKING_ROW_HEIGHT = 112
+RANKING_PILLOW_ROW_STEP = 90
 RANKING_NOTE_MARGIN = 18
 RANKING_NOTE_PADDING = 28
 RANKING_NOTE_LINE_HEIGHT = 24
@@ -45,8 +46,9 @@ RANKING_HEIGHT_SAFETY = 24
 RANKING_MIN_RENDER_HEIGHT = 520
 OVERVIEW_PAGE_START = 215
 OVERVIEW_SECTION_BASE = 74
-OVERVIEW_HEADER_HEIGHT = 28
-OVERVIEW_ROW_HEIGHT = 65
+OVERVIEW_HEADER_HEIGHT = 42
+OVERVIEW_ROW_HEIGHT = 74
+OVERVIEW_PILLOW_ROW_STEP = 78
 OVERVIEW_EMPTY_SECTION_HEIGHT = 134
 OVERVIEW_GRID_GAP = 24
 OVERVIEW_HEIGHT_SAFETY = 16
@@ -1190,11 +1192,11 @@ class AccountCardRenderer:
             row.get("display_name") or row.get("qq_name") or "未知用户"
         )
         handle = cls._ranking_text_width(row.get("handle") or "未绑定")
-        # 当前 HTML 中 rank-user 可用宽度约 616px；对应字体下分别按
-        # 55/82 个中英文混排单位估算换行。
-        name_lines = max(1, (display_name + 54) // 55)
-        handle_lines = max(1, (handle + 81) // 82)
-        user_height = name_lines * 30 + 5 + handle_lines * 21
+        # 放大排行字体后，rank-user 可用宽度约 618px；按新的字号估算
+        # 48/72 个中英文混排单位，避免昵称或账号换行后覆盖下一行。
+        name_lines = max(1, (display_name + 47) // 48)
+        handle_lines = max(1, (handle + 71) // 72)
+        user_height = name_lines * 34 + 6 + handle_lines * 24
         return max(RANKING_ROW_HEIGHT, user_height + 40 + 1)
 
     @classmethod
@@ -1294,7 +1296,7 @@ class AccountCardRenderer:
                 if not rows
                 else max(
                     78,
-                    min(5, len(rows)) * 70
+                    min(5, len(rows)) * OVERVIEW_PILLOW_ROW_STEP
                     + 55
                     + OVERVIEW_HEADER_HEIGHT,
                 )
@@ -1902,33 +1904,37 @@ class AccountCardRenderer:
     .profile-meta > .trend,
     .profile-meta > .recent,
     .profile-meta > .extra {{ flex:1 1 210px; min-width:0; margin-top:0; }}
-    .ranking-list {{ position:relative; overflow:hidden; padding:10px 24px; }}
-    .rank-header {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:4px 8px 10px; color:#a17a95; font-size:13px; font-weight:800; letter-spacing:.5px; border-bottom:1px solid rgba(184,113,157,.24); }}
+    .ranking-list {{ position:relative; overflow:hidden; padding:12px 24px; }}
+    .rank-header {{ display:grid; grid-template-columns:80px 1fr 175px 125px; align-items:center; gap:14px; min-height:50px; padding:6px 8px 12px; color:#7d526f; font-size:15px; line-height:1.25; font-weight:800; letter-spacing:.25px; border-bottom:1px solid rgba(184,113,157,.3); }}
+    .rank-header span {{ min-width:0; white-space:nowrap; }}
     .rank-header span:nth-child(3),
     .rank-header span:nth-child(4) {{ text-align:right; }}
-    .rank-row {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:20px 8px; border-bottom:1px solid rgba(184,113,157,.2); }}
+    .rank-row {{ display:grid; grid-template-columns:80px 1fr 175px 125px; align-items:center; gap:14px; min-height:112px; padding:22px 8px; border-bottom:1px solid rgba(184,113,157,.22); }}
     .rank-row:last-child {{ border-bottom:0; }}
-    .rank-no {{ color:#d34f93; font-size:28px; font-weight:900; }}
-    .rank-user b {{ display:block; color:#4b2b5c; font-size:21px; }}
-    .rank-user span {{ display:block; color:#9a718c; margin-top:5px; font-size:15px; overflow-wrap:anywhere; }}
-    .rank-value {{ text-align:right; }}
-    .rank-value strong {{ display:block; color:#4b2b5c; font-size:27px; }}
-    .rank-value small {{ color:#a17a95; font-size:13px; }}
-    .rank-delta {{ text-align:right; font-size:19px; font-weight:800; }}
+    .rank-no {{ color:#d34f93; font-size:30px; line-height:1; font-weight:900; }}
+    .rank-user {{ min-width:0; }}
+    .rank-user b {{ display:block; color:#4b2b5c; font-size:24px; line-height:1.3; font-weight:800; overflow-wrap:anywhere; }}
+    .rank-user span {{ display:block; color:#79566f; margin-top:6px; font-size:17px; line-height:1.35; overflow-wrap:anywhere; }}
+    .rank-value {{ min-width:0; text-align:right; white-space:nowrap; }}
+    .rank-value strong {{ display:block; color:#4b2b5c; font-size:31px; line-height:1.05; font-weight:900; }}
+    .rank-value small {{ color:#79566f; font-size:15px; line-height:1.3; font-weight:700; }}
+    .rank-delta {{ min-width:0; color:#79566f; text-align:right; font-size:22px; line-height:1.2; font-weight:800; white-space:nowrap; }}
     .overview-grid {{ position:relative; display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start; }}
     .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92)); border:1px solid rgba(255,211,235,.9); border-radius:20px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .mini-section:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 18px var(--accent); }}
-    .mini-section h2 {{ margin:0 0 8px; color:var(--accent); font-size:22px; }}
-    .mini-header {{ display:grid; grid-template-columns:48px 1fr 90px 72px; align-items:center; gap:8px; min-height:24px; color:#a17a95; font-size:11px; font-weight:800; border-bottom:1px solid rgba(184,113,157,.2); }}
+    .mini-section h2 {{ margin:0 0 8px; color:var(--accent); font-size:24px; line-height:1.2; }}
+    .mini-header {{ display:grid; grid-template-columns:50px minmax(0,1fr) 132px 84px; align-items:center; gap:10px; min-height:42px; padding-bottom:6px; color:#7d526f; font-size:13px; line-height:1.25; font-weight:800; letter-spacing:.1px; border-bottom:1px solid rgba(184,113,157,.26); }}
+    .mini-header span {{ min-width:0; }}
     .mini-header span:nth-child(3),
     .mini-header span:nth-child(4) {{ text-align:right; }}
-    .mini-row {{ display:grid; grid-template-columns:48px 1fr 90px 72px; align-items:center; gap:8px; min-height:65px; border-bottom:1px solid rgba(184,113,157,.18); }}
+    .mini-row {{ display:grid; grid-template-columns:50px minmax(0,1fr) 132px 84px; align-items:center; gap:10px; min-height:74px; border-bottom:1px solid rgba(184,113,157,.2); }}
     .mini-row:last-child {{ border-bottom:0; }}
-    .mini-no {{ color:#d34f93; font-size:18px; font-weight:800; }}
-    .mini-user b {{ display:block; color:#4b2b5c; font-size:16px; overflow-wrap:anywhere; }}
-    .mini-user small {{ display:block; color:#9a718c; margin-top:3px; font-size:12px; overflow-wrap:anywhere; }}
-    .mini-value {{ color:#4b2b5c; font-size:20px; text-align:right; }}
-    .mini-delta {{ color:#9a718c; font-size:14px; text-align:right; }}
+    .mini-no {{ color:#d34f93; font-size:20px; line-height:1.1; font-weight:800; }}
+    .mini-user {{ min-width:0; }}
+    .mini-user b {{ display:block; color:#4b2b5c; font-size:18px; line-height:1.35; font-weight:800; overflow-wrap:anywhere; }}
+    .mini-user small {{ display:block; color:#79566f; margin-top:4px; font-size:14px; line-height:1.3; overflow-wrap:anywhere; }}
+    .mini-value {{ color:#4b2b5c; font-size:23px; line-height:1.1; font-weight:800; text-align:right; white-space:nowrap; }}
+    .mini-delta {{ color:#79566f; font-size:16px; line-height:1.25; font-weight:700; text-align:right; white-space:nowrap; }}
     .mini-delta.positive {{ color:#61f0ad; }}
     .mini-delta.negative {{ color:#ff7899; }}
     .mini-empty {{ color:#a17a95; padding:20px 0; }}
@@ -2907,16 +2913,18 @@ class AccountCardRenderer:
         except ImportError:
             return False
         title_font = cls._find_font(40, bold=True)
-        subtitle_font = cls._find_font(19)
-        body_font = cls._find_font(19)
-        value_font = cls._find_font(28, bold=True)
+        subtitle_font = cls._find_font(20)
+        body_font = cls._find_font(21)
+        value_font = cls._find_font(30, bold=True)
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
         height = max(
             MIN_CARD_HEIGHT,
             min(
                 MAX_CARD_HEIGHT,
-                450 + RANKING_HEADER_HEIGHT + len(rows) * 82,
+                450
+                + RANKING_HEADER_HEIGHT
+                + len(rows) * RANKING_PILLOW_ROW_STEP,
             ),
         )
         image = PILImage.new("RGB", (CARD_WIDTH, height), "#2a193b")
@@ -2940,7 +2948,9 @@ class AccountCardRenderer:
         draw.text((70, 88), title, font=title_font, fill="#fff7fb")
         draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
         y = 205
-        header_fill = "#a17a95"
+        header_fill = "#79566f"
+        value_right = 1020
+        delta_right = CARD_WIDTH - 70
         draw.text((95, y), "名次", font=subtitle_font, fill=header_fill)
         draw.text((185, y), "成员 / 账号", font=subtitle_font, fill=header_fill)
         resolved_header = _resolved_value_header(
@@ -2949,13 +2959,14 @@ class AccountCardRenderer:
             metric_label=metric_label,
         )
         draw.text(
-            (850, y),
+            (value_right, y),
             resolved_header,
             font=subtitle_font,
             fill=header_fill,
+            anchor="rt",
         )
         draw.text(
-            (1040, y),
+            (delta_right, y),
             _resolved_secondary_header(
                 secondary_label,
                 rows,
@@ -2964,17 +2975,18 @@ class AccountCardRenderer:
             ),
             font=subtitle_font,
             fill=header_fill,
+            anchor="rt",
         )
         y += RANKING_HEADER_HEIGHT
         for index, row in enumerate(rows, start=1):
             draw.rounded_rectangle(
-                (70, y, CARD_WIDTH - 70, y + 64),
+                (70, y, CARD_WIDTH - 70, y + 72),
                 radius=12,
                 fill="#fff5fb",
                 outline="#efc5dc",
                 width=1,
             )
-            draw.text((95, y + 16), f"{index:02d}", font=value_font, fill="#d34f93")
+            draw.text((95, y + 15), f"{index:02d}", font=value_font, fill="#d34f93")
             draw.text(
                 (185, y + 11),
                 str(row.get("display_name") or row.get("qq_name") or "未知用户"),
@@ -2985,13 +2997,14 @@ class AccountCardRenderer:
                 (185, y + 38),
                 str(row.get("handle") or "未绑定"),
                 font=subtitle_font,
-                fill="#9a718c",
+                fill="#79566f",
             )
             draw.text(
-                (850, y + 14),
+                (value_right, y + 13),
                 _format_number(row.get("display_value", row.get("value"))),
                 font=value_font,
                 fill="#51315d",
+                anchor="rt",
             )
             secondary_value = row.get(secondary_value_key)
             if secondary_value is None and secondary_value_key != "delta":
@@ -3002,14 +3015,15 @@ class AccountCardRenderer:
                 else _format_number(secondary_value)
             )
             draw.text(
-                (1040, y + 21),
+                (delta_right, y + 22),
                 secondary_text,
                 font=body_font,
                 fill="#61f0ad"
                 if (row.get("delta") or 0) >= 0
                 else "#ff7899",
+                anchor="rt",
             )
-            y += 82
+            y += RANKING_PILLOW_ROW_STEP
         if note:
             draw.text(
                 (70, min(y, image.height - 100)),
@@ -3047,9 +3061,9 @@ class AccountCardRenderer:
         except ImportError:
             return False
         title_font = cls._find_font(40, bold=True)
-        subtitle_font = cls._find_font(19)
-        body_font = cls._find_font(18)
-        value_font = cls._find_font(25, bold=True)
+        subtitle_font = cls._find_font(20)
+        body_font = cls._find_font(20)
+        value_font = cls._find_font(28, bold=True)
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
         items, section_heights, row_tops = cls._pillow_overview_layout(
@@ -3101,7 +3115,7 @@ class AccountCardRenderer:
                 width=2,
             )
             draw.text((x + 20, y + 14), platform_label(platform), font=value_font, fill=accent)
-            header_fill = "#a17a95"
+            header_fill = "#79566f"
             section_metric_label = rank_metric_label_for_rows(
                 rows_data,
                 platform=platform,
@@ -3124,19 +3138,23 @@ class AccountCardRenderer:
             ) if is_progress else secondary_label or "近7日变化"
             draw.text((x + 20, y + 43), "名次", font=subtitle_font, fill=header_fill)
             draw.text((x + 75, y + 43), "成员", font=subtitle_font, fill=header_fill)
+            value_right = x + section_w - 110
+            delta_right = x + section_w - 22
             draw.text(
-                (x + section_w - 205, y + 43),
+                (value_right, y + 43),
                 value_header,
                 font=subtitle_font,
                 fill=header_fill,
+                anchor="rt",
             )
             draw.text(
-                (x + section_w - 95, y + 43),
+                (delta_right, y + 43),
                 delta_header,
                 font=subtitle_font,
                 fill=header_fill,
+                anchor="rt",
             )
-            row_y = y + 78
+            row_y = y + 82
             for rank, item in enumerate(rows_data[:5], start=1):
                 draw.text((x + 20, row_y), f"{rank:02d}", font=body_font, fill="#d34f93")
                 draw.text(
@@ -3146,10 +3164,11 @@ class AccountCardRenderer:
                     fill="#51315d",
                 )
                 draw.text(
-                    (x + section_w - 205, row_y),
+                    (value_right, row_y),
                     _format_number(item.get("display_value", item.get("value"))),
                     font=value_font,
                     fill="#51315d",
+                    anchor="rt",
                 )
                 current_value = item.get(
                     "current_display_value",
@@ -3161,16 +3180,17 @@ class AccountCardRenderer:
                     else _format_delta(item.get("delta"))
                 )
                 draw.text(
-                    (x + section_w - 95, row_y + 3),
+                    (delta_right, row_y + 3),
                     (
                         _format_number(delta_value)
                         if is_progress
                         else str(delta_value)
                     ),
                     font=subtitle_font,
-                    fill="#80617d",
+                    fill="#79566f",
+                    anchor="rt",
                 )
-                row_y += 70
+                row_y += OVERVIEW_PILLOW_ROW_STEP
         if note:
             draw.text(
                 (70, max(205, image.height - 112)),
