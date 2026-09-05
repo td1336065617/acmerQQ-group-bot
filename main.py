@@ -1834,11 +1834,15 @@ class AcmerGroupBot(Star):
                 [
                     title,
                     f"当前显示 {start + 1}-{end} / {total} 名成员",
-                    f"名次｜成员 / 账号｜{metric_header}｜近7日变化",
                     *(
-                        f"{i}. {row['display_name']}（{row['handle']}）｜"
-                        f"{row.get('display_value', row['value'])}｜"
-                        f"{_format_signed_number(row.get('delta'))}"
+                        (
+                            f"{i}. {row['display_name']}\n"
+                            f"   账号：{row['handle']} · "
+                            f"{metric_header}："
+                            f"{row.get('display_value', row['value'])} · "
+                            f"近7日变化："
+                            f"{_format_signed_number(row.get('delta'))}"
+                        )
                         for i, row in enumerate(page_rows, start + 1)
                     ),
                     f"提示：{note}",
@@ -1888,14 +1892,6 @@ class AcmerGroupBot(Star):
                     fallback="Rating",
                 )
                 section_metric_header = current_metric_header(section_metric)
-                if progress:
-                    fallback_lines.append(
-                        f"名次｜成员｜近7日变化｜{section_metric_header}"
-                    )
-                else:
-                    fallback_lines.append(
-                        f"名次｜成员｜{section_metric_header}｜近7日变化"
-                    )
                 for i, row in enumerate(rows, 1):
                     value = row.get("display_value", row["value"])
                     current_value = row.get(
@@ -1904,15 +1900,17 @@ class AcmerGroupBot(Star):
                     )
                     if progress:
                         value_text = (
-                            f"{value}｜{current_value or '—'}"
+                            f"近7日变化：{value} · "
+                            f"{section_metric_header}：{current_value or '—'}"
                         )
                     else:
                         value_text = (
-                            f"{value}｜{_format_signed_number(row.get('delta'))}"
+                            f"{section_metric_header}：{value} · "
+                            f"近7日变化：{_format_signed_number(row.get('delta'))}"
                         )
                     fallback_lines.append(
-                        f"{i}. {row['display_name']}（{row['handle']}）｜"
-                        f"{value_text}"
+                        f"{i}. {row['display_name']}\n"
+                        f"   账号：{row['handle']} · {value_text}"
                     )
             fallback_lines.append(f"提示：{note}")
             fallback = "\n".join(fallback_lines)

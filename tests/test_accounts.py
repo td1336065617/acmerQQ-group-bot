@@ -1017,23 +1017,23 @@ def test_ranking_typography_is_readable(tmp_path):
     )
 
     assert (
-        ".rank-user b { display:block; color:#4b2b5c; "
-        "font-size:24px;" in ranking_html
+        ".rank-header { display:grid; "
+        "grid-template-columns:72px minmax(0,1fr) 180px 140px;" in ranking_html
     )
     assert (
-        ".rank-value strong { display:block; color:#4b2b5c; "
-        "font-size:31px;" in ranking_html
+        ".rank-user b { display:block; color:#4b2b5c; "
+        "font-size:22px;" in ranking_html
     )
     assert (
         ".mini-header { display:grid; "
-        "grid-template-columns:50px minmax(0,1fr) 132px 84px;" in overview_html
+        "grid-template-columns:50px minmax(0,1fr) 155px 110px;" in overview_html
     )
     assert (
         ".mini-user b { display:block; color:#4b2b5c; "
-        "font-size:18px;" in overview_html
+        "font-size:17px;" in overview_html
     )
     assert (
-        ".mini-value { color:#4b2b5c; font-size:23px;" in overview_html
+        ".mini-value { color:#4b2b5c; font-size:22px;" in overview_html
     )
 
 
@@ -1046,11 +1046,23 @@ def test_pillow_ranking_text_stays_inside_columns(tmp_path):
 
     assert fitted.endswith("…")
     assert renderer._pillow_text_width(fitted, font) <= 190
-    assert renderer._pillow_header_lines(
+    header_font = renderer._find_font(18)
+    assert header_font is not None
+    fitted_header = renderer._fit_rank_pillow_text(
         "当前 Elo / 平台排名",
-        renderer._find_font(20),
-        84,
-    ) == ["当前 Elo", "平台排名"]
+        header_font,
+        170,
+    )
+    assert fitted_header == "当前 Elo / 平台排名"
+    assert "\n" not in fitted_header
+    assert (
+        renderer._fit_rank_pillow_text(
+            "近7日变化",
+            header_font,
+            125,
+        )
+        == "近7日变化"
+    )
 
 
 def test_overview_height_grows_for_wrapped_member_text(tmp_path):
@@ -1568,8 +1580,8 @@ def test_pillow_overview_layout_uses_previous_row_max_height(tmp_path):
         "luogu",
         "atcoder",
     ]
-    assert section_heights[:2] == [487, 487]
-    assert section_heights[2:] == [175, 175]
+    assert section_heights[:2] == [481, 481]
+    assert section_heights[2:] == [169, 169]
     assert row_tops[1] >= row_tops[0] + max(section_heights[:2]) + 24
 
 

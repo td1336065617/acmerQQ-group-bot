@@ -6,7 +6,7 @@ desc: |
   支持 XCPC Link 线下赛查询、四平台账号绑定、个人战绩卡、群排行、
   每日早报、赛前 15 分钟提醒与 WebUI 配置。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
-version: 1.2.21
+version: 1.2.23
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot/tree/master
 astrbot_version: ">=4.13.0,<5"
