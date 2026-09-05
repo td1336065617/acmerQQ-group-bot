@@ -240,8 +240,39 @@ def test_codeforces_difficulty_distribution_deduplicates_accepted_problems():
         {"label": "≤999", "count": 1},
         {"label": "1200–1399", "count": 1},
         {"label": "1600–1799", "count": 1},
-        {"label": "2400+", "count": 1},
+        {"label": "2400–2599", "count": 1},
         {"label": "未标分", "count": 1},
+    ]
+
+
+def test_codeforces_difficulty_distribution_splits_high_ratings():
+    rows = [
+        {
+            "id": index,
+            "verdict": "OK",
+            "problem": {
+                "contestId": index,
+                "index": "A",
+                "rating": rating,
+            },
+        }
+        for index, rating in enumerate(
+            (2400, 2599, 2600, 2799, 2800, 2999, 3000, 3199, 3200),
+            start=1,
+        )
+    ]
+
+    distribution, solved_count = (
+        AccountFetcher._parse_cf_difficulty_distribution(rows)
+    )
+
+    assert solved_count == 9
+    assert distribution == [
+        {"label": "2400–2599", "count": 2},
+        {"label": "2600–2799", "count": 2},
+        {"label": "2800–2999", "count": 2},
+        {"label": "3000–3199", "count": 2},
+        {"label": "3200+", "count": 1},
     ]
 
 
@@ -646,6 +677,81 @@ def test_profile_card_includes_dense_stats_and_difficulty_distribution(
     assert "CF 做题分布" in profile_html
     assert "1200–1399" in profile_html
     assert "近 10000 条提交" in profile_html
+
+
+def test_profile_card_includes_charts_and_adaptive_chart_height(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="demo",
+        rating=1820,
+        difficulty_distribution=[
+            {"label": "≤999", "count": 12},
+            {"label": "1200–1399", "count": 18},
+            {"label": "1600–1799", "count": 9},
+            {"label": "2400–2599", "count": 2},
+            {"label": "3200+", "count": 1},
+            {"label": "未标分", "count": 3},
+        ],
+        rating_history=[
+            {"rating": 1500, "timestamp": 1},
+            {"rating": 1610, "timestamp": 2},
+            {"rating": 1580, "timestamp": 3},
+            {"rating": 1820, "timestamp": 4},
+        ],
+    )
+
+    profile_html = renderer._profile_html(
+        [profile],
+        display_name="测试用户",
+        weekly_changes={"codeforces": 30},
+    )
+
+    assert 'class="difficulty-bars"' in profile_html
+    assert 'class="difficulty-track"' in profile_html
+    assert "2400–2599" in profile_html
+    assert "3200+" in profile_html
+    assert 'class="rating-chart"' in profile_html
+    assert "<polyline" in profile_html
+    assert "最新 1820" in profile_html
+    assert renderer._estimate_height(
+        {"kind": "profile", "profiles": [profile.public_dict()]}
+    ) > 760
+
+
+def test_pillow_profile_fallback_renders_charts(tmp_path):
+    pytest.importorskip("PIL")
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="demo",
+        rating=1800,
+        difficulty_distribution=[
+            {"label": "1200–1399", "count": 4},
+            {"label": "1800–1999", "count": 2},
+            {"label": "3000–3199", "count": 1},
+        ],
+        rating_history=[
+            {"rating": 1500, "timestamp": 1},
+            {"rating": 1700, "timestamp": 2},
+            {"rating": 1800, "timestamp": 3},
+        ],
+    )
+    image_path = tmp_path / "profile-fallback.png"
+
+    assert renderer._pillow_profile(
+        [profile],
+        "测试用户",
+        {"codeforces": 20},
+        {},
+        tmp_path,
+        image_path,
+    )
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        assert image.size[0] == 1200
+        assert image.size[1] > 760
 
 
 def test_profile_card_avatar_url_normalization():

@@ -8,6 +8,8 @@ import base64
 import json
 import mimetypes
 import os
+import shutil
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -20,7 +22,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 8
+CARD_FORMAT_VERSION = 9
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -49,6 +51,12 @@ OVERVIEW_EMPTY_SECTION_HEIGHT = 134
 OVERVIEW_GRID_GAP = 24
 OVERVIEW_HEIGHT_SAFETY = 16
 OVERVIEW_MIN_RENDER_HEIGHT = 520
+DIFFICULTY_CHART_COLUMNS = 2
+DIFFICULTY_CHART_TITLE_HEIGHT = 32
+DIFFICULTY_CHART_ROW_HEIGHT = 27
+DIFFICULTY_CHART_BOTTOM_PADDING = 16
+RATING_CHART_HEIGHT = 150
+RATING_CHART_DISPLAY_LIMIT = 8
 
 PLATFORM_COLORS = {
     "codeforces": ("#df6c9e", "#f4a7c6"),
@@ -170,6 +178,49 @@ def _difficulty_title(profile: object) -> str:
     return f"CF 做题分布 · 已通过 {total} 题"
 
 
+def _rating_history_values(profile: object, limit: int = 8) -> List[int]:
+    raw = _profile_field(profile, "rating_history", []) or []
+    if not isinstance(raw, list):
+        return []
+    values = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        try:
+            rating = int(item.get("rating"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            timestamp = float(item.get("timestamp") or index)
+        except (TypeError, ValueError):
+            timestamp = float(index)
+        values.append((timestamp, index, rating))
+    values.sort(key=lambda item: (item[0], item[1]))
+    return [rating for _, _, rating in values[-max(2, int(limit)):]]
+
+
+def _difficulty_chart_height(profile: object) -> int:
+    items = _difficulty_items(profile)
+    if not items:
+        return 0
+    rows = (
+        len(items) + DIFFICULTY_CHART_COLUMNS - 1
+    ) // DIFFICULTY_CHART_COLUMNS
+    return (
+        DIFFICULTY_CHART_TITLE_HEIGHT
+        + rows * DIFFICULTY_CHART_ROW_HEIGHT
+        + DIFFICULTY_CHART_BOTTOM_PADDING
+    )
+
+
+def _rating_chart_height(profile: object) -> int:
+    return (
+        RATING_CHART_HEIGHT
+        if len(_rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)) >= 2
+        else 0
+    )
+
+
 def _difficulty_scan_is_partial(profile: object) -> bool:
     extra = _profile_field(profile, "extra", {}) or {}
     if not isinstance(extra, dict):
@@ -193,37 +244,6 @@ def _solved_count_label(profile: object) -> str:
 def _difficulty_text(profile: object) -> str:
     items = _difficulty_items(profile)
     return " · ".join(f"{label} {count}" for label, count in items)
-
-
-def _difficulty_lines(
-    profile: object,
-    *,
-    max_units: int,
-) -> List[str]:
-    title = _difficulty_title(profile)
-    if not title:
-        return []
-    parts = [f"{label} {count}" for label, count in _difficulty_items(profile)]
-    lines: List[str] = []
-    current = f"{title}："
-    for part in parts:
-        candidate = f"{current} {part}" if current.endswith("：") else f"{current} · {part}"
-        if (
-            not current.endswith("：")
-            and _text_width_for_layout(candidate) > max_units
-        ):
-            lines.append(current)
-            current = f"  {part}"
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    return lines
-
-
-def _text_width_for_layout(value: object) -> int:
-    text = str(value or "")
-    return sum(2 if not char.isascii() else 1 for char in text)
 
 
 def _profile_extra_text(profile: object) -> str:
@@ -622,12 +642,12 @@ class AccountCardRenderer:
         # 多平台卡的排行信息通常会在窄卡片中换到下一行；单平台卡可横向容纳。
         if has_group_rank and not compact:
             height += 33
-        difficulty_lines = _difficulty_lines(
-            profile,
-            max_units=128 if compact else 68,
-        )
-        if difficulty_lines:
-            height += 30 + len(difficulty_lines) * 24
+        difficulty_height = _difficulty_chart_height(profile)
+        if difficulty_height:
+            height += difficulty_height + 10
+        rating_height = _rating_chart_height(profile)
+        if rating_height:
+            height += rating_height + 10
 
         # 单平台卡片使用整行宽度；这些阈值对应压缩后的 CSS 卡片宽度。
         handle_width = cls._text_width(values["handle"])
@@ -919,15 +939,74 @@ class AccountCardRenderer:
         items = _difficulty_items(profile)
         if not items:
             return ""
-        chips = "".join(
-            f'<span class="difficulty-chip"><b>{_escape(label)}</b>'
-            f'<strong>{_escape(count)}</strong></span>'
-            for label, count in items
-        )
+        maximum = max(count for _, count in items)
+        bars = []
+        for label, count in items:
+            percent = count / maximum * 100 if maximum else 0
+            row_class = " difficulty-unknown" if label == "未标分" else ""
+            bars.append(
+                f'<div class="difficulty-row{row_class}">'
+                f'<span class="difficulty-label">{_escape(label)}</span>'
+                '<span class="difficulty-track">'
+                f'<i class="difficulty-fill" style="width:{percent:.2f}%"></i>'
+                "</span>"
+                f'<strong class="difficulty-count">{_escape(count)}</strong>'
+                "</div>"
+            )
         return (
             '<div class="difficulty-panel">'
             f'<div class="difficulty-title">{_escape(_difficulty_title(profile))}</div>'
-            f'<div class="difficulty-grid">{chips}</div>'
+            f'<div class="difficulty-bars">{"".join(bars)}</div>'
+            "</div>"
+        )
+
+    @classmethod
+    def _rating_history_html(cls, profile: object) -> str:
+        values = _rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)
+        if len(values) < 2:
+            return ""
+
+        minimum = min(values)
+        maximum = max(values)
+        span = maximum - minimum
+        padding = max(25, int(span * 0.12))
+        lower = minimum - padding
+        upper = maximum + padding
+        scale = max(1, upper - lower)
+        point_coords = []
+        for index, value in enumerate(values):
+            x = 10 + 80 * index / (len(values) - 1)
+            y = 46 - 34 * (value - lower) / scale
+            point_coords.append((x, y, value))
+        point_text = " ".join(
+            f"{x:.2f},{y:.2f}" for x, y, _ in point_coords
+        )
+        area_text = f"{point_text} 90,48 10,48"
+        circles = "".join(
+            f'<circle class="rating-chart-dot" cx="{x:.2f}" cy="{y:.2f}" r="1.7">'
+            f"<title>第 {index + 1} 场：{value}</title></circle>"
+            for index, (x, y, value) in enumerate(point_coords)
+        )
+        return (
+            '<div class="rating-chart">'
+            '<div class="rating-chart-head">'
+            '<span class="rating-chart-title">Rating 趋势</span>'
+            f'<small>最近 {len(values)} 场</small>'
+            "</div>"
+            '<svg class="rating-chart-svg" viewBox="0 0 100 58" '
+            'preserveAspectRatio="none" role="img" aria-label="Rating 趋势">'
+            '<line class="rating-chart-gridline" x1="10" y1="12" x2="90" y2="12"></line>'
+            '<line class="rating-chart-gridline" x1="10" y1="29" x2="90" y2="29"></line>'
+            '<line class="rating-chart-gridline" x1="10" y1="46" x2="90" y2="46"></line>'
+            f'<polygon class="rating-chart-area" points="{area_text}"></polygon>'
+            f'<polyline class="rating-chart-line" points="{point_text}"></polyline>'
+            f"{circles}"
+            "</svg>"
+            '<div class="rating-chart-scale">'
+            f"<span>{_escape(minimum)}</span>"
+            f"<b>最新 {_escape(values[-1])}</b>"
+            f"<span>{_escape(maximum)}</span>"
+            "</div>"
             "</div>"
         )
 
@@ -963,6 +1042,7 @@ class AccountCardRenderer:
             extras = _profile_extra_text(profile)
             latest = profile.recent_contests[0] if profile.recent_contests else {}
             difficulty_html = cls._difficulty_html(profile)
+            rating_history_html = cls._rating_history_html(profile)
             latest_text = ""
             if isinstance(latest, dict) and latest.get("name"):
                 latest_text = (
@@ -1026,6 +1106,7 @@ class AccountCardRenderer:
                   <div class="stats">{details_html}</div>
                   <div class="profile-meta">
                     {difficulty_html}
+                    {rating_history_html}
                     <div class="trend {delta_class}">本次变化：{_escape(_format_delta(delta))}</div>
                     {latest_text}
                     {f'<div class="extra">{_escape(extras)}</div>' if extras else ""}
@@ -1228,7 +1309,9 @@ class AccountCardRenderer:
     html, body {{ margin:0; padding:0; min-height:100%; }}
     body {{
       color:#4c315b;
-      font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;
+      font-family:"Noto Sans CJK SC","Noto Sans CJK TC","Noto Sans","Microsoft YaHei",Arial,sans-serif;
+      -webkit-font-smoothing:antialiased;
+      text-rendering:optimizeLegibility;
       background:
         radial-gradient(circle at 8% 12%, rgba(255,190,224,.34), transparent 28%),
         radial-gradient(circle at 92% 18%, rgba(165,225,255,.28), transparent 26%),
@@ -1270,13 +1353,13 @@ class AccountCardRenderer:
     .rating-label {{ color:#9d718d; font-size:14px; letter-spacing:1px; }}
     .rank {{ color:#6f4b71; font-size:18px; }}
     .stats {{ display:grid; grid-template-columns:1fr 1fr; gap:10px 18px; }}
-    .stat {{ display:flex; justify-content:space-between; gap:10px; color:#a27692; font-size:15px; border-bottom:1px dashed rgba(180,113,157,.26); padding-bottom:7px; }}
-    .stat b {{ color:#4f315e; font-size:17px; text-align:right; }}
-    .trend {{ margin-top:16px; color:#8d6382; font-size:17px; }}
+    .stat {{ display:flex; justify-content:space-between; gap:10px; color:#795572; font-size:15px; font-weight:600; border-bottom:1px dashed rgba(180,113,157,.3); padding-bottom:7px; }}
+    .stat b {{ color:#452852; font-size:17px; font-weight:800; text-align:right; }}
+    .trend {{ margin-top:16px; color:#795572; font-size:17px; font-weight:600; }}
     .trend.positive, .rank-delta.positive {{ color:#61f0ad; }}
     .trend.negative, .rank-delta.negative {{ color:#ff7899; }}
-    .extra {{ margin-top:13px; color:#9a718c; font-size:15px; overflow-wrap:anywhere; }}
-    .recent {{ margin-top:13px; color:#80617d; font-size:15px; overflow-wrap:anywhere; }}
+    .extra {{ margin-top:13px; color:#795572; font-size:15px; font-weight:600; overflow-wrap:anywhere; }}
+    .recent {{ margin-top:13px; color:#76506d; font-size:15px; font-weight:600; overflow-wrap:anywhere; }}
     .profile-main {{ position:relative; }}
     .identity-line {{ display:flex; align-items:center; gap:14px; min-width:0; }}
     .identity-copy {{ min-width:0; flex:1; }}
@@ -1288,12 +1371,27 @@ class AccountCardRenderer:
     .group-rank b {{ color:#6b315f; font-size:17px; }}
     .group-rank.muted {{ color:#a17a95; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
-    .difficulty-panel {{ flex:1 1 100%; min-width:0; padding:10px 12px 11px; border:1px solid rgba(205,145,184,.32); border-radius:12px; background:linear-gradient(105deg,rgba(255,245,251,.76),rgba(228,247,252,.58)); }}
-    .difficulty-title {{ color:#8d5f82; font-size:13px; font-weight:800; letter-spacing:.4px; margin-bottom:7px; overflow-wrap:anywhere; }}
-    .difficulty-grid {{ display:flex; flex-wrap:wrap; gap:6px; }}
-    .difficulty-chip {{ display:inline-flex; align-items:center; gap:7px; padding:5px 8px; border-radius:9px; background:rgba(255,255,255,.76); border:1px solid rgba(224,177,206,.42); color:#8a6a86; font-size:12px; line-height:1.2; }}
-    .difficulty-chip b {{ color:#c44786; font-weight:800; }}
-    .difficulty-chip strong {{ color:#51315d; font-size:14px; }}
+    .difficulty-panel, .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
+    .difficulty-title {{ display:flex; align-items:center; color:#79516f; font-size:14px; line-height:1.35; font-weight:800; letter-spacing:.2px; margin-bottom:9px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .difficulty-bars {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 14px; }}
+    .difficulty-row {{ display:grid; grid-template-columns:90px minmax(48px,1fr) 42px; align-items:center; gap:8px; min-width:0; min-height:22px; }}
+    .difficulty-label {{ color:#795572; font-size:12px; font-weight:600; white-space:nowrap; }}
+    .difficulty-track {{ display:block; height:10px; min-width:0; overflow:hidden; border-radius:99px; background:rgba(216,183,207,.34); box-shadow:inset 0 1px 2px rgba(112,70,107,.12); }}
+    .difficulty-fill {{ display:block; height:100%; min-width:4px; border-radius:inherit; background:linear-gradient(90deg,var(--accent),var(--accent2)); box-shadow:0 0 8px color-mix(in srgb,var(--accent),transparent 52%); }}
+    .difficulty-count {{ color:#452852; font-size:14px; font-weight:800; text-align:right; }}
+    .difficulty-unknown .difficulty-label {{ color:#5f8ea2; }}
+    .difficulty-unknown .difficulty-fill {{ background:linear-gradient(90deg,#6ea6b7,#b4eaf1); box-shadow:0 0 8px rgba(110,166,183,.35); }}
+    .rating-chart {{ padding-bottom:10px; }}
+    .rating-chart-head {{ display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:5px; }}
+    .rating-chart-title {{ color:#79516f; font-size:14px; font-weight:800; letter-spacing:.2px; }}
+    .rating-chart-head small {{ color:#98738b; font-size:12px; font-weight:600; }}
+    .rating-chart-svg {{ display:block; width:100%; height:78px; overflow:visible; color:var(--accent); }}
+    .rating-chart-gridline {{ stroke:rgba(159,117,148,.22); stroke-width:.7; vector-effect:non-scaling-stroke; }}
+    .rating-chart-area {{ fill:color-mix(in srgb,var(--accent),transparent 82%); }}
+    .rating-chart-line {{ fill:none; stroke:var(--accent); stroke-width:2.8; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; filter:drop-shadow(0 2px 3px color-mix(in srgb,var(--accent),transparent 60%)); }}
+    .rating-chart-dot {{ fill:#fffafd; stroke:var(--accent); stroke-width:1.8; vector-effect:non-scaling-stroke; }}
+    .rating-chart-scale {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:2px; color:#8b657e; font-size:11px; font-weight:600; }}
+    .rating-chart-scale b {{ color:#5c3564; font-size:12px; }}
     .profile-meta > .trend,
     .profile-meta > .recent,
     .profile-meta > .extra {{ flex:1 1 210px; min-width:0; margin-top:0; }}
@@ -1372,6 +1470,10 @@ class AccountCardRenderer:
     .profile-document .stats {{ gap:7px 14px; }}
     .profile-document .stat {{ font-size:14px; padding-bottom:5px; }}
     .profile-document .stat b {{ font-size:16px; }}
+    .profile-document .difficulty-row {{ grid-template-columns:96px minmax(80px,1fr) 46px; }}
+    .profile-document .difficulty-label {{ font-size:13px; }}
+    .profile-document .difficulty-count {{ font-size:15px; }}
+    .profile-document .rating-chart-svg {{ height:84px; }}
     .profile-document .trend {{ margin-top:11px; font-size:15px; }}
     .profile-document .recent,
     .profile-document .extra {{ margin-top:9px; font-size:14px; }}
@@ -1396,19 +1498,333 @@ class AccountCardRenderer:
 """
 
     @staticmethod
-    def _find_font(size: int):
+    def _find_font(size: int, *, bold: bool = False):
         try:
             from PIL import ImageFont
         except ImportError:
             return None
 
-        path = AdaptiveOutputRenderer._find_cjk_font()
-        if not path:
+        font_path, font_index = AccountCardRenderer._find_cjk_font_spec(
+            bold=bold
+        )
+        if not font_path:
             return None
         try:
-            return ImageFont.truetype(path, size)
+            return ImageFont.truetype(
+                font_path,
+                size,
+                index=font_index,
+            )
         except (OSError, ValueError):
             return None
+
+    @staticmethod
+    def _find_cjk_font_spec(*, bold: bool = False) -> tuple[Optional[str], int]:
+        """优先选择真正的简体中文 CJK 字体及其 TTC 字体索引。"""
+        configured = os.environ.get("ACMER_QQ_BOT_FONT")
+        if configured and Path(configured).is_file():
+            try:
+                index = int(os.environ.get("ACMER_QQ_BOT_FONT_INDEX", "0"))
+            except ValueError:
+                index = 0
+            return configured, max(0, index)
+
+        fc_match = shutil.which("fc-match")
+        if fc_match:
+            style = "Bold" if bold else "Regular"
+            try:
+                result = subprocess.run(
+                    [
+                        fc_match,
+                        "-f",
+                        "%{file}|%{index}",
+                        f"Noto Sans CJK SC:style={style}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                path_text, _, index_text = result.stdout.strip().partition("|")
+                if result.returncode == 0 and Path(path_text).is_file():
+                    try:
+                        index = int(index_text or "0")
+                    except ValueError:
+                        index = 0
+                    return path_text, max(0, index)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+        if bold:
+            candidates = [
+                (
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                    2,
+                ),
+                (
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
+                    2,
+                ),
+                (
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                    2,
+                ),
+                (
+                    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                    0,
+                ),
+            ]
+        else:
+            candidates = [
+                (
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                    2,
+                ),
+                (
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
+                    2,
+                ),
+                (
+                    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                    0,
+                ),
+                (
+                    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                    0,
+                ),
+            ]
+        for path, index in candidates:
+            if Path(path).is_file():
+                return path, index
+        return None, 0
+
+    @staticmethod
+    def _fit_pillow_text(draw, value: object, font, max_width: int) -> str:
+        """在固定宽度的图表标题中截断超长文本，避免压到相邻内容。"""
+        text = str(value or "")
+        if not text:
+            return ""
+        try:
+            if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+                return text
+            suffix = "…"
+            while text and draw.textbbox(
+                (0, 0),
+                text + suffix,
+                font=font,
+            )[2] > max_width:
+                text = text[:-1]
+            return (text + suffix) if text else suffix
+        except (AttributeError, TypeError):
+            return text
+
+    @classmethod
+    def _pillow_difficulty_chart(
+        cls,
+        draw,
+        profile: object,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        title_font,
+        label_font,
+        value_font,
+    ) -> int:
+        items = _difficulty_items(profile)
+        height = _difficulty_chart_height(profile)
+        if not items or not height:
+            return 0
+
+        maximum = max(count for _, count in items)
+        draw.rounded_rectangle(
+            (x, y, x + width, y + height),
+            radius=14,
+            fill="#fff8fc",
+            outline="#e0bfd7",
+            width=1,
+        )
+        title = cls._fit_pillow_text(
+            draw,
+            _difficulty_title(profile),
+            title_font,
+            max(80, width - 24),
+        )
+        draw.text((x + 12, y + 7), title, font=title_font, fill="#79516f")
+
+        columns = DIFFICULTY_CHART_COLUMNS if len(items) > 1 else 1
+        column_gap = 14
+        column_width = max(
+            100,
+            (width - 24 - column_gap * (columns - 1)) // columns,
+        )
+        label_width = 78 if width < 700 else 96
+        value_width = 42 if width < 700 else 48
+        bar_width = max(
+            28,
+            column_width - label_width - value_width - 16,
+        )
+        content_top = y + DIFFICULTY_CHART_TITLE_HEIGHT - 1
+        for index, (label, count) in enumerate(items):
+            column = index % columns
+            row = index // columns
+            cell_x = x + 12 + column * (column_width + column_gap)
+            row_y = content_top + row * DIFFICULTY_CHART_ROW_HEIGHT
+            label_color = "#5f8ea2" if label == "未标分" else "#795572"
+            draw.text(
+                (cell_x, row_y + 3),
+                label,
+                font=label_font,
+                fill=label_color,
+            )
+            bar_x = cell_x + label_width
+            bar_y = row_y + 9
+            draw.rounded_rectangle(
+                (bar_x, bar_y, bar_x + bar_width, bar_y + 9),
+                radius=5,
+                fill="#ead9e5",
+            )
+            fill_width = max(
+                4,
+                round(bar_width * count / maximum),
+            ) if maximum else 0
+            fill_color = (
+                "#83b8c5"
+                if label == "未标分"
+                else PLATFORM_COLORS.get(
+                    str(_profile_field(profile, "platform", "") or ""),
+                    ("#d34f93", "#f4a7c6"),
+                )[0]
+            )
+            draw.rounded_rectangle(
+                (bar_x, bar_y, bar_x + min(bar_width, fill_width), bar_y + 9),
+                radius=5,
+                fill=fill_color,
+            )
+            count_box = draw.textbbox((0, 0), str(count), font=value_font)
+            draw.text(
+                (
+                    cell_x + column_width - value_width
+                    + max(0, value_width - (count_box[2] - count_box[0])),
+                    row_y + 2,
+                ),
+                str(count),
+                font=value_font,
+                fill="#452852",
+            )
+        return height
+
+    @classmethod
+    def _pillow_rating_chart(
+        cls,
+        draw,
+        profile: object,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        title_font,
+        label_font,
+    ) -> int:
+        values = _rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)
+        height = _rating_chart_height(profile)
+        if len(values) < 2 or not height:
+            return 0
+
+        minimum = min(values)
+        maximum = max(values)
+        span = maximum - minimum
+        padding = max(25, int(span * 0.12))
+        lower = minimum - padding
+        upper = maximum + padding
+        scale = max(1, upper - lower)
+        accent = PLATFORM_COLORS.get(
+            str(_profile_field(profile, "platform", "") or ""),
+            ("#d34f93", "#f4a7c6"),
+        )[0]
+
+        draw.rounded_rectangle(
+            (x, y, x + width, y + height),
+            radius=14,
+            fill="#fff8fc",
+            outline="#e0bfd7",
+            width=1,
+        )
+        draw.text((x + 12, y + 8), "Rating 趋势", font=title_font, fill="#79516f")
+        recent_text = f"最近 {len(values)} 场"
+        recent_box = draw.textbbox((0, 0), recent_text, font=label_font)
+        draw.text(
+            (
+                x + width - 12 - (recent_box[2] - recent_box[0]),
+                y + 10,
+            ),
+            recent_text,
+            font=label_font,
+            fill="#98738b",
+        )
+
+        left = x + 18
+        right = x + width - 18
+        top = y + 37
+        bottom = y + 95
+        chart_width = max(40, right - left)
+        chart_height = bottom - top
+        points = []
+        for index, value in enumerate(values):
+            point_x = left + chart_width * index / (len(values) - 1)
+            point_y = bottom - chart_height * (value - lower) / scale
+            points.append((round(point_x), round(point_y)))
+
+        for ratio in (0, 0.5, 1):
+            grid_y = round(bottom - chart_height * ratio)
+            draw.line(
+                (left, grid_y, right, grid_y),
+                fill="#e7d9e4",
+                width=1,
+            )
+        draw.polygon(
+            points + [(right, bottom), (left, bottom)],
+            fill="#f8e3ef",
+        )
+        draw.line(points, fill=accent, width=3)
+        for point_x, point_y in points:
+            draw.ellipse(
+                (
+                    point_x - 4,
+                    point_y - 4,
+                    point_x + 4,
+                    point_y + 4,
+                ),
+                fill="#fffafd",
+                outline=accent,
+                width=2,
+            )
+
+        minimum_text = str(minimum)
+        latest_text = f"最新 {values[-1]}"
+        maximum_text = str(maximum)
+        draw.text((left, y + 105), minimum_text, font=label_font, fill="#8b657e")
+        latest_box = draw.textbbox((0, 0), latest_text, font=label_font)
+        draw.text(
+            (
+                x + (width - (latest_box[2] - latest_box[0])) // 2,
+                y + 105,
+            ),
+            latest_text,
+            font=label_font,
+            fill="#5c3564",
+        )
+        maximum_box = draw.textbbox((0, 0), maximum_text, font=label_font)
+        draw.text(
+            (
+                x + width - 18 - (maximum_box[2] - maximum_box[0]),
+                y + 105,
+            ),
+            maximum_text,
+            font=label_font,
+            fill="#8b657e",
+        )
+        return height
 
     @classmethod
     def _pillow_profile(
@@ -1425,13 +1841,28 @@ class AccountCardRenderer:
             from PIL import ImageDraw
         except ImportError:
             return False
-        title_font = cls._find_font(42)
+        title_font = cls._find_font(42, bold=True)
         subtitle_font = cls._find_font(20)
-        platform_font = cls._find_font(22)
-        handle_font = cls._find_font(28)
-        rating_font = cls._find_font(48)
+        platform_font = cls._find_font(22, bold=True)
+        handle_font = cls._find_font(28, bold=True)
+        rating_font = cls._find_font(48, bold=True)
         body_font = cls._find_font(17)
-        if not all((title_font, subtitle_font, platform_font, handle_font, rating_font, body_font)):
+        chart_title_font = cls._find_font(15, bold=True)
+        chart_label_font = cls._find_font(13)
+        chart_value_font = cls._find_font(14, bold=True)
+        if not all(
+            (
+                title_font,
+                subtitle_font,
+                platform_font,
+                handle_font,
+                rating_font,
+                body_font,
+                chart_title_font,
+                chart_label_font,
+                chart_value_font,
+            )
+        ):
             return False
         single = len(profiles) == 1
         card_gap = 18
@@ -1643,6 +2074,30 @@ class AccountCardRenderer:
                 )
             detail_rows = (len(details) + columns - 1) // columns
             meta_y = int(detail_top + detail_rows * 27 + 7)
+            chart_width = card_w - 50
+            difficulty_height = cls._pillow_difficulty_chart(
+                draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+                value_font=chart_value_font,
+            )
+            if difficulty_height:
+                meta_y += difficulty_height + 10
+            rating_height = cls._pillow_rating_chart(
+                draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+            )
+            if rating_height:
+                meta_y += rating_height + 10
             change_value = weekly_changes.get(
                 profile.platform,
                 profile.recent_delta,
@@ -1654,18 +2109,6 @@ class AccountCardRenderer:
                 fill="#61b98b" if (change_value or 0) >= 0 else "#e26c91",
             )
             meta_y += 23
-            difficulty_lines = _difficulty_lines(
-                profile,
-                max_units=128 if single else 68,
-            )
-            for line in difficulty_lines:
-                draw.text(
-                    (x + 25, meta_y),
-                    line,
-                    font=body_font,
-                    fill="#8d6683",
-                )
-                meta_y += 23
             if profile.recent_contests and isinstance(profile.recent_contests[0], dict) and profile.recent_contests[0].get("name"):
                 recent = profile.recent_contests[0]
                 draw.text(
@@ -1730,10 +2173,10 @@ class AccountCardRenderer:
             from PIL import ImageDraw
         except ImportError:
             return False
-        title_font = cls._find_font(40)
+        title_font = cls._find_font(40, bold=True)
         subtitle_font = cls._find_font(19)
         body_font = cls._find_font(19)
-        value_font = cls._find_font(28)
+        value_font = cls._find_font(28, bold=True)
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
         height = max(
@@ -1860,10 +2303,10 @@ class AccountCardRenderer:
             from PIL import ImageDraw
         except ImportError:
             return False
-        title_font = cls._find_font(40)
+        title_font = cls._find_font(40, bold=True)
         subtitle_font = cls._find_font(19)
         body_font = cls._find_font(18)
-        value_font = cls._find_font(25)
+        value_font = cls._find_font(25, bold=True)
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
         items, section_heights, row_tops = cls._pillow_overview_layout(
