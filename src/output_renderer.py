@@ -21,7 +21,9 @@ MAX_TEXT_CHUNK = 1500
 RENDER_WIDTH = 1200
 MIN_RENDER_HEIGHT = 420
 MAX_RENDER_HEIGHT = 16000
-RENDER_FORMAT_VERSION = 3
+RENDER_FORMAT_VERSION = 4
+BODY_LETTER_SPACING = 0.35
+TITLE_LETTER_SPACING = 1.0
 
 # Chromium、Firefox 与 Pillow 必须使用同一套简体中文字库。只写
 # ``Noto Sans CJK SC`` 而不指定 TTC face 时，Pillow 会默认加载第 0
@@ -33,6 +35,41 @@ MENU_FONT_FAMILY = (
 )
 
 _ITEM_RE = re.compile(r"^\s*\d+[.、]\s*")
+
+
+def _text_units(value: str) -> List[str]:
+    """按近似字素切分，避免把 emoji 的变体选择符拆开。"""
+    units: List[str] = []
+    for char in str(value):
+        if units and (
+            unicodedata.combining(char)
+            or "\ufe00" <= char <= "\ufe0f"
+            or char == "\u200d"
+            or units[-1].endswith("\u200d")
+        ):
+            units[-1] += char
+        else:
+            units.append(char)
+    return units
+
+
+def _tracked_width(draw, value: str, font, tracking: float) -> float:
+    units = _text_units(value)
+    width = sum(
+        draw.textbbox((0, 0), unit, font=font)[2]
+        - draw.textbbox((0, 0), unit, font=font)[0]
+        for unit in units
+    )
+    return width + max(0, len(units) - 1) * tracking
+
+
+def _draw_tracked(draw, xy, value: str, font, fill, tracking: float) -> None:
+    cursor = float(xy[0])
+    y = xy[1]
+    for unit in _text_units(value):
+        draw.text((round(cursor), y), unit, font=font, fill=fill)
+        box = draw.textbbox((0, 0), unit, font=font)
+        cursor += box[2] - box[0] + tracking
 
 
 class AdaptiveOutputRenderer:
@@ -171,21 +208,21 @@ class AdaptiveOutputRenderer:
     .page:before {{ content:""; position:absolute; width:240px; height:240px; right:-120px; top:38px; border:1px solid rgba(255,215,237,.42); border-radius:50%;
       box-shadow:0 0 0 18px rgba(255,215,237,.07),0 0 0 42px rgba(162,225,248,.05); pointer-events:none; }}
     .page:after {{ content:"✿"; position:absolute; right:82px; top:78px; color:rgba(255,225,241,.62); font-size:52px; transform:rotate(14deg); pointer-events:none; }}
-    .title {{ color: #fff7fb; font-size: 36px; font-weight: 900; line-height: 1.35; margin-bottom: 24px; letter-spacing:1px;
+    .title {{ color: #fff7fb; font-size: 36px; font-weight: 900; line-height: 1.45; margin-bottom: 28px; letter-spacing:1.6px;
       text-shadow:0 3px 18px rgba(243,132,190,.42); }}
-    .title:before {{ content:"✦ PINK PEARL CONTEST GARDEN ✦"; display:block; margin-bottom:6px; color:#ffd5e8; font-size:14px; line-height:1.4; letter-spacing:3px; }}
-    .panel {{ position:relative; padding: 25px 30px 28px; background:linear-gradient(145deg,rgba(255,252,255,.98),rgba(255,231,245,.94)); border: 1px solid rgba(255,211,235,.95); border-radius: 18px;
+    .title:before {{ content:"✦ PINK PEARL CONTEST GARDEN ✦"; display:block; margin-bottom:8px; color:#ffd5e8; font-size:14px; line-height:1.5; letter-spacing:3.6px; }}
+    .panel {{ position:relative; padding: 29px 32px 34px; background:linear-gradient(145deg,rgba(255,252,255,.98),rgba(255,231,245,.94)); border: 1px solid rgba(255,211,235,.95); border-radius: 18px;
       box-shadow: 0 14px 28px rgba(28,10,44,.24), inset 0 0 24px rgba(255,255,255,.7); }}
     .panel:before {{ content:""; position:absolute; left:24px; right:24px; top:0; height:3px; border-radius:99px; background:linear-gradient(90deg,#e467a5,#b9eaf8,#e467a5); opacity:.78; }}
-    .line {{ white-space: pre-wrap; overflow-wrap: anywhere; font-size: 20px; line-height: 1.55; padding: 4px 0; }}
-    .title + .panel {{ padding-top: 22px; }}
-    .item {{ color: #c44786; font-weight: 750; }}
-    .detail {{ color: #705276; font-size: 18px; }}
-    .section {{ color: #71466f; font-weight: 800; margin-top: 12px; }}
-    .source {{ color: #6c93a8; font-size: 16px; margin-bottom: 8px; }}
-    .divider {{ color: #bd83a7; font-size: 17px; }}
+    .line {{ white-space: pre-wrap; overflow-wrap: anywhere; font-size: 20px; line-height: 1.72; padding: 5px 0; letter-spacing:.35px; }}
+    .title + .panel {{ padding-top: 26px; }}
+    .item {{ color: #c44786; font-weight: 750; letter-spacing:.45px; }}
+    .detail {{ color: #705276; font-size: 18px; line-height:1.78; letter-spacing:.35px; }}
+    .section {{ color: #71466f; font-weight: 800; margin-top: 16px; letter-spacing:.45px; }}
+    .source {{ color: #6c93a8; font-size: 16px; line-height:1.7; margin-bottom: 12px; letter-spacing:.3px; }}
+    .divider {{ color: #bd83a7; font-size: 17px; letter-spacing:1.5px; }}
     .normal {{ color: #563b65; }}
-    .blank {{ height: 10px; }}
+    .blank {{ height: 14px; }}
   </style>
 </head>
 <body>
@@ -208,7 +245,7 @@ class AdaptiveOutputRenderer:
             rows += max(1, (width + 52) // 53)
             if cls._line_kind(line, index) in {"section", "source"}:
                 rows += 1
-        return max(MIN_RENDER_HEIGHT, min(MAX_RENDER_HEIGHT, 155 + rows * 36))
+        return max(MIN_RENDER_HEIGHT, min(MAX_RENDER_HEIGHT, 165 + rows * 45))
 
     @staticmethod
     def _find_renderers() -> List[Tuple[str, str]]:
@@ -432,15 +469,20 @@ class AdaptiveOutputRenderer:
             box = measure_draw.textbbox((0, 0), "比赛信息Ag", font=font)
             return max(24, box[3] - box[1] + 9)
 
-        def wrap(value: str, font, max_width: int) -> List[str]:
+        def wrap(
+            value: str,
+            font,
+            max_width: int,
+            tracking: float,
+        ) -> List[str]:
             result: List[str] = []
             for paragraph in value.splitlines() or [""]:
                 current = ""
                 for char in paragraph:
                     candidate = current + char
-                    if current and measure_draw.textbbox(
-                        (0, 0), candidate, font=font
-                    )[2] > max_width:
+                    if current and _tracked_width(
+                        measure_draw, candidate, font, tracking
+                    ) > max_width:
                         result.append(current)
                         current = char
                     else:
@@ -455,7 +497,7 @@ class AdaptiveOutputRenderer:
         for index, line in enumerate(lines[1:], start=1):
             kind = cls._line_kind(line, index)
             if kind == "blank":
-                body_rows.append((kind, " ", body_font, "#705276"))
+                body_rows.append((kind, " ", body_font, "#705276", 0.0))
                 continue
             font = (
                 source_font
@@ -470,12 +512,21 @@ class AdaptiveOutputRenderer:
                 "source": "#6c93a8",
                 "divider": "#bd83a7",
             }.get(kind, "#563b65")
-            for wrapped in wrap(line, font, inner_width):
-                body_rows.append((kind, wrapped, font, color))
+            tracking = (
+                0.45
+                if kind in {"item", "section"}
+                else 0.3
+                if kind == "source"
+                else BODY_LETTER_SPACING
+            )
+            for wrapped in wrap(line, font, inner_width, tracking):
+                body_rows.append((kind, wrapped, font, color, tracking))
 
         eyebrow_height = line_height(source_font)
         title_height = line_height(title_font)
-        body_height = sum(line_height(font) + 4 for _, _, font, _ in body_rows)
+        body_height = sum(
+            line_height(font) + 7 for _, _, font, _, _ in body_rows
+        )
         image_height = max(
             MIN_RENDER_HEIGHT,
             min(
@@ -491,9 +542,23 @@ class AdaptiveOutputRenderer:
         )
         image = PILImage.new("RGB", (RENDER_WIDTH, image_height), "#fff4fa")
         draw = ImageDraw.Draw(image)
-        draw.text((56, 42), "ELYSIAN // PINK PEARL ARCHIVE", font=source_font, fill="#c44786")
+        _draw_tracked(
+            draw,
+            (56, 42),
+            "ELYSIAN // PINK PEARL ARCHIVE",
+            source_font,
+            "#c44786",
+            0.55,
+        )
         title_y = 42 + eyebrow_height + 8
-        draw.text((56, title_y), title, font=title_font, fill="#7a456f")
+        _draw_tracked(
+            draw,
+            (56, title_y),
+            title,
+            title_font,
+            "#7a456f",
+            TITLE_LETTER_SPACING,
+        )
 
         panel_top = title_y + title_height + 22
         panel_bottom = image_height - 32
@@ -510,9 +575,16 @@ class AdaptiveOutputRenderer:
             width=3,
         )
         y = panel_top + 25
-        for _, value, font, color in body_rows:
-            draw.text((56 + 30, y), value, font=font, fill=color)
-            y += line_height(font) + 4
+        for _, value, font, color, tracking in body_rows:
+            _draw_tracked(
+                draw,
+                (56 + 30, y),
+                value,
+                font,
+                color,
+                tracking,
+            )
+            y += line_height(font) + 7
         try:
             image.save(image_path, format="PNG")
         except OSError:
