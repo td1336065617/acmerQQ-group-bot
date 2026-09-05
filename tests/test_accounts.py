@@ -179,6 +179,45 @@ def test_codeforces_bulk_profiles(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_luogu_verification_uses_luogu_me_introduction(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+        calls = []
+
+        async def fake_fetch_json(url, *, headers=None, retries=2):
+            calls.append((url, headers))
+            return {
+                "code": 200,
+                "message": "Success",
+                "data": {
+                    "id": 1770958,
+                    "name": "demo",
+                    "introduction": "旧内容 ACM-TOKEN",
+                },
+            }
+
+        monkeypatch.setattr(fetcher, "_fetch_json", fake_fetch_json)
+        profile = AccountProfile(
+            platform="luogu",
+            handle="demo",
+            platform_user_id="1770958",
+            verification_value="com.cn 内容",
+        )
+        value = await fetcher.get_verification_value(
+            "luogu",
+            "1770958",
+            profile=profile,
+            force=True,
+        )
+
+        assert value == "旧内容 ACM-TOKEN"
+        assert calls
+        assert calls[0][0] == "https://api.luogu.me/user/query/1770958"
+        assert calls[0][1]["Origin"] == "https://www.luogu.me"
+
+    asyncio.run(scenario())
+
+
 def test_new_account_rating_history_uses_old_rating():
     now = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc).timestamp()
     history = [

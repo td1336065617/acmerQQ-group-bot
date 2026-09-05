@@ -456,6 +456,31 @@ class AcmerGroupBot(Star):
             (f"绑定{platform}", "<账号>", "对应公开资料字段"),
         )[0]
 
+    async def _account_verification_value(
+        self,
+        platform: str,
+        identifier: str,
+        profile,
+    ) -> str:
+        """读取绑定校验字段；洛谷由 luogu.me 提供个人介绍。"""
+        getter = getattr(
+            self.account_fetcher,
+            "get_verification_value",
+            None,
+        )
+        if callable(getter):
+            return str(
+                await getter(
+                    platform,
+                    identifier,
+                    profile=profile,
+                    force=True,
+                )
+                or ""
+            )
+        # 兼容旧版抓取器短暂未同步的情况；完整更新后洛谷会走 .me。
+        return str(getattr(profile, "verification_value", "") or "")
+
     @staticmethod
     def _account_error_text(platform: str, exc: Exception) -> str:
         message = str(exc).strip() or "平台暂时无法访问，请稍后重试"
@@ -776,8 +801,13 @@ class AcmerGroupBot(Star):
             profile = await self.account_fetcher.get_profile(
                 platform, identifier, detail=False, force=True
             )
+            verification_value = await self._account_verification_value(
+                platform,
+                identifier,
+                profile,
+            )
             # 洛谷个人介绍不可读时，直接按用户约定返回明确反馈。
-            if platform == "luogu" and not profile.verification_value.strip():
+            if platform == "luogu" and not verification_value.strip():
                 yield event.plain_result(
                     "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
                 )
@@ -899,7 +929,21 @@ class AcmerGroupBot(Star):
             yield event.plain_result(self._account_error_text(platform, exc))
             return
 
-        if platform == "luogu" and not profile.verification_value.strip():
+        try:
+            verification_value = await self._account_verification_value(
+                platform,
+                normalized_pending,
+                profile,
+            )
+        except AccountFetchError as exc:
+            # .me 临时不可用时保留待确认状态，用户可在有效期内直接重试。
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+        except Exception as exc:
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+
+        if platform == "luogu" and not verification_value.strip():
             try:
                 await self.account_registry.clear_pending(user_id, platform)
             except Exception as exc:  # noqa: BLE001
@@ -914,7 +958,7 @@ class AcmerGroupBot(Star):
             return
         expected_hash = str(pending.get("token_hash") or "")
         if not self.account_registry.token_matches(
-            profile.verification_value, expected_hash
+            verification_value, expected_hash
         ):
             field = VERIFICATION_FIELD_LABELS.get(platform, "公开资料字段")
             yield event.plain_result(

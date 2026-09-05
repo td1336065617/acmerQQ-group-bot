@@ -38,11 +38,13 @@ NOWCODER_RATING_INDEX_URL = (
 )
 LUOGU_PROFILE_URL = "https://www.luogu.com.cn/user/{uid}"
 LUOGU_API_URL = "https://www.luogu.com.cn/api/user/show?uid={uid}"
+LUOGU_ME_API_URL = "https://api.luogu.me/user/query/{uid}"
 ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}?lang=en"
 ATCODER_HISTORY_JSON_URL = "https://atcoder.jp/users/{handle}/history/json"
 
 PROFILE_CACHE_TTL = 10 * 60
 DETAIL_CACHE_TTL = 10 * 60
+LUOGU_ME_INTRO_CACHE_TTL = 10 * 60
 CF_MIN_REQUEST_INTERVAL = 2.1
 RATING_HISTORY_LIMIT = 200
 
@@ -168,6 +170,8 @@ class AccountFetcher:
             Tuple[str, str, bool, bool],
             asyncio.Lock,
         ] = {}
+        self._luogu_me_intro_cache: Dict[str, Tuple[float, str]] = {}
+        self._luogu_me_intro_locks: Dict[str, asyncio.Lock] = {}
         self._cf_lock = asyncio.Lock()
         self._cf_last_request = 0.0
 
@@ -305,8 +309,92 @@ class AccountFetcher:
         self, platform: str, identifier: str, token: str
     ) -> Tuple[AccountProfile, bool]:
         profile = await self.get_profile(platform, identifier, force=True)
-        field = profile.verification_value or ""
+        field = await self.get_verification_value(
+            platform,
+            identifier,
+            profile=profile,
+            force=True,
+        )
         return profile, bool(token and token.casefold() in field.casefold())
+
+    async def get_verification_value(
+        self,
+        platform: str,
+        identifier: str,
+        *,
+        profile: Optional[AccountProfile] = None,
+        force: bool = False,
+    ) -> str:
+        """读取绑定校验字段；洛谷个人介绍使用 luogu.me。"""
+        if platform != "luogu":
+            return str(
+                getattr(profile, "verification_value", "") or ""
+            )
+        uid = normalize_account_identifier(platform, identifier)
+        if not uid:
+            raise AccountFetchError(
+                self.invalid_identifier_message(platform),
+                temporary=False,
+            )
+        return await self._fetch_luogu_me_introduction(uid, force=force)
+
+    async def _fetch_luogu_me_introduction(
+        self,
+        uid: str,
+        *,
+        force: bool = False,
+    ) -> str:
+        """从洛谷保存站 API 读取稳定的个人介绍，用于绑定验证码。"""
+        key = str(uid)
+        now = time.time()
+        cached = self._luogu_me_intro_cache.get(key)
+        if (
+            not force
+            and cached
+            and now - cached[0] < LUOGU_ME_INTRO_CACHE_TTL
+        ):
+            return cached[1]
+
+        lock = self._luogu_me_intro_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._luogu_me_intro_cache.get(key)
+            if (
+                not force
+                and cached
+                and time.time() - cached[0] < LUOGU_ME_INTRO_CACHE_TTL
+            ):
+                return cached[1]
+            payload = await self._fetch_json(
+                LUOGU_ME_API_URL.format(uid=quote(key)),
+                headers={
+                    "Accept": "application/json",
+                    "Origin": "https://www.luogu.me",
+                    "Referer": f"https://www.luogu.me/user/{quote(key)}",
+                },
+            )
+            if (
+                not isinstance(payload, dict)
+                or str(payload.get("code") or "") != "200"
+            ):
+                message = (
+                    str(payload.get("message") or "")
+                    if isinstance(payload, dict)
+                    else ""
+                )
+                raise AccountFetchError(
+                    "洛谷个人资料暂时无法读取"
+                    + (f"：{message}" if message else "")
+                )
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise AccountFetchError("洛谷个人资料暂时无法读取")
+            returned_uid = str(data.get("id") or "").strip()
+            if returned_uid and returned_uid != key:
+                raise AccountFetchError("洛谷个人资料暂时无法读取")
+            introduction = data.get("introduction")
+            value = html.unescape(str(introduction or ""))
+            self._luogu_me_intro_cache[key] = (time.time(), value)
+            return value
 
     @staticmethod
     def invalid_identifier_message(platform: str) -> str:

@@ -8,8 +8,7 @@ import sys
 import types
 from pathlib import Path
 
-from src.account_fetcher import normalize_account_identifier
-from src.account_models import AccountProfile
+from src.account_models import AccountFetchError, AccountProfile
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -144,6 +143,8 @@ class FakeRegistry:
         self.pending = pending
         self.token_valid = token_valid
         self.saved = None
+        self.clear_calls = 0
+        self.matched_values = []
 
     async def get_pending(self, user_id, platform):
         return self.pending
@@ -152,9 +153,10 @@ class FakeRegistry:
         return "ACM-ABCDEFGH"
 
     async def clear_pending(self, user_id, platform):
-        return None
+        self.clear_calls += 1
 
     def token_matches(self, value, expected_hash):
+        self.matched_values.append(value)
         return self.token_valid
 
     async def save_binding(self, *args, **kwargs):
@@ -169,6 +171,22 @@ class FakeFetcher:
     async def get_profile(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.profile
+
+
+class LuoguVerificationFetcher(FakeFetcher):
+    def __init__(self, profile, verification_value):
+        super().__init__(profile)
+        self.verification_value = verification_value
+        self.verification_calls = []
+
+    async def get_verification_value(self, *args, **kwargs):
+        self.verification_calls.append((args, kwargs))
+        return self.verification_value
+
+
+class FailingVerificationFetcher(FakeFetcher):
+    async def get_verification_value(self, *args, **kwargs):
+        raise AccountFetchError("洛谷个人资料暂时无法读取")
 
 
 def _build_bot(main_module, registry, fetcher):
@@ -247,6 +265,94 @@ def test_bind_prompt_keeps_verification_instructions():
     assert "ACM-ABCDEFGH" in results[0]
     assert "姓氏（Last name）" in results[0]
     assert "确认绑定cf" in results[0]
+
+
+def test_luogu_bind_uses_separate_verification_source():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="demo",
+        platform_user_id="1770958",
+        verification_value="",
+    )
+    registry = FakeRegistry(None)
+    fetcher = LuoguVerificationFetcher(profile, "luogu.me ACM-ABCDEFGH")
+    bot = _build_bot(main_module, registry, fetcher)
+
+    results = _collect(
+        bot._reply_account_bind(
+            FakeEvent(group_id="source-group"),
+            "luogu",
+            "1770958",
+        )
+    )
+
+    assert results
+    assert "已找到 洛谷 账号：demo" in results[0]
+    assert fetcher.verification_calls
+    assert registry.pending is None
+
+
+def test_luogu_verification_failure_keeps_pending_binding():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="demo",
+        platform_user_id="1770958",
+    )
+    pending = {
+        "platform": "luogu",
+        "handle": "demo",
+        "platform_user_id": "1770958",
+        "token_hash": "hash",
+        "group_id": "source-group",
+    }
+    registry = FakeRegistry(pending)
+    fetcher = FailingVerificationFetcher(profile)
+    bot = _build_bot(main_module, registry, fetcher)
+
+    results = _collect(
+        bot._reply_account_confirm(
+            FakeEvent(group_id="source-group"),
+            "luogu",
+        )
+    )
+
+    assert results
+    assert "暂时无法绑定" in results[0]
+    assert registry.clear_calls == 0
+    assert registry.saved is None
+
+
+def test_luogu_confirmation_checks_me_introduction():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="demo",
+        platform_user_id="1770958",
+    )
+    pending = {
+        "platform": "luogu",
+        "handle": "demo",
+        "platform_user_id": "1770958",
+        "token_hash": "hash",
+        "group_id": "source-group",
+    }
+    registry = FakeRegistry(pending)
+    fetcher = LuoguVerificationFetcher(profile, "luogu.me ACM-ABCDEFGH")
+    bot = _build_bot(main_module, registry, fetcher)
+
+    results = _collect(
+        bot._reply_account_confirm(
+            FakeEvent(group_id="source-group"),
+            "luogu",
+        )
+    )
+
+    assert results
+    assert "绑定成功" in results[0]
+    assert registry.matched_values == ["luogu.me ACM-ABCDEFGH"]
+    assert registry.saved is not None
 
 
 def test_confirm_binding_keeps_origin_group_for_rank_auto_join():
