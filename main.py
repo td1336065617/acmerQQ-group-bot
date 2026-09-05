@@ -462,7 +462,7 @@ class AcmerGroupBot(Star):
         identifier: str,
         profile,
     ) -> str:
-        """读取绑定校验字段；洛谷由 luogu.me 提供个人介绍。"""
+        """读取绑定校验字段；洛谷由 .com 用户页提供个人介绍。"""
         getter = getattr(
             self.account_fetcher,
             "get_verification_value",
@@ -478,7 +478,7 @@ class AcmerGroupBot(Star):
                 )
                 or ""
             )
-        # 兼容旧版抓取器短暂未同步的情况；完整更新后洛谷会走 .me。
+        # 兼容旧版抓取器短暂未同步的情况；完整更新后洛谷会走 .com。
         return str(getattr(profile, "verification_value", "") or "")
 
     @staticmethod
@@ -936,7 +936,7 @@ class AcmerGroupBot(Star):
                 profile,
             )
         except AccountFetchError as exc:
-            # .me 临时不可用时保留待确认状态，用户可在有效期内直接重试。
+            # 洛谷资料页临时不可用时保留待确认状态，用户可在有效期内直接重试。
             yield event.plain_result(self._account_error_text(platform, exc))
             return
         except Exception as exc:

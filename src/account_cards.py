@@ -520,7 +520,7 @@ class AccountCardRenderer:
             bases = {
                 "codeforces": "https://codeforces.com",
                 "nowcoder": "https://ac.nowcoder.com",
-                "luogu": "https://www.luogu.com.cn",
+                "luogu": "https://www.luogu.com",
                 "atcoder": "https://atcoder.jp",
             }
             base = bases.get(platform)

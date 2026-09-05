@@ -276,7 +276,7 @@ def test_luogu_bind_uses_separate_verification_source():
         verification_value="",
     )
     registry = FakeRegistry(None)
-    fetcher = LuoguVerificationFetcher(profile, "luogu.me ACM-ABCDEFGH")
+    fetcher = LuoguVerificationFetcher(profile, "luogu.com ACM-ABCDEFGH")
     bot = _build_bot(main_module, registry, fetcher)
 
     results = _collect(
@@ -339,7 +339,7 @@ def test_luogu_confirmation_checks_me_introduction():
         "group_id": "source-group",
     }
     registry = FakeRegistry(pending)
-    fetcher = LuoguVerificationFetcher(profile, "luogu.me ACM-ABCDEFGH")
+    fetcher = LuoguVerificationFetcher(profile, "luogu.com ACM-ABCDEFGH")
     bot = _build_bot(main_module, registry, fetcher)
 
     results = _collect(
@@ -351,7 +351,7 @@ def test_luogu_confirmation_checks_me_introduction():
 
     assert results
     assert "绑定成功" in results[0]
-    assert registry.matched_values == ["luogu.me ACM-ABCDEFGH"]
+    assert registry.matched_values == ["luogu.com ACM-ABCDEFGH"]
     assert registry.saved is not None
 
 

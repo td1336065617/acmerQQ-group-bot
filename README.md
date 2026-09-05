@@ -72,7 +72,7 @@ AstrBot 管理面板 → 插件管理 → acmerQQ群机器人：
 | 线下赛 | [`xcpc.link`](https://www.xcpc.link/)（备用 [`xcpc.ink`](https://www.xcpc.ink/)） | 首页脚本中的 XCPC/ICPC/CCPC 赛程数据，仅保留线下赛事；回复中明确标注实际数据源 |
 
 账号资料使用各平台公开接口/个人主页：Codeforces API、牛客公开竞赛主页、
-洛谷公开个人页 `#lentille-context` 与 `luogu.me` 个人资料接口、
+洛谷 `luogu.com` 公开个人页 `#lentille-context`（`.com.cn` 兼容兜底）、
 AtCoder 公开用户页与 Rating 历史页。
 插件不要求用户提供平台密码、Cookie 或 API Key。
 

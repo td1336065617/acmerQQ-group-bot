@@ -179,30 +179,27 @@ def test_codeforces_bulk_profiles(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_luogu_verification_uses_luogu_me_introduction(monkeypatch):
+def test_luogu_profile_and_verification_use_com_introduction(monkeypatch):
     async def scenario():
         fetcher = AccountFetcher()
         calls = []
 
-        async def fake_fetch_json(url, *, headers=None, retries=2):
+        async def fake_fetch_text(url, *, headers=None, retries=2):
             calls.append((url, headers))
-            return {
-                "code": 200,
-                "message": "Success",
-                "data": {
-                    "id": 1770958,
-                    "name": "demo",
-                    "introduction": "旧内容 ACM-TOKEN",
-                },
-            }
+            return """
+            <script id="lentille-context" type="application/json">
+            {"status":200,"data":{"user":{
+              "uid":1770958,
+              "name":"demo",
+              "introduction":"旧内容 ACM-TOKEN",
+              "ranking":321,
+              "passedProblemCount":12
+            }}}
+            </script>
+            """
 
-        monkeypatch.setattr(fetcher, "_fetch_json", fake_fetch_json)
-        profile = AccountProfile(
-            platform="luogu",
-            handle="demo",
-            platform_user_id="1770958",
-            verification_value="com.cn 内容",
-        )
+        monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        profile = await fetcher._fetch_luogu("1770958", detail=False)
         value = await fetcher.get_verification_value(
             "luogu",
             "1770958",
@@ -210,10 +207,85 @@ def test_luogu_verification_uses_luogu_me_introduction(monkeypatch):
             force=True,
         )
 
+        assert profile.profile_url == "https://www.luogu.com/user/1770958"
+        assert profile.rating_rank == 321
+        assert profile.solved_count == 12
         assert value == "旧内容 ACM-TOKEN"
         assert calls
-        assert calls[0][0] == "https://api.luogu.me/user/query/1770958"
-        assert calls[0][1]["Origin"] == "https://www.luogu.me"
+        assert calls[0][0] == "https://www.luogu.com/user/1770958"
+
+    asyncio.run(scenario())
+
+
+def test_luogu_com_empty_introduction_is_a_valid_empty_field(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+
+        async def fake_fetch_text(url, *, headers=None, retries=2):
+            assert url == "https://www.luogu.com/user/1928724"
+            return """
+            <script id="lentille-context" type="application/json">
+            {"status":200,"data":{"user":{
+              "uid":1928724,
+              "name":"LovELolita",
+              "introduction":"",
+              "ranking":54082,
+              "passedProblemCount":246
+            }}}
+            </script>
+            """
+
+        monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        profile = await fetcher.get_profile(
+            "luogu",
+            "1928724",
+            detail=False,
+            force=True,
+        )
+
+        assert profile.handle == "LovELolita"
+        assert profile.profile_url == "https://www.luogu.com/user/1928724"
+        assert profile.rating_rank == 54082
+        assert profile.solved_count == 246
+        assert profile.verification_value == ""
+
+    asyncio.run(scenario())
+
+
+def test_luogu_falls_back_to_com_cn_when_com_has_no_target_user(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+        requested = []
+
+        async def fake_fetch_text(url, *, headers=None, retries=2):
+            requested.append(url)
+            if url == "https://www.luogu.com/user/1770958":
+                return "<html>暂时没有用户数据</html>"
+            return """
+            <script id="lentille-context" type="application/json">
+            {"data":{"user":{
+              "uid":1770958,
+              "name":"legacy-demo",
+              "introduction":"legacy intro",
+              "ranking":321
+            }}}
+            </script>
+            """
+
+        monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        profile = await fetcher.get_profile(
+            "luogu",
+            "1770958",
+            detail=False,
+            force=True,
+        )
+
+        assert requested[:2] == [
+            "https://www.luogu.com/user/1770958",
+            "https://www.luogu.com.cn/user/1770958",
+        ]
+        assert profile.handle == "legacy-demo"
+        assert profile.source_url == "https://www.luogu.com.cn/user/1770958"
 
     asyncio.run(scenario())
 
@@ -399,7 +471,7 @@ def test_profile_card_avatar_url_normalization():
             "/avatar.png",
             "luogu",
         )
-        == "https://www.luogu.com.cn/avatar.png"
+        == "https://www.luogu.com/avatar.png"
     )
     assert AccountCardRenderer._normalize_avatar_url("not-a-url") == ""
 
