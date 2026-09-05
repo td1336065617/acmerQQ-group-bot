@@ -46,6 +46,18 @@ PROFILE_CACHE_TTL = 10 * 60
 DETAIL_CACHE_TTL = 10 * 60
 CF_MIN_REQUEST_INTERVAL = 2.1
 RATING_HISTORY_LIMIT = 200
+CF_SUBMISSION_SCAN_LIMIT = 10000
+CF_DIFFICULTY_BUCKETS = (
+    ("≤999", None, 999),
+    ("1000–1199", 1000, 1199),
+    ("1200–1399", 1200, 1399),
+    ("1400–1599", 1400, 1599),
+    ("1600–1799", 1600, 1799),
+    ("1800–1999", 1800, 1999),
+    ("2000–2199", 2000, 2199),
+    ("2200–2399", 2200, 2399),
+    ("2400+", 2400, None),
+)
 
 _CF_HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ATCODER_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
@@ -162,11 +174,11 @@ class AccountFetcher:
         self._owns_session = False
         self.cache_ttl = max(30, int(cache_ttl))
         self._cache: Dict[
-            Tuple[str, str, bool, bool],
+            Tuple[str, str, bool, bool, bool],
             Tuple[float, AccountProfile],
         ] = {}
         self._locks: Dict[
-            Tuple[str, str, bool, bool],
+            Tuple[str, str, bool, bool, bool],
             asyncio.Lock,
         ] = {}
         self._cf_lock = asyncio.Lock()
@@ -198,6 +210,7 @@ class AccountFetcher:
         detail: bool = False,
         force: bool = False,
         include_submissions: bool = True,
+        include_difficulty: bool = False,
     ) -> AccountProfile:
         if platform not in ACCOUNT_PLATFORMS:
             raise AccountFetchError("不支持的平台")
@@ -209,6 +222,7 @@ class AccountFetcher:
             normalized.casefold(),
             detail,
             bool(detail and include_submissions),
+            bool(detail and include_difficulty),
         )
         now = time.time()
         cached = self._cache.get(key)
@@ -226,13 +240,20 @@ class AccountFetcher:
                 normalized,
                 detail,
                 include_submissions=include_submissions,
+                include_difficulty=include_difficulty,
             )
             profile.fetched_at = time.time()
             self._cache[key] = (profile.fetched_at, profile)
             # 详细资料可以复用为摘要资料，减少后续排行请求。
             if detail:
                 self._cache[
-                    (platform, normalized.casefold(), False, False)
+                    (
+                        platform,
+                        normalized.casefold(),
+                        False,
+                        False,
+                        False,
+                    )
                 ] = (
                     profile.fetched_at,
                     profile,
@@ -247,6 +268,7 @@ class AccountFetcher:
         detail: bool = False,
         force: bool = False,
         include_submissions: bool = True,
+        include_difficulty: bool = False,
     ) -> Dict[str, AccountProfile]:
         """批量读取账号资料；Codeforces 摘要使用一次 user.info 请求。"""
         normalized = []
@@ -267,6 +289,7 @@ class AccountFetcher:
                         detail=detail,
                         force=force,
                         include_submissions=include_submissions,
+                        include_difficulty=include_difficulty,
                     )
                     for identifier in normalized
                 )
@@ -280,7 +303,13 @@ class AccountFetcher:
         missing = []
         now = time.time()
         for identifier in normalized:
-            key = ("codeforces", identifier.casefold(), False, False)
+            key = (
+                "codeforces",
+                identifier.casefold(),
+                False,
+                False,
+                False,
+            )
             cached = self._cache.get(key)
             if not force and cached and now - cached[0] < self.cache_ttl:
                 result[identifier.casefold()] = cached[1]
@@ -297,7 +326,13 @@ class AccountFetcher:
             for user in data.get("result") or []:
                 profile = self._profile_from_codeforces_user(user)
                 profile.fetched_at = time.time()
-                key = ("codeforces", profile.handle.casefold(), False, False)
+                key = (
+                    "codeforces",
+                    profile.handle.casefold(),
+                    False,
+                    False,
+                    False,
+                )
                 self._cache[key] = (profile.fetched_at, profile)
                 result[profile.handle.casefold()] = profile
         return result
@@ -357,12 +392,14 @@ class AccountFetcher:
         detail: bool,
         *,
         include_submissions: bool = True,
+        include_difficulty: bool = False,
     ) -> AccountProfile:
         if platform == "codeforces":
             return await self._fetch_codeforces(
                 identifier,
                 detail,
                 include_submissions=include_submissions,
+                include_difficulty=include_difficulty,
             )
         if platform == "nowcoder":
             return await self._fetch_nowcoder(identifier, detail)
@@ -456,6 +493,7 @@ class AccountFetcher:
         detail: bool,
         *,
         include_submissions: bool = True,
+        include_difficulty: bool = False,
     ) -> AccountProfile:
         data = await self._cf_json("user.info", {"handles": handle})
         if not isinstance(data, dict) or data.get("status") != "OK":
@@ -483,18 +521,35 @@ class AccountFetcher:
                 profile.recent_contests = parsed_history[:5]
                 if parsed_history:
                     profile.recent_delta = parsed_history[0].get("delta")
-            if include_submissions:
+            if include_submissions or include_difficulty:
                 status_data = await self._cf_json(
                     "user.status",
-                    {"handle": canonical, "from": "1", "count": "5"},
+                    {
+                        "handle": canonical,
+                        "from": "1",
+                        "count": str(CF_SUBMISSION_SCAN_LIMIT),
+                    },
                 )
                 if (
                     isinstance(status_data, dict)
                     and status_data.get("status") == "OK"
                 ):
-                    profile.recent_submissions = self._parse_cf_submissions(
-                        status_data.get("result") or []
-                    )
+                    rows = status_data.get("result") or []
+                    if include_submissions:
+                        profile.recent_submissions = (
+                            self._parse_cf_submissions(rows)
+                        )
+                    if include_difficulty:
+                        (
+                            profile.difficulty_distribution,
+                            profile.solved_count,
+                        ) = self._parse_cf_difficulty_distribution(rows)
+                        profile.extra["difficulty_scan_limit"] = (
+                            CF_SUBMISSION_SCAN_LIMIT
+                        )
+                        profile.extra["difficulty_scanned_submissions"] = len(
+                            rows
+                        )
         return profile
 
     @classmethod
@@ -588,6 +643,78 @@ class AccountFetcher:
                 }
             )
         return out
+
+    @staticmethod
+    def _parse_cf_difficulty_distribution(
+        rows: list,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """统计已通过的不同 CF 题目难度分布。"""
+        accepted_ratings: Dict[tuple, Optional[int]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("verdict") or "").upper() != "OK":
+                continue
+            problem = row.get("problem") or {}
+            if not isinstance(problem, dict):
+                problem = {}
+            contest_id = problem.get("contestId") or row.get("contestId")
+            index = problem.get("index") or row.get("problemIndex")
+            problemset_name = (
+                problem.get("problemsetName")
+                or row.get("problemsetName")
+                or ""
+            )
+            name = str(problem.get("name") or "").strip()
+            if contest_id and index:
+                key = ("contest", str(contest_id), str(index))
+            elif problemset_name and index:
+                key = ("set", str(problemset_name), str(index))
+            elif name:
+                key = ("name", name)
+            else:
+                # 没有稳定题目标识时不把多次提交重复计数。
+                key = ("row", str(row.get("id") or len(accepted_keys)))
+            rating = _parse_int(problem.get("rating"))
+            previous = accepted_ratings.get(key)
+            if key in accepted_ratings and (
+                previous is not None or rating is None
+            ):
+                continue
+            accepted_ratings[key] = rating
+
+        counts = [0] * len(CF_DIFFICULTY_BUCKETS)
+        unknown_count = 0
+        for rating in accepted_ratings.values():
+            if rating is None:
+                unknown_count += 1
+                continue
+            for position, (_, minimum, maximum) in enumerate(
+                CF_DIFFICULTY_BUCKETS
+            ):
+                if (
+                    (minimum is None or rating >= minimum)
+                    and (maximum is None or rating <= maximum)
+                ):
+                    counts[position] += 1
+                    break
+
+        distribution = [
+            {
+                "label": label,
+                "count": count,
+            }
+            for (label, _, _), count in zip(CF_DIFFICULTY_BUCKETS, counts)
+            if count > 0
+        ]
+        if unknown_count > 0:
+            distribution.append(
+                {
+                    "label": "未标分",
+                    "count": unknown_count,
+                }
+            )
+        return distribution, len(accepted_ratings)
 
     async def _fetch_nowcoder(
         self, uid: str, detail: bool

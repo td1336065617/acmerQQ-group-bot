@@ -179,6 +179,125 @@ def test_codeforces_bulk_profiles(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_codeforces_difficulty_distribution_deduplicates_accepted_problems():
+    rows = [
+        {
+            "id": 1,
+            "verdict": "OK",
+            "problem": {"contestId": 1, "index": "A", "rating": 800},
+        },
+        {
+            "id": 2,
+            "verdict": "WRONG_ANSWER",
+            "problem": {"contestId": 1, "index": "A", "rating": 800},
+        },
+        {
+            "id": 3,
+            "verdict": "OK",
+            "problem": {"contestId": 1, "index": "A", "rating": 800},
+        },
+        {
+            "id": 4,
+            "verdict": "OK",
+            "problem": {"contestId": 2, "index": "B", "rating": 1200},
+        },
+        {
+            "id": 5,
+            "verdict": "OK",
+            "problem": {"contestId": 3, "index": "C"},
+        },
+        {
+            "id": 6,
+            "verdict": "OK",
+            "problem": {"contestId": 4, "index": "D", "rating": 2400},
+        },
+        {
+            "id": 7,
+            "verdict": "OK",
+            "problem": {
+                "problemsetName": "练习集",
+                "index": "A",
+                "rating": 1600,
+            },
+        },
+        {
+            "id": 8,
+            "verdict": "OK",
+            "problem": {
+                "problemsetName": "练习集",
+                "index": "A",
+                "rating": 1600,
+            },
+        },
+    ]
+
+    distribution, solved_count = (
+        AccountFetcher._parse_cf_difficulty_distribution(rows)
+    )
+
+    assert solved_count == 5
+    assert distribution == [
+        {"label": "≤999", "count": 1},
+        {"label": "1200–1399", "count": 1},
+        {"label": "1600–1799", "count": 1},
+        {"label": "2400+", "count": 1},
+        {"label": "未标分", "count": 1},
+    ]
+
+
+def test_codeforces_detail_fetches_difficulty_without_recent_submission_list(
+    monkeypatch,
+):
+    async def scenario():
+        fetcher = AccountFetcher()
+        calls = []
+
+        async def fake_cf_json(method, params):
+            calls.append((method, params))
+            if method == "user.info":
+                return {
+                    "status": "OK",
+                    "result": [{"handle": "demo", "rating": 1800}],
+                }
+            if method == "user.rating":
+                return {"status": "OK", "result": []}
+            if method == "user.status":
+                return {
+                    "status": "OK",
+                    "result": [
+                        {
+                            "verdict": "OK",
+                            "problem": {
+                                "contestId": 1,
+                                "index": "A",
+                                "rating": 1200,
+                            },
+                        }
+                    ],
+                }
+            raise AssertionError(method)
+
+        monkeypatch.setattr(fetcher, "_cf_json", fake_cf_json)
+        profile = await fetcher._fetch_codeforces(
+            "demo",
+            detail=True,
+            include_submissions=False,
+            include_difficulty=True,
+        )
+
+        assert profile.recent_submissions == []
+        assert profile.solved_count == 1
+        assert profile.difficulty_distribution == [
+            {"label": "1200–1399", "count": 1}
+        ]
+        status_call = next(
+            params for method, params in calls if method == "user.status"
+        )
+        assert status_call["count"] == "10000"
+
+    asyncio.run(scenario())
+
+
 def test_luogu_profile_and_verification_use_com_introduction(monkeypatch):
     async def scenario():
         fetcher = AccountFetcher()
@@ -389,6 +508,38 @@ def test_profile_and_ranking_html_escape_user_content(tmp_path):
     assert "&lt;demo&gt;" in ranking_html
     assert "ELYSIAN // PINK PEARL ARCHIVE" in profile_html
     assert "ELYSIAN // PINK PEARL ARCHIVE" in ranking_html
+    assert "成员 / 账号" in ranking_html
+    assert "近7日变化" in ranking_html
+
+
+def test_progress_ranking_uses_current_value_in_fourth_column(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    rows = [
+        {
+            "display_name": "用户",
+            "handle": "demo",
+            "value": 20,
+            "display_value": "+20",
+            "metric_label": "近7日变化",
+            "delta": 20,
+            "current_display_value": "1800",
+        }
+    ]
+
+    ranking_html = renderer._ranking_html(
+        rows,
+        title="进步榜",
+        subtitle="测试",
+        metric_label="近7日变化",
+        note="",
+        value_header="近7日变化",
+        secondary_label="当前指标",
+        secondary_value_key="current_display_value",
+    )
+
+    assert "当前指标" in ranking_html
+    assert "1800" in ranking_html
+    assert ">+20<" in ranking_html
 
 
 def test_profile_card_height_and_single_layout_are_adaptive(tmp_path):
@@ -456,6 +607,45 @@ def test_profile_card_includes_square_avatar_and_group_rank(tmp_path):
     assert "object-fit:cover" in profile_html
     assert "aspect-ratio:1 / 1" in profile_html
     assert "本群排行：第" in profile_html
+
+
+def test_profile_card_includes_dense_stats_and_difficulty_distribution(
+    tmp_path,
+):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="demo",
+        rating=1800,
+        max_rating=2000,
+        max_rank_text="candidate master",
+        contest_count=80,
+        solved_count=5,
+        contribution=12,
+        difficulty_distribution=[
+            {"label": "≤999", "count": 1},
+            {"label": "1200–1399", "count": 2},
+            {"label": "1600–1799", "count": 1},
+            {"label": "未标分", "count": 1},
+        ],
+    )
+    profile.extra = {
+        "difficulty_scan_limit": 10000,
+        "difficulty_scanned_submissions": 10000,
+    }
+
+    profile_html = renderer._profile_html(
+        [profile],
+        display_name="测试用户",
+        weekly_changes={"codeforces": 20},
+    )
+
+    assert "已统计题数" in profile_html
+    assert "贡献" in profile_html
+    assert "最高段位" in profile_html
+    assert "CF 做题分布" in profile_html
+    assert "1200–1399" in profile_html
+    assert "近 10000 条提交" in profile_html
 
 
 def test_profile_card_avatar_url_normalization():
@@ -603,6 +793,16 @@ def test_overview_card_height_is_based_on_sections_and_note(tmp_path):
 
     assert height > 1200
     assert height < 1800
+    overview_html = renderer._overview_html(
+        sections,
+        title="群排行",
+        subtitle="测试",
+        metric_label="Rating",
+        note="测试备注",
+    )
+    assert "mini-header" in overview_html
+    assert "当前指标" in overview_html
+    assert "近7日变化" in overview_html
 
 
 def test_pillow_overview_layout_uses_previous_row_max_height(tmp_path):
@@ -624,8 +824,8 @@ def test_pillow_overview_layout_uses_previous_row_max_height(tmp_path):
         "luogu",
         "atcoder",
     ]
-    assert section_heights[:2] == [405, 405]
-    assert section_heights[2:] == [125, 125]
+    assert section_heights[:2] == [433, 433]
+    assert section_heights[2:] == [153, 153]
     assert row_tops[1] >= row_tops[0] + max(section_heights[:2]) + 24
 
 

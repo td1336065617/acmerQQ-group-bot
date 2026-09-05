@@ -95,6 +95,24 @@ def _format_signed_number(value: object) -> str:
     except (TypeError, ValueError):
         return str(value)
 
+
+def _solved_count_label(profile: object) -> str:
+    extra = getattr(profile, "extra", {}) or {}
+    if not isinstance(extra, dict):
+        return "通过题数"
+    try:
+        if (
+            extra.get("difficulty_scan_limit")
+            and extra.get("difficulty_scanned_submissions")
+            and int(extra["difficulty_scanned_submissions"])
+            >= int(extra["difficulty_scan_limit"])
+        ):
+            return "已统计题数"
+    except (TypeError, ValueError):
+        pass
+    return "通过题数"
+
+
 ACCOUNT_BIND_RE = re.compile(
     r"^(?:绑定|bind)\s*(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|luogu|"
     r"atc|atcoder)\s+(.+?)\s*$",
@@ -520,6 +538,7 @@ class AcmerGroupBot(Star):
                             detail=detail,
                             force=force,
                             include_submissions=False,
+                            include_difficulty=detail,
                         )
                     ),
                 )
@@ -673,6 +692,8 @@ class AcmerGroupBot(Star):
         subtitle: str,
         metric_label: str,
         note: str,
+        secondary_label: str = "近7日变化",
+        secondary_value_key: str = "delta",
     ):
         """渲染排行总览卡；失败时交给调用方发送文字。"""
         try:
@@ -683,6 +704,8 @@ class AcmerGroupBot(Star):
                 subtitle=subtitle,
                 metric_label=metric_label,
                 note=note,
+                secondary_label=secondary_label,
+                secondary_value_key=secondary_value_key,
             )
         except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断排行查询
             logger.error("排行总览卡渲染失败，改用文字：%s", exc, exc_info=True)
@@ -764,10 +787,46 @@ class AcmerGroupBot(Star):
                 f"｜排名：{rank}"
             )
             lines.append(
-                f"  最高：{profile.max_rating or '—'}｜"
-                f"参赛：{profile.contest_count or '—'}｜"
-                f"本周变化：{_format_signed_number(delta)}"
+                "  "
+                + "｜".join(
+                    value
+                    for value in (
+                        (
+                            f"最高 Rating：{profile.max_rating}"
+                            if profile.max_rating is not None
+                            else ""
+                        ),
+                        (
+                            f"参赛：{profile.contest_count}"
+                            if profile.contest_count is not None
+                            else ""
+                        ),
+                        (
+                            f"{_solved_count_label(profile)}：{profile.solved_count}"
+                            if profile.solved_count is not None
+                            else ""
+                        ),
+                        (
+                            f"贡献：{profile.contribution}"
+                            if profile.contribution is not None
+                            else ""
+                        ),
+                        f"本周变化：{_format_signed_number(delta)}",
+                    )
+                    if value
+                )
             )
+            difficulty = getattr(profile, "difficulty_distribution", []) or []
+            if isinstance(difficulty, list):
+                distribution = " · ".join(
+                    f"{item.get('label')} {item.get('count')}"
+                    for item in difficulty
+                    if isinstance(item, dict)
+                    and item.get("label")
+                    and item.get("count") is not None
+                )
+                if distribution:
+                    lines.append(f"  CF 做题分布：{distribution}")
             rank_info = group_ranks.get(profile.platform)
             if isinstance(rank_info, dict):
                 if rank_info.get("rank") is not None:
@@ -1086,6 +1145,7 @@ class AcmerGroupBot(Star):
                     detail=True,
                     force=force,
                     include_submissions=False,
+                    include_difficulty=True,
                 )
                 await self._record_profile_metric(user_id, profile)
                 delta = await self._profile_weekly_delta(user_id, profile)
@@ -1473,7 +1533,7 @@ class AcmerGroupBot(Star):
                 value = delta
                 display_value = _format_signed_number(delta)
                 sort_value = delta
-                metric_label = "本周变化"
+                metric_label = "近7日变化"
             else:
                 value = metric["value"]
                 display_value = metric["display_value"]
@@ -1496,6 +1556,7 @@ class AcmerGroupBot(Star):
                     "sort_value": sort_value,
                     "delta": delta,
                     "rating": result.rating,
+                    "current_display_value": metric["display_value"],
                 }
             )
         rows.sort(
@@ -1668,9 +1729,11 @@ class AcmerGroupBot(Star):
                 [
                     title,
                     f"当前显示 {start + 1}-{end} / {total} 名成员",
+                    f"名次｜成员 / 账号｜当前{metric}｜近7日变化",
                     *(
-                        f"{i}. {row['display_name']}（{row['handle']}）"
-                        f" {row.get('display_value', row['value'])}"
+                        f"{i}. {row['display_name']}（{row['handle']}）｜"
+                        f"{row.get('display_value', row['value'])}｜"
+                        f"{_format_signed_number(row.get('delta'))}"
                         for i, row in enumerate(page_rows, start + 1)
                     ),
                     f"提示：{note}",
@@ -1686,7 +1749,7 @@ class AcmerGroupBot(Star):
                     yield event.plain_result("当前群还没有加入排行的成员")
                 return
             title = "本群竞赛排行总览" if not progress else "本群本周进步榜"
-            metric = "Rating" if not progress else "本周变化"
+            metric = "当前指标" if not progress else "近7日变化"
             note = (
                 "各平台分开排行，不直接比较不同平台 Rating"
                 if not progress
@@ -1706,16 +1769,35 @@ class AcmerGroupBot(Star):
                 subtitle=f"四平台公开战绩矩阵 · 每个平台前 {RANK_OVERVIEW_SIZE} 名",
                 metric_label=metric,
                 note=note,
+                secondary_label="当前指标" if progress else "近7日变化",
+                secondary_value_key=(
+                    "current_display_value" if progress else "delta"
+                ),
             )
             fallback_lines = [title]
             for platform, rows in overview_sections.items():
                 fallback_lines.append(f"【{platform_label(platform)}】")
+                if progress:
+                    fallback_lines.append("名次｜成员｜近7日变化｜当前指标")
+                else:
+                    fallback_lines.append("名次｜成员｜当前指标｜近7日变化")
                 for i, row in enumerate(rows, 1):
-                    value = (
-                        row.get("display_value", row["value"])
+                    value = row.get("display_value", row["value"])
+                    current_value = row.get(
+                        "current_display_value",
+                        row.get("rating"),
                     )
+                    if progress:
+                        value_text = (
+                            f"{value}｜{current_value or '—'}"
+                        )
+                    else:
+                        value_text = (
+                            f"{value}｜{_format_signed_number(row.get('delta'))}"
+                        )
                     fallback_lines.append(
-                        f"{i}. {row['display_name']}（{row['handle']}） {value}"
+                        f"{i}. {row['display_name']}（{row['handle']}）｜"
+                        f"{value_text}"
                     )
             fallback_lines.append(f"提示：{note}")
             fallback = "\n".join(fallback_lines)

@@ -20,7 +20,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 7
+CARD_FORMAT_VERSION = 8
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -32,6 +32,7 @@ PROFILE_CARD_MULTI_HEIGHT = 351
 PROFILE_GRID_GAP = 18
 RANKING_PAGE_START = 215
 RANKING_LIST_OVERHEAD = 21
+RANKING_HEADER_HEIGHT = 42
 RANKING_ROW_HEIGHT = 104
 RANKING_NOTE_MARGIN = 18
 RANKING_NOTE_PADDING = 28
@@ -42,8 +43,9 @@ RANKING_HEIGHT_SAFETY = 24
 RANKING_MIN_RENDER_HEIGHT = 520
 OVERVIEW_PAGE_START = 215
 OVERVIEW_SECTION_BASE = 74
+OVERVIEW_HEADER_HEIGHT = 28
 OVERVIEW_ROW_HEIGHT = 65
-OVERVIEW_EMPTY_SECTION_HEIGHT = 106
+OVERVIEW_EMPTY_SECTION_HEIGHT = 134
 OVERVIEW_GRID_GAP = 24
 OVERVIEW_HEIGHT_SAFETY = 16
 OVERVIEW_MIN_RENDER_HEIGHT = 520
@@ -76,14 +78,182 @@ def _format_delta(value: object) -> str:
     return f"{number:+d}"
 
 
-def _primary_metric(profile: AccountProfile) -> tuple[str, str]:
-    if profile.platform == "luogu":
-        if profile.rating is not None:
-            return "Elo", _format_number(profile.rating)
-        if profile.rating_rank is not None:
-            return "平台排名", f"#{profile.rating_rank}"
+def _profile_field(profile: object, key: str, default=None):
+    if isinstance(profile, AccountProfile):
+        return getattr(profile, key, default)
+    if isinstance(profile, dict):
+        return profile.get(key, default)
+    return default
+
+
+def _primary_metric(profile: object) -> tuple[str, str]:
+    platform = str(_profile_field(profile, "platform", "") or "")
+    rating = _profile_field(profile, "rating")
+    rating_rank = _profile_field(profile, "rating_rank")
+    if platform == "luogu":
+        if rating is not None:
+            return "Elo", _format_number(rating)
+        if rating_rank is not None:
+            return "平台排名", f"#{rating_rank}"
         return "平台排名", "—"
-    return "Rating", _format_number(profile.rating)
+    return "Rating", _format_number(rating)
+
+
+def _profile_stats(profile: object) -> List[tuple[str, str]]:
+    """只生成有实际数据的资料项，避免大量“—”占据卡片空间。"""
+    primary_label, _ = _primary_metric(profile)
+    stats: List[tuple[str, str]] = []
+
+    rating_rank = _profile_field(profile, "rating_rank")
+    rank_value = _format_number(rating_rank) if rating_rank is not None else ""
+    # 洛谷没有 Elo 时主指标本身就是平台排名，不重复展示。
+    if rank_value and primary_label != "平台排名":
+        stats.append(("平台排名", rank_value))
+
+    max_rating = _profile_field(profile, "max_rating")
+    if max_rating is not None:
+        stats.append(("最高 Rating", _format_number(max_rating)))
+
+    max_rank_text = str(
+        _profile_field(profile, "max_rank_text", "") or ""
+    ).strip()
+    if max_rank_text:
+        stats.append(("最高段位", max_rank_text))
+
+    contest_count = _profile_field(profile, "contest_count")
+    if contest_count is not None:
+        stats.append(("参赛次数", _format_number(contest_count)))
+
+    solved_count = _profile_field(profile, "solved_count")
+    if solved_count is not None:
+        stats.append(
+            (_solved_count_label(profile), _format_number(solved_count))
+        )
+
+    contribution = _profile_field(profile, "contribution")
+    if contribution is not None:
+        stats.append(("贡献", _format_number(contribution)))
+    return stats
+
+
+def _difficulty_items(profile: object) -> List[tuple[str, int]]:
+    """读取资料卡使用的难度分布，过滤损坏或空数据。"""
+    raw = _profile_field(profile, "difficulty_distribution", []) or []
+    if not isinstance(raw, list):
+        return []
+    items: List[tuple[str, int]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        try:
+            count = int(item.get("count"))
+        except (TypeError, ValueError):
+            continue
+        if label and count > 0:
+            items.append((label, count))
+    return items
+
+
+def _difficulty_title(profile: object) -> str:
+    items = _difficulty_items(profile)
+    if not items:
+        return ""
+    total = sum(count for _, count in items)
+    if _difficulty_scan_is_partial(profile):
+        extra = _profile_field(profile, "extra", {}) or {}
+        scan_limit = extra.get("difficulty_scan_limit")
+        return (
+            f"CF 做题分布 · 已统计通过 {total} 题"
+            f"（最近 {int(scan_limit)} 条提交）"
+        )
+    return f"CF 做题分布 · 已通过 {total} 题"
+
+
+def _difficulty_scan_is_partial(profile: object) -> bool:
+    extra = _profile_field(profile, "extra", {}) or {}
+    if not isinstance(extra, dict):
+        return False
+    scan_limit = extra.get("difficulty_scan_limit")
+    scanned = extra.get("difficulty_scanned_submissions")
+    try:
+        return bool(
+            scan_limit
+            and scanned
+            and int(scanned) >= int(scan_limit)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _solved_count_label(profile: object) -> str:
+    return "已统计题数" if _difficulty_scan_is_partial(profile) else "通过题数"
+
+
+def _difficulty_text(profile: object) -> str:
+    items = _difficulty_items(profile)
+    return " · ".join(f"{label} {count}" for label, count in items)
+
+
+def _difficulty_lines(
+    profile: object,
+    *,
+    max_units: int,
+) -> List[str]:
+    title = _difficulty_title(profile)
+    if not title:
+        return []
+    parts = [f"{label} {count}" for label, count in _difficulty_items(profile)]
+    lines: List[str] = []
+    current = f"{title}："
+    for part in parts:
+        candidate = f"{current} {part}" if current.endswith("：") else f"{current} · {part}"
+        if (
+            not current.endswith("：")
+            and _text_width_for_layout(candidate) > max_units
+        ):
+            lines.append(current)
+            current = f"  {part}"
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _text_width_for_layout(value: object) -> int:
+    text = str(value or "")
+    return sum(2 if not char.isascii() else 1 for char in text)
+
+
+def _profile_extra_text(profile: object) -> str:
+    """整理学校、组织和地区信息，去除 CF 学校/组织重复值。"""
+    school = str(_profile_field(profile, "school", "") or "").strip()
+    organization = str(
+        _profile_field(profile, "organization", "") or ""
+    ).strip()
+    country = str(_profile_field(profile, "country", "") or "").strip()
+    city = str(_profile_field(profile, "city", "") or "").strip()
+    values = []
+
+    if organization:
+        values.append(f"组织：{organization}")
+    if school and school.casefold() != organization.casefold():
+        values.append(f"学校：{school}")
+    location = " · ".join(value for value in (country, city) if value)
+    if location:
+        values.append(f"地区：{location}")
+
+    if str(_profile_field(profile, "platform", "") or "") == "luogu":
+        extra = _profile_field(profile, "extra", {}) or {}
+        if isinstance(extra, dict):
+            ccf_level = str(extra.get("ccf_level") or "").strip()
+            xcpc_level = str(extra.get("xcpc_level") or "").strip()
+            if ccf_level:
+                values.append(f"CCF {ccf_level}")
+            if xcpc_level:
+                values.append(f"XCPC {xcpc_level}")
+    return " · ".join(values)
 
 
 def _updated_text(timestamp: Optional[float] = None) -> str:
@@ -232,6 +402,9 @@ class AccountCardRenderer:
         subtitle: str,
         metric_label: str = "Rating",
         note: str = "",
+        value_header: Optional[str] = None,
+        secondary_label: str = "近7日变化",
+        secondary_value_key: str = "delta",
     ) -> Optional[Path]:
         source = {
             "kind": "ranking",
@@ -239,6 +412,9 @@ class AccountCardRenderer:
             "subtitle": subtitle,
             "metric_label": metric_label,
             "note": note,
+            "value_header": value_header or f"当前{metric_label}",
+            "secondary_label": secondary_label,
+            "secondary_value_key": secondary_value_key,
             "rows": rows,
         }
         body = self._ranking_html(
@@ -247,6 +423,9 @@ class AccountCardRenderer:
             subtitle=subtitle,
             metric_label=metric_label,
             note=note,
+            value_header=value_header,
+            secondary_label=secondary_label,
+            secondary_value_key=secondary_value_key,
         )
         return self._render(
             body,
@@ -257,6 +436,9 @@ class AccountCardRenderer:
             subtitle,
             metric_label,
             note,
+            value_header,
+            secondary_label,
+            secondary_value_key,
         )
 
     def render_overview_ranking(
@@ -267,6 +449,8 @@ class AccountCardRenderer:
         subtitle: str,
         metric_label: str = "Rating",
         note: str = "",
+        secondary_label: str = "近7日变化",
+        secondary_value_key: str = "delta",
     ) -> Optional[Path]:
         source = {
             "kind": "overview",
@@ -274,6 +458,8 @@ class AccountCardRenderer:
             "subtitle": subtitle,
             "metric_label": metric_label,
             "note": note,
+            "secondary_label": secondary_label,
+            "secondary_value_key": secondary_value_key,
             "sections": sections,
         }
         body = self._overview_html(
@@ -282,6 +468,8 @@ class AccountCardRenderer:
             subtitle=subtitle,
             metric_label=metric_label,
             note=note,
+            secondary_label=secondary_label,
+            secondary_value_key=secondary_value_key,
         )
         return self._render(
             body,
@@ -292,6 +480,8 @@ class AccountCardRenderer:
             subtitle,
             metric_label,
             note,
+            secondary_label,
+            secondary_value_key,
         )
 
     def _render(
@@ -426,11 +616,18 @@ class AccountCardRenderer:
             if compact
             else PROFILE_CARD_MULTI_HEIGHT
         )
+        stats = _profile_stats(profile)
+        stat_rows = max(1, (len(stats) + 1) // 2)
+        height += max(0, stat_rows - 2) * 30
         # 多平台卡的排行信息通常会在窄卡片中换到下一行；单平台卡可横向容纳。
         if has_group_rank and not compact:
             height += 33
-        if values["solved_count"] is not None:
-            height += 28
+        difficulty_lines = _difficulty_lines(
+            profile,
+            max_units=128 if compact else 68,
+        )
+        if difficulty_lines:
+            height += 30 + len(difficulty_lines) * 24
 
         # 单平台卡片使用整行宽度；这些阈值对应压缩后的 CSS 卡片宽度。
         handle_width = cls._text_width(values["handle"])
@@ -441,11 +638,7 @@ class AccountCardRenderer:
         if rank_width > 24:
             height += min(28, ((rank_width - 1) // 24) * 24)
 
-        extras = " · ".join(
-            str(values[key] or "").strip()
-            for key in ("school", "organization", "country")
-            if str(values[key] or "").strip()
-        )
+        extras = _profile_extra_text(profile)
         if extras:
             height += min(48, max(0, (cls._text_width(extras) - 1) // 84) * 24)
 
@@ -615,7 +808,11 @@ class AccountCardRenderer:
         """按排行行数、长文本和备注估算截图高度。"""
         row_list = list(rows)
         rows_height = sum(cls._ranking_row_height(row) for row in row_list)
-        list_height = RANKING_LIST_OVERHEAD + rows_height
+        list_height = (
+            RANKING_LIST_OVERHEAD
+            + RANKING_HEADER_HEIGHT
+            + rows_height
+        )
         note_height = 0
         if note:
             note_width = cls._ranking_text_width(note)
@@ -652,7 +849,11 @@ class AccountCardRenderer:
             section_heights.append(
                 OVERVIEW_EMPTY_SECTION_HEIGHT
                 if count == 0
-                else OVERVIEW_SECTION_BASE + count * OVERVIEW_ROW_HEIGHT
+                else (
+                    OVERVIEW_SECTION_BASE
+                    + OVERVIEW_HEADER_HEIGHT
+                    + count * OVERVIEW_ROW_HEIGHT
+                )
             )
         if not section_heights:
             grid_height = OVERVIEW_EMPTY_SECTION_HEIGHT
@@ -689,7 +890,16 @@ class AccountCardRenderer:
         """计算 Pillow 总览的分区位置，避免不同高度分区互相覆盖。"""
         items = list(sections.items())
         section_heights = [
-            max(78, min(5, len(rows)) * 70 + 55)
+            (
+                OVERVIEW_EMPTY_SECTION_HEIGHT
+                if not rows
+                else max(
+                    78,
+                    min(5, len(rows)) * 70
+                    + 55
+                    + OVERVIEW_HEADER_HEIGHT,
+                )
+            )
             for _, rows in items
         ]
         row_heights = []
@@ -703,6 +913,23 @@ class AccountCardRenderer:
             row_tops.append(current_top)
             current_top += row_height + OVERVIEW_GRID_GAP
         return items, section_heights, row_tops
+
+    @classmethod
+    def _difficulty_html(cls, profile: object) -> str:
+        items = _difficulty_items(profile)
+        if not items:
+            return ""
+        chips = "".join(
+            f'<span class="difficulty-chip"><b>{_escape(label)}</b>'
+            f'<strong>{_escape(count)}</strong></span>'
+            for label, count in items
+        )
+        return (
+            '<div class="difficulty-panel">'
+            f'<div class="difficulty-title">{_escape(_difficulty_title(profile))}</div>'
+            f'<div class="difficulty-grid">{chips}</div>'
+            "</div>"
+        )
 
     @classmethod
     def _profile_html(
@@ -728,32 +955,14 @@ class AccountCardRenderer:
             )
             delta_class = "positive" if (delta or 0) > 0 else "negative" if (delta or 0) < 0 else ""
             primary_label, primary_value = _primary_metric(profile)
-            detail = [
-                (f"当前 {primary_label}", primary_value),
-                ("最高 Rating", _format_number(profile.max_rating)),
-                ("平台排名", _format_number(profile.rating_rank or profile.rank_text)),
-                ("参赛次数", _format_number(profile.contest_count)),
-            ]
-            if profile.solved_count is not None:
-                detail.append(("通过题数", _format_number(profile.solved_count)))
+            detail = _profile_stats(profile)
             details_html = "".join(
                 f'<div class="stat"><span>{_escape(label)}</span><b>{_escape(value)}</b></div>'
                 for label, value in detail
             )
-            extra_values = [
-                profile.school,
-                profile.organization,
-                profile.country,
-            ]
-            if profile.platform == "luogu":
-                ccf_level = str(profile.extra.get("ccf_level") or "").strip()
-                xcpc_level = str(profile.extra.get("xcpc_level") or "").strip()
-                if ccf_level:
-                    extra_values.append(f"CCF {ccf_level}")
-                if xcpc_level:
-                    extra_values.append(f"XCPC {xcpc_level}")
-            extras = " · ".join(value for value in extra_values if value)
+            extras = _profile_extra_text(profile)
             latest = profile.recent_contests[0] if profile.recent_contests else {}
+            difficulty_html = cls._difficulty_html(profile)
             latest_text = ""
             if isinstance(latest, dict) and latest.get("name"):
                 latest_text = (
@@ -816,6 +1025,7 @@ class AccountCardRenderer:
                   </div>
                   <div class="stats">{details_html}</div>
                   <div class="profile-meta">
+                    {difficulty_html}
                     <div class="trend {delta_class}">本次变化：{_escape(_format_delta(delta))}</div>
                     {latest_text}
                     {f'<div class="extra">{_escape(extras)}</div>' if extras else ""}
@@ -856,11 +1066,22 @@ class AccountCardRenderer:
         subtitle: str,
         metric_label: str,
         note: str,
+        value_header: Optional[str] = None,
+        secondary_label: str = "近7日变化",
+        secondary_value_key: str = "delta",
     ) -> str:
         rendered = []
         for index, row in enumerate(rows, start=1):
             delta = row.get("delta")
             delta_class = "positive" if (delta or 0) > 0 else "negative" if (delta or 0) < 0 else ""
+            secondary_value = row.get(secondary_value_key)
+            if secondary_value is None and secondary_value_key != "delta":
+                secondary_value = row.get("delta")
+            secondary_text = (
+                _format_delta(secondary_value)
+                if secondary_value_key == "delta"
+                else _format_number(secondary_value)
+            )
             rendered.append(
                 f"""
                 <div class="rank-row">
@@ -873,14 +1094,23 @@ class AccountCardRenderer:
                     <strong>{_escape(_format_number(row.get("display_value", row.get("value"))))}</strong>
                     <small>{_escape(row.get("metric_label") or metric_label)}</small>
                   </div>
-                  <div class="rank-delta {delta_class}">{_escape(_format_delta(delta))}</div>
+                  <div class="rank-delta {delta_class}">{_escape(secondary_text)}</div>
                 </div>
                 """
             )
         ranking_body = "".join(rendered) or (
             '<div class="empty-card">当前还没有可排行的成员</div>'
         )
-        body = f'<div class="ranking-list">{ranking_body}</div>'
+        body = (
+            '<div class="ranking-list">'
+            '<div class="rank-header">'
+            "<span>名次</span>"
+            "<span>成员 / 账号</span>"
+            f"<span>{_escape(value_header or f'当前{metric_label}')}</span>"
+            f"<span>{_escape(secondary_label)}</span>"
+            "</div>"
+            f"{ranking_body}</div>"
+        )
         if note:
             body += f'<div class="rank-note">{_escape(note)}</div>'
         body += (
@@ -902,7 +1132,10 @@ class AccountCardRenderer:
         subtitle: str,
         metric_label: str,
         note: str,
+        secondary_label: str = "近7日变化",
+        secondary_value_key: str = "delta",
     ) -> str:
+        is_progress = secondary_value_key != "delta"
         blocks = []
         for platform, rows in sections.items():
             start, end = PLATFORM_COLORS.get(
@@ -918,22 +1151,49 @@ class AccountCardRenderer:
                     if (delta or 0) < 0
                     else ""
                 )
+                current_value = row.get(
+                    "current_display_value",
+                    row.get("rating"),
+                )
+                value_text = row.get("display_value", row.get("value"))
+                delta_text = (
+                    _format_delta(delta)
+                    if secondary_value_key == "delta"
+                    else _format_number(
+                        row.get(
+                            secondary_value_key,
+                            current_value,
+                        )
+                    )
+                )
                 rendered.append(
                     f"""
                     <div class="mini-row">
                       <span class="mini-no">{index:02d}</span>
                       <span class="mini-user"><b>{_escape(row.get("display_name") or row.get("qq_name") or "未知用户")}</b><small>{_escape(row.get("handle") or "")}</small></span>
-                      <strong class="mini-value">{_escape(_format_number(row.get("display_value", row.get("value"))))}</strong>
-                      <span class="mini-delta {delta_class}">{_escape(_format_delta(delta))}</span>
+                      <strong class="mini-value">{_escape(_format_number(value_text))}</strong>
+                      <span class="mini-delta {delta_class}">{_escape(delta_text)}</span>
                     </div>
                     """
                 )
             if not rendered:
                 rendered.append('<div class="mini-empty">暂无数据</div>')
+            value_header = (
+                metric_label
+                if is_progress
+                else "当前指标"
+            )
+            delta_header = secondary_label or "近7日变化"
             blocks.append(
                 f"""
                 <section class="mini-section" style="--accent:{_escape(start)};--accent2:{_escape(end)}">
                   <h2>{_escape(platform_label(platform))}</h2>
+                  <div class="mini-header">
+                    <span>名次</span>
+                    <span>成员</span>
+                    <span>{_escape(value_header)}</span>
+                    <span>{_escape(delta_header)}</span>
+                  </div>
                   {''.join(rendered)}
                 </section>
                 """
@@ -1028,10 +1288,19 @@ class AccountCardRenderer:
     .group-rank b {{ color:#6b315f; font-size:17px; }}
     .group-rank.muted {{ color:#a17a95; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
+    .difficulty-panel {{ flex:1 1 100%; min-width:0; padding:10px 12px 11px; border:1px solid rgba(205,145,184,.32); border-radius:12px; background:linear-gradient(105deg,rgba(255,245,251,.76),rgba(228,247,252,.58)); }}
+    .difficulty-title {{ color:#8d5f82; font-size:13px; font-weight:800; letter-spacing:.4px; margin-bottom:7px; overflow-wrap:anywhere; }}
+    .difficulty-grid {{ display:flex; flex-wrap:wrap; gap:6px; }}
+    .difficulty-chip {{ display:inline-flex; align-items:center; gap:7px; padding:5px 8px; border-radius:9px; background:rgba(255,255,255,.76); border:1px solid rgba(224,177,206,.42); color:#8a6a86; font-size:12px; line-height:1.2; }}
+    .difficulty-chip b {{ color:#c44786; font-weight:800; }}
+    .difficulty-chip strong {{ color:#51315d; font-size:14px; }}
     .profile-meta > .trend,
     .profile-meta > .recent,
     .profile-meta > .extra {{ flex:1 1 210px; min-width:0; margin-top:0; }}
     .ranking-list {{ position:relative; overflow:hidden; padding:10px 24px; }}
+    .rank-header {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:4px 8px 10px; color:#a17a95; font-size:13px; font-weight:800; letter-spacing:.5px; border-bottom:1px solid rgba(184,113,157,.24); }}
+    .rank-header span:nth-child(3),
+    .rank-header span:nth-child(4) {{ text-align:right; }}
     .rank-row {{ display:grid; grid-template-columns:80px 1fr 150px 100px; align-items:center; gap:16px; padding:20px 8px; border-bottom:1px solid rgba(184,113,157,.2); }}
     .rank-row:last-child {{ border-bottom:0; }}
     .rank-no {{ color:#d34f93; font-size:28px; font-weight:900; }}
@@ -1045,6 +1314,9 @@ class AccountCardRenderer:
     .mini-section {{ position:relative; overflow:hidden; padding:20px 22px 12px; background:linear-gradient(145deg,rgba(255,252,255,.97),rgba(255,230,244,.92)); border:1px solid rgba(255,211,235,.9); border-radius:20px; box-shadow:0 18px 42px rgba(20,8,35,.3), inset 0 0 28px rgba(255,255,255,.62); }}
     .mini-section:before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(var(--accent),var(--accent2)); box-shadow:0 0 18px var(--accent); }}
     .mini-section h2 {{ margin:0 0 8px; color:var(--accent); font-size:22px; }}
+    .mini-header {{ display:grid; grid-template-columns:48px 1fr 90px 72px; align-items:center; gap:8px; min-height:24px; color:#a17a95; font-size:11px; font-weight:800; border-bottom:1px solid rgba(184,113,157,.2); }}
+    .mini-header span:nth-child(3),
+    .mini-header span:nth-child(4) {{ text-align:right; }}
     .mini-row {{ display:grid; grid-template-columns:48px 1fr 90px 72px; align-items:center; gap:8px; min-height:65px; border-bottom:1px solid rgba(184,113,157,.18); }}
     .mini-row:last-child {{ border-bottom:0; }}
     .mini-no {{ color:#d34f93; font-size:18px; font-weight:800; }}
@@ -1173,21 +1445,7 @@ class AccountCardRenderer:
                 and profile.recent_contests[0].get("name")
             ):
                 count += 1
-            extra_values = [
-                profile.school,
-                profile.organization,
-                profile.country,
-            ]
-            if profile.platform == "luogu":
-                extra_values.extend(
-                    value
-                    for value in (
-                        profile.extra.get("ccf_level"),
-                        profile.extra.get("xcpc_level"),
-                    )
-                    if str(value or "").strip()
-                )
-            if any(str(value or "").strip() for value in extra_values):
+            if _profile_extra_text(profile):
                 count += 1
             if profile.platform in group_ranks:
                 count += 1
@@ -1365,13 +1623,9 @@ class AccountCardRenderer:
                 fill="#765477",
             )
             details = [
-                f"最高 Rating：{_format_number(profile.max_rating)}",
-                f"平台排名：{_format_number(profile.rating_rank)}",
-                f"参赛次数：{_format_number(profile.contest_count)}",
-                f"本次变化：{_format_delta(weekly_changes.get(profile.platform, profile.recent_delta))}",
+                f"{label}：{value}"
+                for label, value in _profile_stats(profile)
             ]
-            if profile.solved_count is not None:
-                details.append(f"通过题数：{_format_number(profile.solved_count)}")
             columns = 4 if single else 2
             detail_width = (card_w - 50) / columns
             detail_top = y + (220 if single else 164)
@@ -1389,6 +1643,29 @@ class AccountCardRenderer:
                 )
             detail_rows = (len(details) + columns - 1) // columns
             meta_y = int(detail_top + detail_rows * 27 + 7)
+            change_value = weekly_changes.get(
+                profile.platform,
+                profile.recent_delta,
+            )
+            draw.text(
+                (x + 25, meta_y),
+                f"本次变化：{_format_delta(change_value)}",
+                font=body_font,
+                fill="#61b98b" if (change_value or 0) >= 0 else "#e26c91",
+            )
+            meta_y += 23
+            difficulty_lines = _difficulty_lines(
+                profile,
+                max_units=128 if single else 68,
+            )
+            for line in difficulty_lines:
+                draw.text(
+                    (x + 25, meta_y),
+                    line,
+                    font=body_font,
+                    fill="#8d6683",
+                )
+                meta_y += 23
             if profile.recent_contests and isinstance(profile.recent_contests[0], dict) and profile.recent_contests[0].get("name"):
                 recent = profile.recent_contests[0]
                 draw.text(
@@ -1398,19 +1675,7 @@ class AccountCardRenderer:
                     fill="#80617d",
                 )
                 meta_y += 23
-            extra_values = [
-                profile.school,
-                profile.organization,
-                profile.country,
-            ]
-            if profile.platform == "luogu":
-                ccf_level = str(profile.extra.get("ccf_level") or "").strip()
-                xcpc_level = str(profile.extra.get("xcpc_level") or "").strip()
-                if ccf_level:
-                    extra_values.append(f"CCF {ccf_level}")
-                if xcpc_level:
-                    extra_values.append(f"XCPC {xcpc_level}")
-            extras = " · ".join(value for value in extra_values if value)
+            extras = _profile_extra_text(profile)
             if extras:
                 draw.text(
                     (x + 25, meta_y),
@@ -1455,6 +1720,9 @@ class AccountCardRenderer:
         subtitle: str,
         metric_label: str,
         note: str,
+        value_header: Optional[str],
+        secondary_label: str,
+        secondary_value_key: str,
         image_path: Path,
     ) -> bool:
         try:
@@ -1468,7 +1736,13 @@ class AccountCardRenderer:
         value_font = cls._find_font(28)
         if not all((title_font, subtitle_font, body_font, value_font)):
             return False
-        height = max(MIN_CARD_HEIGHT, min(MAX_CARD_HEIGHT, 450 + len(rows) * 82))
+        height = max(
+            MIN_CARD_HEIGHT,
+            min(
+                MAX_CARD_HEIGHT,
+                450 + RANKING_HEADER_HEIGHT + len(rows) * 82,
+            ),
+        )
         image = PILImage.new("RGB", (CARD_WIDTH, height), "#2a193b")
         draw = ImageDraw.Draw(image)
         draw.ellipse(
@@ -1490,6 +1764,22 @@ class AccountCardRenderer:
         draw.text((70, 88), title, font=title_font, fill="#fff7fb")
         draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
         y = 205
+        header_fill = "#a17a95"
+        draw.text((95, y), "名次", font=subtitle_font, fill=header_fill)
+        draw.text((185, y), "成员 / 账号", font=subtitle_font, fill=header_fill)
+        draw.text(
+            (850, y),
+            value_header or f"当前{metric_label}",
+            font=subtitle_font,
+            fill=header_fill,
+        )
+        draw.text(
+            (1040, y),
+            secondary_label,
+            font=subtitle_font,
+            fill=header_fill,
+        )
+        y += RANKING_HEADER_HEIGHT
         for index, row in enumerate(rows, start=1):
             draw.rounded_rectangle(
                 (70, y, CARD_WIDTH - 70, y + 64),
@@ -1517,7 +1807,22 @@ class AccountCardRenderer:
                 font=value_font,
                 fill="#51315d",
             )
-            draw.text((1040, y + 21), _format_delta(row.get("delta")), font=body_font, fill="#61f0ad" if (row.get("delta") or 0) >= 0 else "#ff7899")
+            secondary_value = row.get(secondary_value_key)
+            if secondary_value is None and secondary_value_key != "delta":
+                secondary_value = row.get("delta")
+            secondary_text = (
+                _format_delta(secondary_value)
+                if secondary_value_key == "delta"
+                else _format_number(secondary_value)
+            )
+            draw.text(
+                (1040, y + 21),
+                secondary_text,
+                font=body_font,
+                fill="#61f0ad"
+                if (row.get("delta") or 0) >= 0
+                else "#ff7899",
+            )
             y += 82
         if note:
             draw.text(
@@ -1546,6 +1851,8 @@ class AccountCardRenderer:
         subtitle: str,
         metric_label: str,
         note: str,
+        secondary_label: str,
+        secondary_value_key: str,
         image_path: Path,
     ) -> bool:
         try:
@@ -1588,6 +1895,7 @@ class AccountCardRenderer:
         draw.text((70, 88), title, font=title_font, fill="#fff7fb")
         draw.text((70, 140), subtitle, font=subtitle_font, fill="#f1d7e7")
         columns = 2
+        is_progress = secondary_value_key != "delta"
         section_w = (CARD_WIDTH - 140 - 24) // columns
         for index, (platform, rows_data) in enumerate(items):
             col = index % columns
@@ -1607,7 +1915,28 @@ class AccountCardRenderer:
                 width=2,
             )
             draw.text((x + 20, y + 14), platform_label(platform), font=value_font, fill=accent)
-            row_y = y + 55
+            header_fill = "#a17a95"
+            value_header = (
+                metric_label
+                if is_progress
+                else "当前指标"
+            )
+            delta_header = secondary_label or "近7日变化"
+            draw.text((x + 20, y + 43), "名次", font=subtitle_font, fill=header_fill)
+            draw.text((x + 75, y + 43), "成员", font=subtitle_font, fill=header_fill)
+            draw.text(
+                (x + section_w - 205, y + 43),
+                value_header,
+                font=subtitle_font,
+                fill=header_fill,
+            )
+            draw.text(
+                (x + section_w - 95, y + 43),
+                delta_header,
+                font=subtitle_font,
+                fill=header_fill,
+            )
+            row_y = y + 78
             for rank, item in enumerate(rows_data[:5], start=1):
                 draw.text((x + 20, row_y), f"{rank:02d}", font=body_font, fill="#d34f93")
                 draw.text(
@@ -1617,10 +1946,29 @@ class AccountCardRenderer:
                     fill="#51315d",
                 )
                 draw.text(
-                    (x + section_w - 145, row_y),
+                    (x + section_w - 205, row_y),
                     _format_number(item.get("display_value", item.get("value"))),
                     font=value_font,
                     fill="#51315d",
+                )
+                current_value = item.get(
+                    "current_display_value",
+                    item.get("rating"),
+                )
+                delta_value = (
+                    item.get(secondary_value_key, current_value)
+                    if is_progress
+                    else _format_delta(item.get("delta"))
+                )
+                draw.text(
+                    (x + section_w - 95, row_y + 3),
+                    (
+                        _format_number(delta_value)
+                        if is_progress
+                        else str(delta_value)
+                    ),
+                    font=subtitle_font,
+                    fill="#80617d",
                 )
                 row_y += 70
         if note:

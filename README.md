@@ -74,6 +74,8 @@ AstrBot 管理面板 → 插件管理 → acmerQQ群机器人：
 账号资料使用各平台公开接口/个人主页：Codeforces API、牛客公开竞赛主页、
 洛谷 `luogu.com` 公开个人页 `#lentille-context`（`.com.cn` 兼容兜底）、
 AtCoder 公开用户页与 Rating 历史页。
+Codeforces 个人卡的做题分布来自公开提交记录：只统计 `OK` 的不同题目，
+并扫描最近最多 10000 条提交；其他平台没有稳定的统一难度分布时不强行估算。
 插件不要求用户提供平台密码、Cookie 或 API Key。
 
 在线比赛统一转为 `Contest` 模型，线下赛使用带日期/赛站/主办方字段的专用模型。
