@@ -43,6 +43,8 @@ NOWCODER_RATING_INDEX_URL = (
 )
 LUOGU_PROFILE_URL = "https://www.luogu.com/user/{uid}"
 LUOGU_LEGACY_PROFILE_URL = "https://www.luogu.com.cn/user/{uid}"
+LUOGU_PRACTICE_URL = "https://www.luogu.com/user/{uid}/practice"
+LUOGU_LEGACY_PRACTICE_URL = "https://www.luogu.com.cn/user/{uid}/practice"
 LUOGU_API_URL = "https://www.luogu.com.cn/api/user/show?uid={uid}"
 ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}?lang=en"
 ATCODER_HISTORY_JSON_URL = "https://atcoder.jp/users/{handle}/history/json"
@@ -74,6 +76,17 @@ NOWCODER_DIFFICULTY_BUCKETS = (
     ("2200–2599", 2200, 2599),
     ("2600+", 2600, None),
 )
+LUOGU_DIFFICULTY_LABELS = {
+    0: "暂无评定",
+    1: "入门",
+    2: "普及−",
+    3: "普及",
+    4: "普及+/提高−",
+    5: "提高",
+    6: "提高+/省选−",
+    7: "省选/NOI−",
+    8: "NOI/NOI+/CTS",
+}
 ATCODER_SUBMISSION_PAGE_SIZE = 500
 ATCODER_SUBMISSION_SCAN_LIMIT = 10000
 ATCODER_DIFFICULTY_BUCKETS = (
@@ -1569,7 +1582,7 @@ class AccountFetcher:
         if not isinstance(data, dict):
             return {
                 "source": "洛谷公开个人页 #lentille-context",
-                "coverage": "仅取得账号公开摘要，未取得题目级记录",
+                "coverage": "仅取得账号公开摘要，题目级难度待读取公开练习页",
             }
 
         daily_counts = data.get("dailyCounts")
@@ -1706,7 +1719,7 @@ class AccountFetcher:
             "source": "洛谷公开个人页 #lentille-context",
             "coverage": (
                 "账号摘要、公开活动日历和 Elo 历史；"
-                "洛谷个人页未稳定提供题目级通过记录"
+                "题目级通过记录待读取公开练习页"
             ),
             "active_days_total": len(set(activity_dates)),
             "active_days_30": active_days_30,
@@ -1764,6 +1777,10 @@ class AccountFetcher:
                 if item is not None
             ],
             "score_title": "洛谷资料分项",
+            "score_distribution": [
+                {"label": label, "count": count}
+                for label, count in score_distribution.items()
+            ],
             "category_title": "洛谷资料分项",
             "category_distribution": [
                 {"label": label, "count": count}
@@ -1785,6 +1802,115 @@ class AccountFetcher:
                 default=None,
             ),
         }
+
+    @staticmethod
+    def _decode_luogu_payload(raw: str) -> Optional[object]:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            match = LENTILLE_RE.search(raw)
+            if not match:
+                return None
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                return None
+
+    @staticmethod
+    def _parse_luogu_practice_analysis(
+        payload: object,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None
+        if data.get("privacy") is True:
+            return {
+                "analysis_status": "unavailable",
+                "practice_source": "洛谷公开练习页 #lentille-context",
+                "practice_coverage": "练习记录受账号隐私保护",
+            }
+        passed = data.get("passed")
+        if not isinstance(passed, list):
+            return None
+
+        unique_passed: Dict[str, Dict[str, Any]] = {}
+        for item in passed:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("pid") or item.get("id") or "").strip()
+            if pid:
+                unique_passed[pid] = item
+        if not unique_passed and passed:
+            return None
+
+        difficulty_counts: Dict[int, int] = {}
+        type_counts: Dict[str, int] = {}
+        for item in unique_passed.values():
+            difficulty = _parse_int(item.get("difficulty"))
+            if difficulty not in LUOGU_DIFFICULTY_LABELS:
+                difficulty = 0
+            difficulty_counts[difficulty] = (
+                difficulty_counts.get(difficulty, 0) + 1
+            )
+            problem_type = str(item.get("type") or "").strip().upper()
+            type_label = {
+                "P": "普及/提高题库",
+                "B": "入门题库",
+                "T": "团队题库",
+                "U": "用户题库",
+            }.get(problem_type, "其他题库")
+            type_counts[type_label] = type_counts.get(type_label, 0) + 1
+
+        difficulty_distribution = [
+            {
+                "label": LUOGU_DIFFICULTY_LABELS[level],
+                "count": difficulty_counts[level],
+            }
+            for level in sorted(difficulty_counts)
+            if difficulty_counts.get(level, 0) > 0
+        ]
+        return {
+            "solved_count": len(unique_passed),
+            "difficulty_title": "洛谷通过题难度分组",
+            "difficulty_distribution": difficulty_distribution,
+            "category_title": "洛谷题库类型",
+            "category_distribution": _distribution_rows(type_counts),
+            "practice_source": "洛谷公开练习页 #lentille-context",
+            "practice_coverage": f"已读取 {len(unique_passed)} 道通过题",
+        }
+
+    async def _fetch_luogu_practice_analysis(
+        self,
+        uid: str,
+        *,
+        preferred_source_url: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        candidates = [
+            LUOGU_PRACTICE_URL.format(uid=uid),
+            LUOGU_LEGACY_PRACTICE_URL.format(uid=uid),
+        ]
+        if ".com.cn/" in preferred_source_url:
+            candidates.reverse()
+        for url in candidates:
+            try:
+                raw = await self._fetch_text(
+                    url,
+                    headers={
+                        "Accept": "application/json,text/plain,text/html;q=0.9",
+                        "X-Luogu-Type": "xhr",
+                    },
+                    timeout=20.0,
+                )
+                payload = self._decode_luogu_payload(raw)
+                analysis = self._parse_luogu_practice_analysis(payload)
+                if analysis is not None:
+                    analysis["practice_url"] = url
+                    return analysis
+            except AccountFetchError:
+                continue
+        return None
 
     @staticmethod
     def _nowcoder_color(rating: Optional[int]) -> str:
@@ -1958,6 +2084,31 @@ class AccountFetcher:
         )
         if detail and include_analysis:
             analysis = self._build_luogu_analysis(payload)
+            practice_analysis = await self._fetch_luogu_practice_analysis(
+                uid,
+                preferred_source_url=source_url,
+            )
+            if (
+                practice_analysis
+                and practice_analysis.get("analysis_status")
+                != "unavailable"
+            ):
+                analysis.update(practice_analysis)
+                analysis["source"] = (
+                    "洛谷公开个人页 + 洛谷公开练习页 #lentille-context"
+                )
+                analysis["coverage"] = (
+                    "账号摘要、公开活动日历、Elo 历史；"
+                    f"{practice_analysis.get('practice_coverage')}"
+                )
+            elif practice_analysis:
+                analysis["analysis_status"] = "partial"
+                analysis["coverage"] = (
+                    "账号摘要、公开活动日历、Elo 历史；"
+                    f"{practice_analysis.get('practice_coverage')}"
+                )
+            else:
+                analysis["analysis_status"] = "partial"
             self._apply_analysis(profile, analysis)
         return profile
 

@@ -332,6 +332,101 @@ def test_luogu_analysis_uses_activity_scores_and_elo_history():
     assert analysis["rating_history"][0]["name"] == "新赛"
 
 
+def test_luogu_practice_analysis_uses_native_difficulty_groups():
+    payload = {
+        "data": {
+            "passed": [
+                {"type": "P", "pid": "P1001", "difficulty": 1},
+                {"type": "P", "pid": "P1002", "difficulty": 2},
+                {"type": "P", "pid": "P1003", "difficulty": 4},
+                {"type": "B", "pid": "B2001", "difficulty": 1},
+                # 重复通过记录按题目 ID 去重。
+                {"type": "P", "pid": "P1001", "difficulty": 1},
+            ]
+        }
+    }
+    analysis = AccountFetcher._parse_luogu_practice_analysis(payload)
+
+    assert analysis is not None
+    assert analysis["solved_count"] == 4
+    assert analysis["difficulty_distribution"] == [
+        {"label": "入门", "count": 2},
+        {"label": "普及−", "count": 1},
+        {"label": "普及+/提高−", "count": 1},
+    ]
+    assert analysis["category_distribution"] == [
+        {"label": "普及/提高题库", "count": 3},
+        {"label": "入门题库", "count": 1},
+    ]
+
+
+def test_luogu_practice_privacy_does_not_mean_zero_solved():
+    payload = {"data": {"privacy": True, "passed": []}}
+
+    analysis = AccountFetcher._parse_luogu_practice_analysis(payload)
+
+    assert analysis == {
+        "analysis_status": "unavailable",
+        "practice_source": "洛谷公开练习页 #lentille-context",
+        "practice_coverage": "练习记录受账号隐私保护",
+    }
+
+
+def test_luogu_detail_fetches_practice_difficulty_groups(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+        profile_html = """
+        <script id="lentille-context" type="application/json">
+        {"status":200,"data":{"user":{
+          "uid":200697,
+          "name":"demo",
+          "introduction":"",
+          "ranking":123,
+          "passedProblemCount":4
+        }}}
+        </script>
+        """
+        practice_html = """
+        <script id="lentille-context" type="application/json">
+        {"status":200,"data":{"passed":[
+          {"type":"P","pid":"P1001","difficulty":1},
+          {"type":"P","pid":"P1002","difficulty":2},
+          {"type":"P","pid":"P1003","difficulty":4},
+          {"type":"B","pid":"B2001","difficulty":1}
+        ]}}
+        </script>
+        """
+
+        async def fake_fetch_text(
+            url,
+            *,
+            headers=None,
+            retries=2,
+            timeout=10.0,
+        ):
+            if url.endswith("/practice"):
+                return practice_html
+            return profile_html
+
+        monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        profile = await fetcher._fetch_luogu(
+            "200697",
+            detail=True,
+            include_analysis=True,
+        )
+
+        assert profile.solved_count == 4
+        assert profile.difficulty_distribution == [
+            {"label": "入门", "count": 2},
+            {"label": "普及−", "count": 1},
+            {"label": "普及+/提高−", "count": 1},
+        ]
+        assert "洛谷公开练习页" in profile.analysis["source"]
+        assert profile.analysis["practice_url"].endswith("/practice")
+
+    asyncio.run(scenario())
+
+
 def test_atcoder_analysis_uses_problem_models_and_submission_data(monkeypatch):
     async def scenario():
         fetcher = AccountFetcher()

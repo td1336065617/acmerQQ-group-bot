@@ -336,6 +336,27 @@ def _analysis_language_items(
     return items
 
 
+def _analysis_score_items(
+    profile: object,
+) -> List[tuple[str, int]]:
+    analysis = _profile_field(profile, "analysis", {}) or {}
+    raw = analysis.get("score_distribution") if isinstance(analysis, dict) else []
+    if not isinstance(raw, list):
+        return []
+    items: List[tuple[str, int]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        try:
+            count = int(item.get("count"))
+        except (TypeError, ValueError):
+            continue
+        if label and count > 0:
+            items.append((label, count))
+    return items
+
+
 def _analysis_activity_items(
     profile: object,
 ) -> List[tuple[str, int]]:
@@ -441,15 +462,22 @@ def _analysis_summary_height(profile: object) -> int:
     source_text = _analysis_source_text(profile)
     language_items = _analysis_language_items(profile)
     category_items = _analysis_distribution_items(profile)
+    score_items = _analysis_score_items(profile)
     category_summary = (
         bool(category_items)
         and not _analysis_secondary_chart_items(profile)[0]
     )
-    if not summary and not source_text and not language_items and not category_summary:
+    if (
+        not summary
+        and not source_text
+        and not language_items
+        and not category_summary
+        and not score_items
+    ):
         return 0
     chip_rows = max(1, (len(summary) + 3) // 4) if summary else 0
     height = 40 + chip_rows * 27
-    if language_items or category_summary:
+    if language_items or category_summary or score_items:
         height += 25
     if source_text:
         source_lines = max(1, min(3, (_text_width_for_layout(source_text) + 84) // 85))
@@ -1246,11 +1274,18 @@ class AccountCardRenderer:
         source_text = _analysis_source_text(profile)
         language_items = _analysis_language_items(profile)
         category_items = _analysis_distribution_items(profile)
+        score_items = _analysis_score_items(profile)
         category_summary = (
             bool(category_items)
             and not _analysis_secondary_chart_items(profile)[0]
         )
-        if not summary and not source_text and not language_items and not category_summary:
+        if (
+            not summary
+            and not source_text
+            and not language_items
+            and not category_summary
+            and not score_items
+        ):
             return ""
         chips = "".join(
             f'<span class="analysis-chip"><b>{_escape(label)}</b>'
@@ -1272,6 +1307,14 @@ class AccountCardRenderer:
                 + " · ".join(
                     f"{label} {count}"
                     for label, count in category_items[:3]
+                )
+            )
+        if score_items:
+            details.append(
+                "资料分项："
+                + " · ".join(
+                    f"{label} {count}"
+                    for label, count in score_items[:3]
                 )
             )
         detail_html = (
@@ -2138,6 +2181,7 @@ class AccountCardRenderer:
         source_text = _analysis_source_text(profile)
         language_items = _analysis_language_items(profile)
         category_items = _analysis_distribution_items(profile)
+        score_items = _analysis_score_items(profile)
         category_summary = (
             bool(category_items)
             and not _analysis_secondary_chart_items(profile)[0]
@@ -2203,6 +2247,13 @@ class AccountCardRenderer:
                 "分类/知识点：" + " · ".join(
                     f"{label} {count}"
                     for label, count in category_items[:3]
+                )
+            )
+        if score_items:
+            detail_parts.append(
+                "资料分项：" + " · ".join(
+                    f"{label} {count}"
+                    for label, count in score_items[:3]
                 )
             )
         if detail_parts:
