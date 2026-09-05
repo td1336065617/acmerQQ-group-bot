@@ -293,6 +293,93 @@ def test_luogu_bind_uses_separate_verification_source():
     assert registry.pending is None
 
 
+def test_luogu_bind_reports_empty_introduction_separately():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="empty-intro-demo",
+        platform_user_id="200697",
+        verification_value="",
+        extra={
+            "verification_field_present": True,
+            "verification_field_state": "empty",
+        },
+    )
+    registry = FakeRegistry(None)
+    fetcher = LuoguVerificationFetcher(profile, "")
+    bot = _build_bot(main_module, registry, fetcher)
+
+    results = _collect(
+        bot._reply_account_bind(
+            FakeEvent(group_id="source-group"),
+            "luogu",
+            "200697",
+        )
+    )
+
+    assert results == [
+        "⚠️ 洛谷个人介绍为空，请先填写个人介绍，然后重新发送绑定洛谷指令"
+    ]
+    assert registry.pending is None
+
+
+def test_luogu_confirmation_empty_introduction_keeps_pending_binding():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="empty-intro-demo",
+        platform_user_id="200697",
+        verification_value="",
+        extra={"verification_field_state": "empty"},
+    )
+    pending = {
+        "platform": "luogu",
+        "handle": "empty-intro-demo",
+        "platform_user_id": "200697",
+        "token_hash": "hash",
+        "group_id": "source-group",
+    }
+    registry = FakeRegistry(pending)
+    fetcher = LuoguVerificationFetcher(profile, "")
+    bot = _build_bot(main_module, registry, fetcher)
+
+    results = _collect(
+        bot._reply_account_confirm(
+            FakeEvent(group_id="source-group"),
+            "luogu",
+        )
+    )
+
+    assert results == [
+        "⚠️ 洛谷个人介绍为空，请先填写个人介绍并追加验证码，然后再次发送确认绑定指令"
+    ]
+    assert registry.clear_calls == 0
+    assert registry.saved is None
+
+
+def test_luogu_empty_feedback_reports_missing_field_separately():
+    main_module = _load_main_module()
+    bot = _build_bot(main_module, FakeRegistry(None), FakeFetcher(None))
+
+    empty_profile = AccountProfile(
+        platform="luogu",
+        handle="empty",
+        extra={"verification_field_state": "empty"},
+    )
+    missing_profile = AccountProfile(
+        platform="luogu",
+        handle="missing",
+        extra={"verification_field_state": "missing"},
+    )
+
+    assert "个人介绍为空" in bot._luogu_verification_empty_text(
+        empty_profile
+    )
+    assert "字段不存在" in bot._luogu_verification_empty_text(
+        missing_profile
+    )
+
+
 def test_luogu_verification_failure_keeps_pending_binding():
     main_module = _load_main_module()
     profile = AccountProfile(

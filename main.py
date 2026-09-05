@@ -500,6 +500,29 @@ class AcmerGroupBot(Star):
         return str(getattr(profile, "verification_value", "") or "")
 
     @staticmethod
+    def _luogu_verification_empty_text(
+        profile,
+        *,
+        confirmation: bool = False,
+    ) -> str:
+        """区分洛谷个人介绍为空、字段缺失和资料读取失败。"""
+        extra = getattr(profile, "extra", {}) or {}
+        state = extra.get("verification_field_state") if isinstance(extra, dict) else ""
+        if state == "empty":
+            if confirmation:
+                return (
+                    "⚠️ 洛谷个人介绍为空，请先填写个人介绍并追加验证码，"
+                    "然后再次发送确认绑定指令"
+                )
+            return (
+                "⚠️ 洛谷个人介绍为空，请先填写个人介绍，"
+                "然后重新发送绑定洛谷指令"
+            )
+        if state == "missing":
+            return "⚠️ 洛谷个人介绍字段不存在，暂时无法绑定"
+        return "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
+
+    @staticmethod
     def _account_error_text(platform: str, exc: Exception) -> str:
         message = str(exc).strip() or "平台暂时无法访问，请稍后重试"
         if platform == "luogu" and (
@@ -865,10 +888,9 @@ class AcmerGroupBot(Star):
                 identifier,
                 profile,
             )
-            # 洛谷个人介绍不可读时，直接按用户约定返回明确反馈。
             if platform == "luogu" and not verification_value.strip():
                 yield event.plain_result(
-                    "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
+                    self._luogu_verification_empty_text(profile)
                 )
                 return
             token = await self.account_registry.create_pending(
@@ -1003,16 +1025,13 @@ class AcmerGroupBot(Star):
             return
 
         if platform == "luogu" and not verification_value.strip():
-            try:
-                await self.account_registry.clear_pending(user_id, platform)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "清理 %s 的洛谷待确认绑定失败：%s",
-                    user_id,
-                    exc,
-                )
+            # 字段为空/缺失不是验证码失效；保留待确认记录，用户补充资料后
+            # 可以在有效期内直接重试确认绑定。
             yield event.plain_result(
-                "⚠️ 洛谷个人介绍暂时无法读取，暂时无法绑定"
+                self._luogu_verification_empty_text(
+                    profile,
+                    confirmation=True,
+                )
             )
             return
         expected_hash = str(pending.get("token_hash") or "")

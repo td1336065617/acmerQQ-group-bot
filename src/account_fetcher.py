@@ -936,12 +936,31 @@ class AccountFetcher:
             or user.get("handle")
             or uid
         )
-        intro = str(
-            user.get("introduction")
-            or user.get("motto")
-            or user.get("bio")
-            or user.get("description")
-            or ""
+        verification_fields = (
+            "introduction",
+            "motto",
+            "bio",
+            "description",
+        )
+        verification_field_present = any(
+            field in user for field in verification_fields
+        )
+        intro = ""
+        verification_field_source = ""
+        for field in verification_fields:
+            if field not in user:
+                continue
+            value = html.unescape(str(user.get(field) or ""))
+            if value.strip():
+                intro = value
+                verification_field_source = field
+                break
+        verification_field_state = (
+            "available"
+            if intro.strip()
+            else "empty"
+            if verification_field_present
+            else "missing"
         )
         avatar_value = (
             user.get("avatar")
@@ -954,7 +973,7 @@ class AccountFetcher:
             platform_user_id=str(user.get("uid") or user.get("id") or uid),
             display_name=handle,
             profile_url=LUOGU_PROFILE_URL.format(uid=uid),
-            verification_value=html.unescape(intro),
+            verification_value=intro,
             rating=_parse_int(
                 user.get("eloValue")
                 or user.get("elo")
@@ -981,6 +1000,9 @@ class AccountFetcher:
                     user.get("submittedProblemCount")
                 ),
                 "gist": _parse_int(user.get("gist")),
+                "verification_field_present": verification_field_present,
+                "verification_field_state": verification_field_state,
+                "verification_field_source": verification_field_source,
             },
         )
         return profile

@@ -398,6 +398,33 @@ def test_luogu_com_empty_introduction_is_a_valid_empty_field(monkeypatch):
         assert profile.rating_rank == 54082
         assert profile.solved_count == 246
         assert profile.verification_value == ""
+        assert profile.extra["verification_field_present"] is True
+        assert profile.extra["verification_field_state"] == "empty"
+
+    asyncio.run(scenario())
+
+
+def test_luogu_missing_introduction_is_distinct_from_empty(monkeypatch):
+    async def scenario():
+        fetcher = AccountFetcher()
+
+        async def fake_fetch_text(url, *, headers=None, retries=2):
+            return """
+            <script id="lentille-context" type="application/json">
+            {"status":200,"data":{"user":{
+              "uid":200697,
+              "name":"missing-intro-demo",
+              "ranking":123
+            }}}
+            </script>
+            """
+
+        monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        profile = await fetcher._fetch_luogu("200697", detail=False)
+
+        assert profile.verification_value == ""
+        assert profile.extra["verification_field_present"] is False
+        assert profile.extra["verification_field_state"] == "missing"
 
     asyncio.run(scenario())
 
