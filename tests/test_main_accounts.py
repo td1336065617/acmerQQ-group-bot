@@ -267,6 +267,21 @@ def test_bind_prompt_keeps_verification_instructions():
     assert "确认绑定cf" in results[0]
 
 
+def test_profile_metric_uses_elo_for_luogu():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="luogu-user",
+        rating=1680,
+        rating_rank=123,
+    )
+
+    metric = main_module.AcmerGroupBot._profile_metric(profile)
+
+    assert metric is not None
+    assert metric["metric_label"] == "Elo"
+
+
 def test_luogu_bind_uses_separate_verification_source():
     main_module = _load_main_module()
     profile = AccountProfile(

@@ -27,7 +27,11 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
 from .src.contest_fetcher import ContestFetcher
-from .src.account_cards import AccountCardRenderer
+from .src.account_cards import (
+    AccountCardRenderer,
+    current_metric_header,
+    rank_metric_label_for_rows,
+)
 from .src.account_fetcher import (
     AccountFetcher,
     normalize_account_identifier,
@@ -587,11 +591,16 @@ class AcmerGroupBot(Star):
     def _profile_metric(profile) -> Optional[dict]:
         """返回排行/快照使用的统一指标；洛谷没有 Elo 时按公开排名排行。"""
         if profile.rating is not None:
+            metric_label = (
+                "Elo"
+                if profile.platform == "luogu"
+                else "Rating"
+            )
             return {
                 "snapshot_key": profile.platform,
                 "value": int(profile.rating),
                 "display_value": str(profile.rating),
-                "metric_label": "Rating",
+                "metric_label": metric_label,
                 "sort_value": int(profile.rating),
             }
         if (
@@ -1647,6 +1656,7 @@ class AcmerGroupBot(Star):
                     "value": value,
                     "display_value": display_value,
                     "metric_label": metric_label,
+                    "current_metric_label": metric["metric_label"],
                     "sort_value": sort_value,
                     "delta": delta,
                     "rating": result.rating,
@@ -1801,11 +1811,12 @@ class AcmerGroupBot(Star):
             note_parts = [
                 f"共 {total} 名成员 · 当前显示第 {start + 1}-{end} 名"
             ]
-            metric = (
-                rows[0].get("metric_label")
-                if rows
-                else "Rating"
-            ) or "Rating"
+            metric = rank_metric_label_for_rows(
+                rows,
+                platform=mode,
+                fallback="Rating",
+            )
+            metric_header = current_metric_header(metric)
             if mode == "luogu":
                 note_parts.append("洛谷没有公开 Elo 时按平台公开排名排序")
             if navigation:
@@ -1823,7 +1834,7 @@ class AcmerGroupBot(Star):
                 [
                     title,
                     f"当前显示 {start + 1}-{end} / {total} 名成员",
-                    f"名次｜成员 / 账号｜当前{metric}｜近7日变化",
+                    f"名次｜成员 / 账号｜{metric_header}｜近7日变化",
                     *(
                         f"{i}. {row['display_name']}（{row['handle']}）｜"
                         f"{row.get('display_value', row['value'])}｜"
@@ -1843,7 +1854,7 @@ class AcmerGroupBot(Star):
                     yield event.plain_result("当前群还没有加入排行的成员")
                 return
             title = "本群竞赛排行总览" if not progress else "本群本周进步榜"
-            metric = "当前指标" if not progress else "近7日变化"
+            metric = "Rating" if not progress else "近7日变化"
             note = (
                 "各平台分开排行，不直接比较不同平台 Rating"
                 if not progress
@@ -1863,7 +1874,7 @@ class AcmerGroupBot(Star):
                 subtitle=f"四平台公开战绩矩阵 · 每个平台前 {RANK_OVERVIEW_SIZE} 名",
                 metric_label=metric,
                 note=note,
-                secondary_label="当前指标" if progress else "近7日变化",
+                secondary_label="" if progress else "近7日变化",
                 secondary_value_key=(
                     "current_display_value" if progress else "delta"
                 ),
@@ -1871,10 +1882,20 @@ class AcmerGroupBot(Star):
             fallback_lines = [title]
             for platform, rows in overview_sections.items():
                 fallback_lines.append(f"【{platform_label(platform)}】")
+                section_metric = rank_metric_label_for_rows(
+                    rows,
+                    platform=platform,
+                    fallback="Rating",
+                )
+                section_metric_header = current_metric_header(section_metric)
                 if progress:
-                    fallback_lines.append("名次｜成员｜近7日变化｜当前指标")
+                    fallback_lines.append(
+                        f"名次｜成员｜近7日变化｜{section_metric_header}"
+                    )
                 else:
-                    fallback_lines.append("名次｜成员｜当前指标｜近7日变化")
+                    fallback_lines.append(
+                        f"名次｜成员｜{section_metric_header}｜近7日变化"
+                    )
                 for i, row in enumerate(rows, 1):
                     value = row.get("display_value", row["value"])
                     current_value = row.get(

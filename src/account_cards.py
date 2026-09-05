@@ -22,7 +22,7 @@ from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
 from .output_renderer import AdaptiveOutputRenderer
 
-CARD_FORMAT_VERSION = 10
+CARD_FORMAT_VERSION = 11
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -84,6 +84,97 @@ def _format_delta(value: object) -> str:
     except (TypeError, ValueError):
         return str(value)
     return f"{number:+d}"
+
+
+def current_metric_header(metric_label: object) -> str:
+    """把内部指标名转换为排行表头，避免使用含义不明的“当前指标”。"""
+    label = str(metric_label or "").strip()
+    if not label or label in {"当前指标", "近7日变化"}:
+        label = "Rating"
+    if label.startswith("当前"):
+        return label
+    if label in {"Rating", "Elo"}:
+        return f"当前 {label}"
+    if label == "平台排名":
+        return "当前平台排名"
+    if label == "Elo / 平台排名":
+        return "当前 Elo / 平台排名"
+    return f"当前 {label}"
+
+
+def _resolved_value_header(
+    value_header: object,
+    rows: Iterable[object],
+    *,
+    metric_label: str,
+    platform: str = "",
+) -> str:
+    value = str(value_header or "").strip()
+    if not value or value == "当前指标":
+        return current_metric_header(
+            rank_metric_label_for_rows(
+                rows,
+                platform=platform,
+                fallback=metric_label,
+            )
+        )
+    return value
+
+
+def _resolved_secondary_header(
+    secondary_label: object,
+    rows: Iterable[object],
+    *,
+    metric_label: str,
+    secondary_value_key: str,
+) -> str:
+    value = str(secondary_label or "").strip()
+    if (
+        secondary_value_key != "delta"
+        or not value
+        or value == "当前指标"
+    ):
+        return current_metric_header(
+            rank_metric_label_for_rows(
+                rows,
+                fallback=metric_label,
+            )
+        )
+    return value
+
+
+def rank_metric_label_for_rows(
+    rows: Iterable[object],
+    *,
+    platform: str = "",
+    fallback: str = "Rating",
+) -> str:
+    """从排行行数据中取实际指标名；总览按分区分别解析。"""
+    labels = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(
+            row.get("current_metric_label")
+            or row.get("metric_label")
+            or ""
+        ).strip()
+        if platform == "luogu" and label == "Rating":
+            # 旧缓存曾把洛谷 Elo 记录成 Rating，展示时按实际含义纠正。
+            label = "Elo"
+        if label in {"", "当前指标", "近7日变化"}:
+            continue
+        if label not in labels:
+            labels.append(label)
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) > 1:
+        if set(labels) == {"Elo", "平台排名"}:
+            return "Elo / 平台排名"
+        return "各平台对应指标"
+    if platform == "luogu":
+        return "Elo / 平台排名"
+    return str(fallback or "Rating").strip() or "Rating"
 
 
 def _profile_field(profile: object, key: str, default=None):
@@ -701,8 +792,17 @@ class AccountCardRenderer:
             "subtitle": subtitle,
             "metric_label": metric_label,
             "note": note,
-            "value_header": value_header or f"当前{metric_label}",
-            "secondary_label": secondary_label,
+            "value_header": _resolved_value_header(
+                value_header,
+                rows,
+                metric_label=metric_label,
+            ),
+            "secondary_label": _resolved_secondary_header(
+                secondary_label,
+                rows,
+                metric_label=metric_label,
+                secondary_value_key=secondary_value_key,
+            ),
             "secondary_value_key": secondary_value_key,
             "rows": rows,
         }
@@ -1561,13 +1661,18 @@ class AccountCardRenderer:
         ranking_body = "".join(rendered) or (
             '<div class="empty-card">当前还没有可排行的成员</div>'
         )
+        resolved_header = _resolved_value_header(
+            value_header,
+            rows,
+            metric_label=metric_label,
+        )
         body = (
             '<div class="ranking-list">'
             '<div class="rank-header">'
             "<span>名次</span>"
             "<span>成员 / 账号</span>"
-            f"<span>{_escape(value_header or f'当前{metric_label}')}</span>"
-            f"<span>{_escape(secondary_label)}</span>"
+            f"<span>{_escape(resolved_header)}</span>"
+            f"<span>{_escape(_resolved_secondary_header(secondary_label, rows, metric_label=metric_label, secondary_value_key=secondary_value_key))}</span>"
             "</div>"
             f"{ranking_body}</div>"
         )
@@ -1638,12 +1743,26 @@ class AccountCardRenderer:
                 )
             if not rendered:
                 rendered.append('<div class="mini-empty">暂无数据</div>')
+            section_metric_label = rank_metric_label_for_rows(
+                rows,
+                platform=platform,
+                fallback=(
+                    "Rating"
+                    if is_progress
+                    else metric_label
+                ),
+            )
             value_header = (
                 metric_label
                 if is_progress
-                else "当前指标"
+                else current_metric_header(section_metric_label)
             )
-            delta_header = secondary_label or "近7日变化"
+            delta_header = _resolved_secondary_header(
+                secondary_label,
+                rows,
+                metric_label=section_metric_label,
+                secondary_value_key=secondary_value_key,
+            ) if is_progress else secondary_label or "近7日变化"
             blocks.append(
                 f"""
                 <section class="mini-section" style="--accent:{_escape(start)};--accent2:{_escape(end)}">
@@ -2824,15 +2943,25 @@ class AccountCardRenderer:
         header_fill = "#a17a95"
         draw.text((95, y), "名次", font=subtitle_font, fill=header_fill)
         draw.text((185, y), "成员 / 账号", font=subtitle_font, fill=header_fill)
+        resolved_header = _resolved_value_header(
+            value_header,
+            rows,
+            metric_label=metric_label,
+        )
         draw.text(
             (850, y),
-            value_header or f"当前{metric_label}",
+            resolved_header,
             font=subtitle_font,
             fill=header_fill,
         )
         draw.text(
             (1040, y),
-            secondary_label,
+            _resolved_secondary_header(
+                secondary_label,
+                rows,
+                metric_label=metric_label,
+                secondary_value_key=secondary_value_key,
+            ),
             font=subtitle_font,
             fill=header_fill,
         )
@@ -2973,12 +3102,26 @@ class AccountCardRenderer:
             )
             draw.text((x + 20, y + 14), platform_label(platform), font=value_font, fill=accent)
             header_fill = "#a17a95"
+            section_metric_label = rank_metric_label_for_rows(
+                rows_data,
+                platform=platform,
+                fallback=(
+                    "Rating"
+                    if is_progress
+                    else metric_label
+                ),
+            )
             value_header = (
                 metric_label
                 if is_progress
-                else "当前指标"
+                else current_metric_header(section_metric_label)
             )
-            delta_header = secondary_label or "近7日变化"
+            delta_header = _resolved_secondary_header(
+                secondary_label,
+                rows_data,
+                metric_label=section_metric_label,
+                secondary_value_key=secondary_value_key,
+            ) if is_progress else secondary_label or "近7日变化"
             draw.text((x + 20, y + 43), "名次", font=subtitle_font, fill=header_fill)
             draw.text((x + 75, y + 43), "成员", font=subtitle_font, fill=header_fill)
             draw.text(

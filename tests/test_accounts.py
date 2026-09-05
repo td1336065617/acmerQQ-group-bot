@@ -5,7 +5,11 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-from src.account_cards import AccountCardRenderer
+from src.account_cards import (
+    AccountCardRenderer,
+    current_metric_header,
+    rank_metric_label_for_rows,
+)
 from src.account_fetcher import AccountFetcher, normalize_account_identifier
 from src.account_models import AccountProfile
 from src.account_registry import AccountRegistry
@@ -946,6 +950,33 @@ def test_profile_and_ranking_html_escape_user_content(tmp_path):
     assert "近7日变化" in ranking_html
 
 
+def test_ranking_metric_headers_are_platform_specific():
+    assert current_metric_header("Rating") == "当前 Rating"
+    assert current_metric_header("Elo") == "当前 Elo"
+    assert current_metric_header("平台排名") == "当前平台排名"
+    assert (
+        current_metric_header("Elo / 平台排名")
+        == "当前 Elo / 平台排名"
+    )
+    assert (
+        rank_metric_label_for_rows(
+            [{"current_metric_label": "Rating"}],
+            platform="luogu",
+        )
+        == "Elo"
+    )
+    assert (
+        rank_metric_label_for_rows(
+            [
+                {"current_metric_label": "Elo"},
+                {"current_metric_label": "平台排名"},
+            ],
+            platform="luogu",
+        )
+        == "Elo / 平台排名"
+    )
+
+
 def test_progress_ranking_uses_current_value_in_fourth_column(tmp_path):
     renderer = AccountCardRenderer(cache_dir=tmp_path)
     rows = [
@@ -955,6 +986,7 @@ def test_progress_ranking_uses_current_value_in_fourth_column(tmp_path):
             "value": 20,
             "display_value": "+20",
             "metric_label": "近7日变化",
+            "current_metric_label": "Rating",
             "delta": 20,
             "current_display_value": "1800",
         }
@@ -971,7 +1003,8 @@ def test_progress_ranking_uses_current_value_in_fourth_column(tmp_path):
         secondary_value_key="current_display_value",
     )
 
-    assert "当前指标" in ranking_html
+    assert "当前 Rating" in ranking_html
+    assert "当前指标" not in ranking_html
     assert "1800" in ranking_html
     assert ">+20<" in ranking_html
 
@@ -1374,6 +1407,16 @@ def test_overview_card_height_is_based_on_sections_and_note(tmp_path):
                 "handle": f"user{i}",
                 "value": 3000 - i,
                 "display_value": str(3000 - i),
+                "metric_label": (
+                    "Elo"
+                    if platform == "luogu"
+                    else "Rating"
+                ),
+                "current_metric_label": (
+                    "Elo"
+                    if platform == "luogu"
+                    else "Rating"
+                ),
                 "delta": i,
             }
             for i in range(5)
@@ -1398,7 +1441,9 @@ def test_overview_card_height_is_based_on_sections_and_note(tmp_path):
         note="测试备注",
     )
     assert "mini-header" in overview_html
-    assert "当前指标" in overview_html
+    assert "当前 Rating" in overview_html
+    assert "当前 Elo" in overview_html
+    assert "当前指标" not in overview_html
     assert "近7日变化" in overview_html
 
 
