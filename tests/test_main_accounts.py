@@ -293,7 +293,7 @@ def test_luogu_bind_uses_separate_verification_source():
     assert registry.pending is None
 
 
-def test_luogu_bind_reports_empty_introduction_separately():
+def test_luogu_bind_sends_token_when_introduction_is_empty():
     main_module = _load_main_module()
     profile = AccountProfile(
         platform="luogu",
@@ -317,9 +317,36 @@ def test_luogu_bind_reports_empty_introduction_separately():
         )
     )
 
-    assert results == [
-        "⚠️ 洛谷个人介绍为空，请先填写个人介绍，然后重新发送绑定洛谷指令"
-    ]
+    assert results
+    assert "已找到 洛谷 账号：empty-intro-demo" in results[0]
+    assert "个人介绍" in results[0]
+    assert "ACM-ABCDEFGH" in results[0]
+    assert "确认绑定洛谷" in results[0]
+    assert registry.pending is None
+
+
+def test_luogu_bind_rejects_missing_introduction_field():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="luogu",
+        handle="missing-intro-demo",
+        platform_user_id="200697",
+        verification_value="",
+        extra={"verification_field_state": "missing"},
+    )
+    registry = FakeRegistry(None)
+    fetcher = LuoguVerificationFetcher(profile, "")
+    bot = _build_bot(main_module, registry, fetcher)
+
+    results = _collect(
+        bot._reply_account_bind(
+            FakeEvent(group_id="source-group"),
+            "luogu",
+            "200697",
+        )
+    )
+
+    assert results == ["⚠️ 洛谷个人介绍字段不存在，暂时无法绑定"]
     assert registry.pending is None
 
 

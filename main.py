@@ -888,11 +888,20 @@ class AcmerGroupBot(Star):
                 identifier,
                 profile,
             )
-            if platform == "luogu" and not verification_value.strip():
-                yield event.plain_result(
-                    self._luogu_verification_empty_text(profile)
+            if platform == "luogu":
+                extra = getattr(profile, "extra", {}) or {}
+                state = (
+                    extra.get("verification_field_state")
+                    if isinstance(extra, dict)
+                    else ""
                 )
-                return
+                # 个人介绍为空是可绑定状态：需要先发验证码，再让用户把
+                # 验证码追加到空的个人介绍中。只有字段缺失/读取失败才阻止发码。
+                if not verification_value.strip() and state != "empty":
+                    yield event.plain_result(
+                        self._luogu_verification_empty_text(profile)
+                    )
+                    return
             token = await self.account_registry.create_pending(
                 user_id,
                 platform,
