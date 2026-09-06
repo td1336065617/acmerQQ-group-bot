@@ -8,6 +8,7 @@ import pytest
 from src.account_cards import (
     AccountCardRenderer,
     current_metric_header,
+    progress_metric_header,
     rank_metric_label_for_rows,
 )
 from src.account_fetcher import AccountFetcher, normalize_account_identifier
@@ -954,6 +955,10 @@ def test_ranking_metric_headers_are_platform_specific():
     assert current_metric_header("Rating") == "当前 Rating"
     assert current_metric_header("Elo") == "当前 Elo"
     assert current_metric_header("平台排名") == "当前平台排名"
+    assert progress_metric_header("Rating") == "当前 Rating"
+    assert progress_metric_header("Elo") == "当前 Elo"
+    assert progress_metric_header("平台排名") == "排名"
+    assert progress_metric_header("Elo / 平台排名") == "Elo / 排名"
     assert (
         current_metric_header("Elo / 平台排名")
         == "当前 Elo / 平台排名"
@@ -975,6 +980,37 @@ def test_ranking_metric_headers_are_platform_specific():
         )
         == "Elo / 平台排名"
     )
+
+
+def test_progress_overview_uses_short_luogu_rank_header(tmp_path):
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    html = renderer._overview_html(
+        {
+            "luogu": [
+                {
+                    "display_name": "洛谷用户",
+                    "handle": "200697",
+                    "value": 12,
+                    "display_value": "+12",
+                    "metric_label": "近7日变化",
+                    "current_metric_label": "平台排名",
+                    "current_display_value": "#123456",
+                    "delta": 12,
+                }
+            ]
+        },
+        title="本周进步榜",
+        subtitle="测试",
+        metric_label="近7日变化",
+        note="",
+        secondary_label="",
+        secondary_value_key="current_display_value",
+    )
+
+    assert "<span>近7日变化</span>" in html
+    assert "<span>排名</span>" in html
+    assert "当前平台排名" not in html
+    assert "..." not in html
 
 
 def test_ranking_typography_is_readable(tmp_path):

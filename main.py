@@ -30,6 +30,7 @@ from .src.contest_fetcher import ContestFetcher
 from .src.account_cards import (
     AccountCardRenderer,
     current_metric_header,
+    progress_metric_header,
     rank_metric_label_for_rows,
 )
 from .src.account_fetcher import (
@@ -2133,7 +2134,11 @@ class AcmerGroupBot(Star):
                     platform=platform,
                     fallback="Rating",
                 )
-                section_metric_header = current_metric_header(section_metric)
+                section_metric_header = (
+                    progress_metric_header(section_metric)
+                    if progress
+                    else current_metric_header(section_metric)
+                )
                 for i, row in enumerate(rows, 1):
                     value = row.get("display_value", row["value"])
                     current_value = row.get(

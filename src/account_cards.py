@@ -111,6 +111,16 @@ def current_metric_header(metric_label: object) -> str:
     return f"当前 {label}"
 
 
+def progress_metric_header(metric_label: object) -> str:
+    """生成进步榜当前值表头，洛谷排名使用更短的展示文案。"""
+    label = str(metric_label or "").strip()
+    if label in {"平台排名", "当前平台排名"}:
+        return "排名"
+    if label in {"Elo / 平台排名", "当前 Elo / 平台排名"}:
+        return "Elo / 排名"
+    return current_metric_header(label)
+
+
 def _resolved_value_header(
     value_header: object,
     rows: Iterable[object],
@@ -136,6 +146,7 @@ def _resolved_secondary_header(
     *,
     metric_label: str,
     secondary_value_key: str,
+    platform: str = "",
 ) -> str:
     value = str(secondary_label or "").strip()
     if (
@@ -143,11 +154,15 @@ def _resolved_secondary_header(
         or not value
         or value == "当前指标"
     ):
-        return current_metric_header(
-            rank_metric_label_for_rows(
-                rows,
-                fallback=metric_label,
-            )
+        resolved_metric = rank_metric_label_for_rows(
+            rows,
+            platform=platform,
+            fallback=metric_label,
+        )
+        return (
+            progress_metric_header(resolved_metric)
+            if secondary_value_key != "delta"
+            else current_metric_header(resolved_metric)
         )
     return value
 
@@ -1835,6 +1850,7 @@ class AccountCardRenderer:
                 rows,
                 metric_label=section_metric_label,
                 secondary_value_key=secondary_value_key,
+                platform=platform,
             ) if is_progress else secondary_label or "近7日变化"
             blocks.append(
                 f"""
@@ -3239,6 +3255,7 @@ class AccountCardRenderer:
                 rows_data,
                 metric_label=section_metric_label,
                 secondary_value_key=secondary_value_key,
+                platform=platform,
             ) if is_progress else secondary_label or "近7日变化"
             section_header_y = y + 52
             draw.text(
