@@ -173,6 +173,11 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 - 中文字体会优先选择 `Noto Sans CJK SC` 的简体中文字体面；如需指定字体文件，
   可设置环境变量 `ACMER_QQ_BOT_FONT`，使用 TTC 字体时可通过
   `ACMER_QQ_BOT_FONT_INDEX` 指定字体面索引（默认自动选择简体中文面）。
+- Emoji 使用插件自带 `assets/fonts/NotoColorEmoji.ttf`，不依赖服务器安装
+  Emoji 字体。HTML 渲染会加载插件目录内的字体文件；Pillow 回退会先高分辨率
+  绘制再缩放，字体无法加载时使用安全符号，避免出现方框字形。如需覆盖字体，
+  可设置 `ACMER_QQ_BOT_EMOJI_FONT`，使用 TTC 字体时可通过
+  `ACMER_QQ_BOT_EMOJI_FONT_INDEX` 指定字体面索引。
 - 菜单和长消息图片采用较宽的字间距、行距与条目留白，避免中文内容过密；
   相关排版调整会通过缓存版本自动生效。
 - `我的账号`、`我的战绩` 和各平台个人战绩卡使用独立的 HTML/PNG 模板；

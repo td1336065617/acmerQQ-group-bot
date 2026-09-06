@@ -90,7 +90,10 @@ AtCoder Problems 估计难度，洛谷使用公开练习页的原生难度分组
 比赛列表、线下赛列表、早报、提醒等较长回复会自动生成 PNG 图片发送；短回复仍发送文字。
 图片会按回复内容缓存到 `data/output_cache/`，相同内容不会重复转图。转图优先尝试
 Chromium/Chrome、Firefox、`wkhtmltoimage`，没有浏览器时使用 Pillow；渲染失败会
-自动回退为分片文字发送。
+自动回退为分片文字发送。菜单、比赛长消息和其他长文本中的 Emoji 使用插件自带的
+`assets/fonts/NotoColorEmoji.ttf` 渲染，不依赖服务器安装 Emoji 字体；Pillow 会先
+高分辨率绘制再缩放，字体加载失败时使用安全符号兜底。可通过
+`ACMER_QQ_BOT_EMOJI_FONT` 和 `ACMER_QQ_BOT_EMOJI_FONT_INDEX` 覆盖字体路径与字体面。
 
 个人战绩卡和群排行卡使用独立的二次元科幻风格 HTML 模板，优先转 PNG；
 个人战绩卡会根据已绑定平台数量自适应布局，单个平台不会预留多余空白；
