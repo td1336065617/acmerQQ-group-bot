@@ -120,8 +120,16 @@ def _load_main_module():
 
 
 class FakeEvent:
-    def __init__(self, *, group_id: str = ""):
+    def __init__(
+        self,
+        *,
+        group_id: str = "",
+        message_str: str = "",
+        message_obj=None,
+    ):
         self.group_id = group_id
+        self.message_str = message_str
+        self.message_obj = message_obj
         self.results = []
 
     def get_sender_id(self):
@@ -136,6 +144,10 @@ class FakeEvent:
     def plain_result(self, text):
         self.results.append(text)
         return text
+
+    def image_result(self, path):
+        self.results.append(("image", path))
+        return ("image", path)
 
 
 class FakeRegistry:
@@ -265,6 +277,217 @@ def test_bind_prompt_keeps_verification_instructions():
     assert "ACM-ABCDEFGH" in results[0]
     assert "姓氏（Last name）" in results[0]
     assert "确认绑定cf" in results[0]
+
+
+def test_mention_target_is_extracted_from_qq_official_message():
+    main_module = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="target-openid",
+        username="被查询用户",
+        is_you=False,
+    )
+    raw = types.SimpleNamespace(
+        mentions=[mention],
+        content="<@target-openid> 战绩",
+    )
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="<@target-openid> 战绩",
+        message_obj=types.SimpleNamespace(raw_message=raw),
+    )
+
+    target = main_module.AcmerGroupBot._mentioned_profile_target(
+        event,
+        event.message_str,
+    )
+
+    assert target == {
+        "user_id": "target-openid",
+        "display_name": "被查询用户",
+    }
+
+
+def test_mention_target_rejects_multiple_users_or_unknown_suffix():
+    main_module = _load_main_module()
+    mentions = [
+        types.SimpleNamespace(
+            member_openid="target-1",
+            username="用户1",
+            is_you=False,
+        ),
+        types.SimpleNamespace(
+            member_openid="target-2",
+            username="用户2",
+            is_you=False,
+        ),
+    ]
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="<@target-1> <@target-2> 战绩",
+        message_obj=types.SimpleNamespace(
+            raw_message=types.SimpleNamespace(
+                mentions=mentions,
+                content=(event_message := "<@target-1> <@target-2> 战绩"),
+            )
+        ),
+    )
+
+    assert (
+        main_module.AcmerGroupBot._mentioned_profile_target(
+            event,
+            event_message,
+        )
+        is None
+    )
+
+    one_event = FakeEvent(
+        group_id="group-1",
+        message_str="<@target-1> 绑定cf demo",
+        message_obj=types.SimpleNamespace(
+            raw_message=types.SimpleNamespace(
+                mentions=mentions[:1],
+                content="<@target-1> 绑定cf demo",
+            )
+        ),
+    )
+    assert (
+        main_module.AcmerGroupBot._mentioned_profile_target(
+            one_event,
+            one_event.message_str,
+        )
+        is None
+    )
+
+
+def test_mention_command_dispatches_to_read_only_target_query():
+    main_module = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="target-openid",
+        username="被查询用户",
+        is_you=False,
+    )
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="<@target-openid> 查询战绩",
+        message_obj=types.SimpleNamespace(
+            raw_message=types.SimpleNamespace(
+                mentions=[mention],
+                content="<@target-openid> 查询战绩",
+            )
+        ),
+    )
+    bot = main_module.AcmerGroupBot.__new__(main_module.AcmerGroupBot)
+    calls = []
+
+    async def fake_reply(event, **kwargs):
+        calls.append(kwargs)
+        yield "查询完成"
+
+    bot._reply_my_account = fake_reply
+
+    results = _collect(bot.on_message(event))
+
+    assert results == ["查询完成"]
+    assert calls == [
+        {
+            "target_user_id": "target-openid",
+            "target_display_name": "被查询用户",
+        }
+    ]
+
+
+def test_mention_only_without_text_does_not_dispatch():
+    main_module = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="target-openid",
+        username="被查询用户",
+        is_you=False,
+    )
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="",
+        message_obj=types.SimpleNamespace(
+            raw_message=types.SimpleNamespace(
+                mentions=[mention],
+                content="<@target-openid>",
+            )
+        ),
+    )
+    bot = main_module.AcmerGroupBot.__new__(main_module.AcmerGroupBot)
+    calls = []
+
+    async def fake_reply(event, **kwargs):
+        calls.append(kwargs)
+        yield "查询完成"
+
+    bot._reply_my_account = fake_reply
+
+    results = _collect(bot.on_message(event))
+
+    assert results == []
+    assert calls == []
+
+
+def test_mention_profile_query_does_not_mutate_target_membership():
+    main_module = _load_main_module()
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="target-cf",
+        platform_user_id="target-cf",
+        rating=1800,
+    )
+
+    class TargetRegistry:
+        def __init__(self):
+            self.membership_calls = []
+
+        async def get_user_accounts(self, user_id):
+            assert user_id == "target-openid"
+            return {
+                "codeforces": {
+                    "platform_user_id": "target-cf",
+                    "handle": "target-cf",
+                }
+            }
+
+        async def set_group_member(self, *args, **kwargs):
+            self.membership_calls.append((args, kwargs))
+            return False
+
+    class TargetFetcher(FakeFetcher):
+        @staticmethod
+        def rating_delta_for_period(profile, days=7):
+            return 12
+
+    registry = TargetRegistry()
+    bot = main_module.AcmerGroupBot.__new__(main_module.AcmerGroupBot)
+    bot.account_registry = registry
+    bot.account_fetcher = TargetFetcher(profile)
+    bot._load_group_rank_summary = lambda *args, **kwargs: {}
+
+    async def render_card(*args, **kwargs):
+        return None
+
+    bot._render_profile_card = render_card
+
+    async def adaptive_results(event, text):
+        yield text
+
+    bot._adaptive_results = adaptive_results
+    event = FakeEvent(group_id="group-1")
+
+    results = _collect(
+        bot._reply_my_account(
+            event,
+            target_user_id="target-openid",
+            target_display_name="被查询用户",
+        )
+    )
+
+    assert results
+    assert "被查询用户 的竞赛战绩" in results[0]
+    assert "target-cf" in results[0]
+    assert registry.membership_calls == []
 
 
 def test_profile_metric_uses_elo_for_luogu():
