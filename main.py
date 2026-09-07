@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 import time
@@ -27,6 +28,7 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
 from .src.contest_fetcher import ContestFetcher
+from .src.rank_service import RankService
 from .src.account_cards import (
     AccountCardRenderer,
     current_metric_header,
@@ -90,6 +92,12 @@ RANK_CACHE_TTL = 5 * 60
 RANK_CACHE_MAX_ENTRIES = 64
 RANK_FETCH_BATCH_SIZE = 100
 RANK_FETCH_CONCURRENCY = 8
+# 配置/群快照的内存缓存时长：普通查询不需要每次都读 AstrBot KV；
+# WebUI 保存成功后会主动失效，外部直接改 KV 最多延迟该时长后生效。
+SETTINGS_CACHE_TTL_SECONDS = 2.0
+GROUPS_CACHE_TTL_SECONDS = 30.0
+# 渲染并发上限：4C4G 上避免长消息/资料卡/排行卡同时起多个 Chromium/Pillow。
+RENDER_MAX_CONCURRENCY = 1
 
 
 def _format_signed_number(value: object) -> str:
@@ -305,14 +313,23 @@ class AcmerGroupBot(Star):
             cache_dir=Path(__file__).resolve().parent / "data" / "output_cache"
         )
         self.scheduler = PushScheduler(self)
+        self.rank_service = RankService(self)
         # 本次运行期间已收到过消息的群（用于自动重新激活日志）
         self._seen_group_this_run: set = set()
+        # settings/groups 内存缓存：避免每次消息/回复/tick 都整读 KV。
+        self._settings_cache: Optional[tuple[float, dict]] = None
+        self._groups_cache: Optional[tuple[float, dict]] = None
         # 群排行结果短缓存：同一群多人同时查看时只执行一次资料汇总。
         self._rank_cache = {}
         self._rank_cache_locks = {}
+        # 进程内“本次失效、尚未读快照”的群集合，避免 bind/unbind 后立即查询
+        # 仍命中 60 分钟旧快照。
+        self._rank_dirty_pending: set = set()
         self._rank_fetch_semaphore = asyncio.Semaphore(
             RANK_FETCH_CONCURRENCY
         )
+        # 渲染全局并发上限：长消息/资料卡/排行卡共用，防多浏览器同时启动。
+        self._render_semaphore = asyncio.Semaphore(RENDER_MAX_CONCURRENCY)
         try:
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/config",
@@ -337,7 +354,25 @@ class AcmerGroupBot(Star):
 
     async def initialize(self) -> None:
         await self.fetcher.initialize()
-        await self.account_fetcher.initialize(self.fetcher.session)
+        # 存储后端：默认 SQLite（含 KV 自动迁移与双写）；设置环境变量
+        # ACMER_STORE_BACKEND=kv 可回到纯 KV 模式用于回滚验证。
+        backend = os.environ.get("ACMER_STORE_BACKEND", "sqlite").strip().lower()
+        dual_raw = os.environ.get("ACMER_DUAL_WRITE_KV", "1").strip().lower()
+        dual_write = dual_raw not in {"0", "false", "no", "off"}
+        store_dir = os.environ.get("ACMER_STORE_DIR") or None
+        await self.account_registry.initialize(
+            enable=backend != "kv",
+            db_path=store_dir,
+            dual_write_kv=dual_write,
+        )
+        cache_store = (
+            self.account_registry.store
+            if self.account_registry.store_enabled
+            else None
+        )
+        await self.account_fetcher.initialize(
+            self.fetcher.session, cache_store=cache_store
+        )
         await self.scheduler.start()
         logger.info(
             "acmerQQ群机器人 已启动；若消息指令无响应，请检查 AstrBot "
@@ -346,6 +381,21 @@ class AcmerGroupBot(Star):
 
     async def terminate(self) -> None:
         await self.scheduler.stop()
+        rank_service = getattr(self, "rank_service", None)
+        if rank_service is not None:
+            closer = getattr(rank_service, "close", None)
+            if callable(closer):
+                try:
+                    await closer()
+                except Exception:  # noqa: BLE001
+                    logger.warning("关闭排行后台任务失败", exc_info=True)
+        flush = getattr(self.account_fetcher, "flush_persistent_cache", None)
+        if callable(flush):
+            try:
+                await flush()
+            except Exception:  # noqa: BLE001 - 退出前尽力落盘
+                logger.warning("退出前持久化缓存 flush 失败", exc_info=True)
+        await self.account_registry.close()
         await self.account_fetcher.close()
         await self.fetcher.close()
         logger.info("acmerQQ群机器人 已停止")
@@ -412,6 +462,14 @@ class AcmerGroupBot(Star):
             renderer.max_lines = max(1, int(max_lines))
 
     async def get_settings(self) -> dict:
+        """读取全局设置；命中短 TTL 内存缓存时不再整读 AstrBot KV。
+
+        返回的是副本，调用方修改返回字典不会污染缓存。
+        """
+        now = time.monotonic()
+        cached = self._settings_cache
+        if cached is not None and now - cached[0] < SETTINGS_CACHE_TTL_SECONDS:
+            return self._copy_settings(cached[1])
         raw = await self.get_kv_data("settings", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
@@ -450,9 +508,18 @@ class AcmerGroupBot(Star):
                 MAX_RECENT_CONTEST_DAYS,
             ),
         }
-        # 每次读取配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
+        self._settings_cache = (time.monotonic(), settings)
+        # 每次刷新配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
         self._configure_output_renderer(settings)
-        return settings
+        return self._copy_settings(settings)
+
+    @staticmethod
+    def _copy_settings(settings: dict) -> dict:
+        """返回 settings 的浅拷贝，列表成员也复制，避免调用方污染缓存。"""
+        return {
+            **settings,
+            "push_platforms": list(settings.get("push_platforms") or []),
+        }
 
     @staticmethod
     def _event_display_name(event: AstrMessageEvent) -> str:
@@ -859,6 +926,11 @@ class AcmerGroupBot(Star):
             )
             return None
 
+    async def _run_render(self, func, *args, **kwargs):
+        """在全局渲染信号量内执行阻塞渲染，避免多浏览器/大画布并发。"""
+        async with self._render_semaphore:
+            return await asyncio.to_thread(func, *args, **kwargs)
+
     async def _render_profile_card(
         self,
         profiles,
@@ -869,7 +941,7 @@ class AcmerGroupBot(Star):
     ):
         """渲染个人资料卡；任何 UI/浏览器异常都回退到文字。"""
         try:
-            return await asyncio.to_thread(
+            return await self._run_render(
                 self.account_card_renderer.render_profile,
                 profiles,
                 display_name=display_name,
@@ -891,7 +963,7 @@ class AcmerGroupBot(Star):
     ):
         """渲染平台排行卡；失败时交给调用方发送文字。"""
         try:
-            return await asyncio.to_thread(
+            return await self._run_render(
                 self.account_card_renderer.render_ranking,
                 rows,
                 title=title,
@@ -916,7 +988,7 @@ class AcmerGroupBot(Star):
     ):
         """渲染排行总览卡；失败时交给调用方发送文字。"""
         try:
-            return await asyncio.to_thread(
+            return await self._run_render(
                 self.account_card_renderer.render_overview_ranking,
                 sections,
                 title=title,
@@ -937,6 +1009,7 @@ class AcmerGroupBot(Star):
         platforms,
         *,
         read_only: bool = False,
+        force: bool = False,
     ) -> dict:
         """读取当前用户在群内各平台的名次；复用群排行短缓存。"""
         gid = str(group_id or "").strip()
@@ -953,11 +1026,13 @@ class AcmerGroupBot(Star):
 
         results = await asyncio.gather(
             *(
-                self._collect_rank_rows(
+                self.rank_service.read(
                     gid,
                     platform,
                     progress=False,
                     record_metrics=not read_only,
+                    allow_stale=not force,
+                    force=force,
                 )
                 for platform in platform_list
             ),
@@ -1494,6 +1569,7 @@ class AcmerGroupBot(Star):
                             user_id,
                             [platform],
                             read_only=not is_self_query,
+                            force=force,
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
@@ -1591,6 +1667,7 @@ class AcmerGroupBot(Star):
                     user_id,
                     [profile.platform for profile in profiles],
                     read_only=not is_self_query,
+                    force=force,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1637,32 +1714,90 @@ class AcmerGroupBot(Star):
         progress: bool = False,
         record_metrics: bool = True,
     ):
-        """读取排行结果；短时间内同一群/平台只计算一次。"""
+        """读取排行结果；短时间内同一群/平台只计算一次。
+
+        缓存 key 只含 (group, platform, progress)，不再包含 record_metrics：
+        自己查（写快照）与被 @ 查（只读）共享同一份计算。是否补写 Rating
+        快照作为缓存的“副作用”处理，见 _rank_cached_rows/_record_rank_metrics。
+        """
         key = (
             str(group_id),
             platform,
             bool(progress),
-            bool(record_metrics),
         )
         self._prune_rank_cache()
         now = time.monotonic()
         cached = self._rank_cache.get(key)
         if cached and now - cached[0] < RANK_CACHE_TTL:
-            return cached[1], cached[2]
+            return await self._rank_cached_rows(
+                cached, record_metrics=record_metrics
+            )
 
         lock = self._rank_cache_locks.setdefault(key, asyncio.Lock())
         async with lock:
             cached = self._rank_cache.get(key)
             if cached and time.monotonic() - cached[0] < RANK_CACHE_TTL:
-                return cached[1], cached[2]
-            rows, errors = await self._collect_rank_rows_uncached(
-                group_id,
-                platform,
-                progress=progress,
-                record_metrics=record_metrics,
+                return await self._rank_cached_rows(
+                    cached, record_metrics=record_metrics
+                )
+            rows, errors, metric_entries = (
+                await self._collect_rank_rows_uncached(
+                    group_id,
+                    platform,
+                    progress=progress,
+                    record_metrics=False,
+                )
             )
-            self._rank_cache[key] = (time.monotonic(), rows, errors)
+            item: list = [
+                time.monotonic(),
+                rows,
+                errors,
+                metric_entries,
+                None,
+            ]
+            self._rank_cache[key] = item
+            if record_metrics:
+                await self._record_rank_metrics(metric_entries)
+                item[4] = time.monotonic()
             return rows, errors
+
+    async def _rank_cached_rows(self, item: list, *, record_metrics: bool):
+        """命中缓存后返回 rows/errors；需要写快照时补一次（单飞防重）。"""
+        rows, errors = item[1], item[2]
+        if record_metrics and item[4] is None:
+            # 先占位再 await，避免并发请求重复写同一批快照。
+            item[4] = time.monotonic()
+            await self._record_rank_metrics(item[3])
+        return rows, errors
+
+    async def _record_rank_metrics(self, rating_entries: list) -> None:
+        """把一批 (user, snapshot_key, value) 写入 Rating 快照。"""
+        if not rating_entries:
+            return
+        bulk_recorder = getattr(
+            self.account_registry,
+            "record_ratings",
+            None,
+        )
+        if callable(bulk_recorder):
+            try:
+                await bulk_recorder(rating_entries)
+            except Exception as exc:  # noqa: BLE001 - 快照失败不影响当前排行
+                logger.warning("批量记录群排行 Rating 快照失败：%s", exc)
+            return
+        for user_id, snapshot_key, value in rating_entries:
+            try:
+                await self.account_registry.record_rating(
+                    user_id,
+                    snapshot_key,
+                    value,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "记录群排行用户 %s 的 Rating 快照失败：%s",
+                    user_id,
+                    exc,
+                )
 
     def _invalidate_rank_cache(self, group_id: str) -> None:
         """成员绑定/退出或昵称更新后，让对应群排行立即重新计算。"""
@@ -1670,10 +1805,37 @@ class AcmerGroupBot(Star):
         for key in list(self._rank_cache):
             if key[0] == group_key:
                 self._rank_cache.pop(key, None)
+        self._rank_dirty_pending.add(group_key)
+        try:
+            asyncio.get_running_loop().create_task(
+                self._mark_group_rank_dirty(str(group_id))
+            )
+        except RuntimeError:
+            pass
+
+    async def _mark_group_rank_dirty(self, group_id: str) -> None:
+        """让 SQLite rank_meta 对该群所有平台标记脏（异步后台执行）。"""
+        registry = getattr(self, "account_registry", None)
+        store = getattr(registry, "store", None)
+        if store is None or not getattr(registry, "store_enabled", False):
+            return
+        try:
+            for platform in ACCOUNT_PLATFORMS:
+                await store.mark_rank_dirty(group_id, platform)
+        except Exception as exc:  # noqa: BLE001 - 脏标记失败只影响刷新时机
+            logger.warning("标记群 %s 排行脏失败: %s", group_id, exc)
 
     def _invalidate_all_rank_cache(self) -> None:
         """账号关系或展示名称变化时清理所有群的排行缓存。"""
         self._rank_cache.clear()
+        try:
+            asyncio.get_running_loop().create_task(self._mark_all_ranks_dirty())
+        except RuntimeError:
+            pass
+
+    async def _mark_all_ranks_dirty(self) -> None:
+        for group in await self.get_groups():
+            await self._mark_group_rank_dirty(group.group_id)
 
     def _prune_rank_cache(self) -> None:
         """清理过期或过多的排行缓存，避免群数量增长后占用内存。"""
@@ -1701,6 +1863,7 @@ class AcmerGroupBot(Star):
         progress: bool = False,
         record_metrics: bool = True,
     ):
+        started = time.perf_counter()
         member_ids = await self.account_registry.get_group_member_ids(group_id)
         accounts = await self.account_registry.get_all_accounts()
         records = []
@@ -1734,7 +1897,9 @@ class AcmerGroupBot(Star):
                         user_id,
                         record,
                         profiles.get(identifier.casefold())
-                        or AccountFetchError("未找到该 Codeforces 用户"),
+                        or AccountFetchError(
+                            "Codeforces 用户信息暂时无法获取"
+                        ),
                     )
                     for user_id, record, identifier in records
                 ]
@@ -1817,30 +1982,7 @@ class AcmerGroupBot(Star):
             )
 
         if record_metrics:
-            bulk_recorder = getattr(
-                self.account_registry,
-                "record_ratings",
-                None,
-            )
-            if callable(bulk_recorder):
-                try:
-                    await bulk_recorder(rating_entries)
-                except Exception as exc:  # noqa: BLE001 - 快照失败不影响当前排行
-                    logger.warning("批量记录群排行 Rating 快照失败：%s", exc)
-            else:
-                for user_id, snapshot_key, value in rating_entries:
-                    try:
-                        await self.account_registry.record_rating(
-                            user_id,
-                            snapshot_key,
-                            value,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "记录群排行用户 %s 的 Rating 快照失败：%s",
-                            user_id,
-                            exc,
-                        )
+            await self._record_rank_metrics(rating_entries)
 
         snapshot_deltas = {}
         bulk_delta_getter = getattr(
@@ -1916,7 +2058,18 @@ class AcmerGroupBot(Star):
                 str(row.get("display_name") or "").casefold(),
             )
         )
-        return rows, errors
+        logger.info(
+            "rank_refresh group=%s platform=%s progress=%s members=%d "
+            "rows=%d errors=%d elapsed=%.2fs",
+            group_id,
+            platform,
+            bool(progress),
+            len(records),
+            len(rows),
+            len(errors),
+            time.perf_counter() - started,
+        )
+        return rows, errors, rating_entries
 
     async def _reply_set_rank_membership(
         self, event: AstrMessageEvent, enabled: bool
@@ -2004,8 +2157,12 @@ class AcmerGroupBot(Star):
         errors = []
         for platform in platforms:
             try:
-                rows, row_errors = await self._collect_rank_rows(
-                    group_id, platform, progress=progress
+                rows, row_errors = await self.rank_service.read(
+                    group_id,
+                    platform,
+                    progress=progress,
+                    record_metrics=True,
+                    allow_stale=True,
                 )
             except Exception as exc:  # noqa: BLE001 - 单个平台失败不阻断总览
                 logger.error(
@@ -2175,8 +2332,36 @@ class AcmerGroupBot(Star):
                 + "、".join(platform_label(p) for p in failed_platforms)
             )
 
-    async def get_groups(self) -> List[GroupConfig]:
+    async def _raw_groups(self, *, fresh: bool = False) -> dict:
+        """读取 KV 中的群配置原始字典；非 fresh 时命中 30s 内存缓存。
+
+        返回克隆后的字典：调用方（如 remember_group）修改返回值不会污染缓存
+        之外的其他引用，缓存项本身由本方法统一重建。
+        """
+        now = time.monotonic()
+        cached = self._groups_cache
+        if (
+            not fresh
+            and cached is not None
+            and now - cached[0] < GROUPS_CACHE_TTL_SECONDS
+        ):
+            return self._clone_groups(cached[1])
         raw = await self.get_kv_data("groups", {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        self._groups_cache = (time.monotonic(), raw)
+        return self._clone_groups(raw)
+
+    @staticmethod
+    def _clone_groups(raw: dict) -> dict:
+        """浅克隆群配置（值均为简单 JSON 类型，浅层复制即可）。"""
+        return {
+            str(gid): (dict(cfg) if isinstance(cfg, dict) else cfg)
+            for gid, cfg in raw.items()
+        }
+
+    async def get_groups(self) -> List[GroupConfig]:
+        raw = await self._raw_groups()
         groups: List[GroupConfig] = []
         for gid, cfg in raw.items():
             if not isinstance(cfg, dict):
@@ -2190,12 +2375,22 @@ class AcmerGroupBot(Star):
         return groups
 
     async def remember_group(self, group_id: str, platform_id: Optional[str] = None) -> None:
-        raw = await self.get_kv_data("groups", {}) or {}
         gid = str(group_id)
+        now = time.monotonic()
+        # 常见路径：内存缓存新鲜且已注册该群、平台未变化 → 不读 KV、不写 KV。
+        cached = self._groups_cache
+        if cached is not None and now - cached[0] < GROUPS_CACHE_TTL_SECONDS:
+            cfg = (cached[1] or {}).get(gid)
+            if isinstance(cfg, dict) and (
+                not platform_id or cfg.get("platform_id") == platform_id
+            ):
+                return
+        # 未知群/平台变化：读取权威数据后决定是否写回。
+        raw = await self._raw_groups(fresh=True)
+        cfg = raw.get(gid)
         changed = False
-        if gid in raw:
-            cfg = raw[gid]
-            if isinstance(cfg, dict) and platform_id and cfg.get("platform_id") != platform_id:
+        if isinstance(cfg, dict):
+            if platform_id and cfg.get("platform_id") != platform_id:
                 cfg["platform_id"] = platform_id
                 changed = True
         else:
@@ -2211,6 +2406,7 @@ class AcmerGroupBot(Star):
             changed = True
         if changed:
             await self.put_kv_data("groups", raw)
+            self._groups_cache = (time.monotonic(), self._clone_groups(raw))
             logger.info("acmerQQ群机器人 已自动注册群 %s", gid)
 
     # ------------------------------------------------------------------
@@ -2308,7 +2504,7 @@ class AcmerGroupBot(Star):
                     components.append(Plain(mention_prefix))
                     render_value = value[len(mention_prefix) :].strip()
                 try:
-                    image_path = await asyncio.to_thread(
+                    image_path = await self._run_render(
                         self.output_renderer.render, render_value
                     )
                     if image_path is not None and image_path.is_file():
@@ -2426,9 +2622,12 @@ class AcmerGroupBot(Star):
             yield event.plain_result(value)
             return
 
-        # HTML/浏览器调用是阻塞操作，放到线程中，避免卡住 AstrBot 事件循环。
+        # HTML/浏览器调用是阻塞操作，放到线程中（受全局渲染信号量约束），
+        # 避免卡住 AstrBot 事件循环或同时拉起多个浏览器。
         try:
-            image_path = await asyncio.to_thread(self.output_renderer.render, value)
+            image_path = await self._run_render(
+                self.output_renderer.render, value
+            )
         except Exception as exc:  # noqa: BLE001 - 转图失败时必须保证文字兜底
             logger.error("acmerQQ群机器人 长消息转图片异常：%s", exc, exc_info=True)
             image_path = None
@@ -2822,6 +3021,7 @@ class AcmerGroupBot(Star):
             if isinstance(cfg, dict):
                 cfg["activated"] = True
                 await self.put_kv_data("groups", raw)
+                self._groups_cache = None
             yield event.plain_result(
                 "✅ 主动推送已激活！本群已启用每日早报与赛前提醒。"
                 "激活状态会持久保存：AstrBot 重启后，群内任意一条消息即可自动恢复，"
@@ -2944,6 +3144,7 @@ class AcmerGroupBot(Star):
                     },
                 )
                 # 保存成功后立即更新当前实例，无需等待下一次消息或重启插件。
+                self._settings_cache = None
                 self._configure_output_renderer(
                     {
                         "max_plain_text_chars": max_plain_text_chars,
@@ -2965,6 +3166,7 @@ class AcmerGroupBot(Star):
                         raise ValueError(f"群 {gid} 配置不合法：{exc}") from exc
                     raw[gid] = cfg.model_dump()
                 await self.put_kv_data("groups", raw)
+                self._groups_cache = None
         except ValueError as exc:
             return error_response(str(exc))
         except Exception as exc:

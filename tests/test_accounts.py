@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -12,7 +13,7 @@ from src.account_cards import (
     rank_metric_label_for_rows,
 )
 from src.account_fetcher import AccountFetcher, normalize_account_identifier
-from src.account_models import AccountProfile
+from src.account_models import AccountFetchError, AccountProfile
 from src.account_registry import AccountRegistry
 from src.output_renderer import AdaptiveOutputRenderer
 
@@ -1667,3 +1668,66 @@ def test_registry_bulk_rating_snapshots_and_deltas():
         }
 
     asyncio.run(scenario())
+
+
+def _profile(handle: str, rating: int) -> AccountProfile:
+    return AccountProfile(
+        platform="codeforces",
+        handle=handle,
+        platform_user_id=handle,
+        display_name=handle,
+        rating=rating,
+    )
+
+
+def test_failure_cache_prune():
+    fetcher = AccountFetcher()
+    key = ("codeforces", "bad_handle")
+    fetcher._failure_cache[key] = (
+        time.time() - 1,
+        "已过期",
+        False,
+    )
+    fetcher.prune_cache()
+    assert key not in fetcher._failure_cache
+
+
+def test_failure_cache_blocks_network():
+    fetcher = AccountFetcher()
+    key = ("codeforces", "ghost_user")
+    fetcher._failure_cache[key] = (
+        time.time() + 300,
+        "未找到该 Codeforces 用户",
+        False,
+    )
+
+    async def scenario():
+        with pytest.raises(AccountFetchError) as exc_info:
+            await fetcher.get_profile("codeforces", "Ghost_User")
+        assert "未找到该 Codeforces 用户" in str(exc_info.value)
+
+    asyncio.run(scenario())
+
+
+def test_profile_cache_prune_caps_entries():
+    fetcher = AccountFetcher()
+    now = time.time()
+    for index in range(120):
+        handle = f"user_{index}"
+        key = (
+            "codeforces",
+            handle,
+            False,
+            False,
+            False,
+        )
+        fetcher._cache[key] = (now - index * 10, _profile(handle, 1500 + index))
+    fetcher.prune_cache(max_entries=30)
+    assert len(fetcher._cache) == 30
+    # 保留的是最近写入的条目。
+    newest_handle = max(
+        item[1].handle
+        for item in fetcher._cache.values()
+        if hasattr(item[1], "handle")
+    )
+    assert newest_handle.startswith("user_")

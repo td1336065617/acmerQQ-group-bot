@@ -1,13 +1,27 @@
-"""账号绑定、群排行成员和 Rating 快照的持久化管理。"""
+"""账号绑定、群排行成员和 Rating 快照的持久化管理。
+
+存储模式：
+- 默认（store 未启用）：沿用 AstrBot KV，行为与旧版完全一致；
+- 启用 SQLite（AccountStore）后：读写走本地库，并对 KV 做“尽力双写”
+  （dual_write_kv=True），SQLite 故障时自动回退 KV，便于灰度迁移与回滚。
+数据迁移：initialize() 发现 KV 有历史数据而 SQLite 为空时自动迁移，并在
+SQLite 同目录写一份 JSON 备份；回滚可通过备份 JSON 恢复 KV。
+"""
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import secrets
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from astrbot.api import logger
+
 from .account_models import AccountProfile
+from .account_store import AccountStore, default_store_path
 
 ACCOUNTS_KEY = "linked_accounts"
 PENDING_BINDINGS_KEY = "pending_account_bindings"
@@ -28,11 +42,17 @@ def token_hash(token: str) -> str:
 
 
 class AccountRegistry:
-    """通过插件 KV 存储账号关系，不保存平台登录凭据。"""
+    """账号/群成员/快照的存储门面：KV 或 SQLite（AccountStore）。"""
 
     def __init__(self, plugin) -> None:
         self.plugin = plugin
+        self.store: Optional[AccountStore] = None
+        self.store_enabled = False
+        self.dual_write_kv = True
 
+    # ------------------------------------------------------------------
+    # KV 基础
+    # ------------------------------------------------------------------
     async def _get(self, key: str, default):
         value = await self.plugin.get_kv_data(key, default)
         return value if value is not None else default
@@ -40,22 +60,129 @@ class AccountRegistry:
     async def _put(self, key: str, value) -> None:
         await self.plugin.put_kv_data(key, value)
 
+    # ------------------------------------------------------------------
+    # 初始化 / 迁移
+    # ------------------------------------------------------------------
+    async def initialize(
+        self,
+        *,
+        enable: bool = True,
+        db_path: Optional[str | Path] = None,
+        dual_write_kv: bool = True,
+    ) -> None:
+        """启用 SQLite 存储；必要时从 KV 自动迁移。
+
+        enable=False 时保持旧 KV 模式（供测试/回滚）。
+        """
+        self.dual_write_kv = bool(dual_write_kv)
+        self.store_enabled = False
+        if not enable:
+            self.store = None
+            return
+        path = Path(db_path).expanduser().resolve() if db_path else default_store_path()
+        try:
+            store = AccountStore(path)
+            await store.initialize()
+            legacy = {
+                ACCOUNTS_KEY: await self._get(ACCOUNTS_KEY, {}) or {},
+                GROUP_RANK_KEY: await self._get(GROUP_RANK_KEY, {}) or {},
+                PENDING_BINDINGS_KEY: await self._get(PENDING_BINDINGS_KEY, {}) or {},
+                RATING_SNAPSHOTS_KEY: await self._get(RATING_SNAPSHOTS_KEY, {}) or {},
+            }
+            has_legacy = any(bool(value) for value in legacy.values())
+            migrated = await store.is_kv_migrated()
+            if has_legacy and not migrated:
+                backup_path = path.with_name(
+                    f"kv_backup_{time.strftime('%Y%m%d_%H%M%S')}_"
+                    f"{os.getpid()}_{int(time.time() * 1000) % 1000000}.json"
+                )
+                try:
+                    tmp_path = backup_path.with_suffix(".tmp")
+                    tmp_path.write_text(
+                        json.dumps(legacy, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    os.replace(tmp_path, backup_path)
+                except OSError as exc:  # noqa: BLE001 - 备份失败不应阻断迁移
+                    logger.warning("KV 备份写入失败（继续迁移）: %s", exc)
+                counts = await store.migrate_from_kv(legacy)
+                logger.info(
+                    "acmerQQ群机器人 账号数据已从 KV 迁入 SQLite: %s", counts
+                )
+            elif has_legacy and migrated:
+                logger.info(
+                    "acmerQQ群机器人 SQLite 已迁移过，跳过 KV 迁移（KV 仍保留）"
+                )
+            self.store = store
+            self.store_enabled = True
+            logger.info("acmerQQ群机器人 AccountRegistry 使用 SQLite 存储")
+        except Exception as exc:  # noqa: BLE001 - 存储故障不能拖垮插件启动
+            logger.error(
+                "AccountRegistry SQLite 初始化失败，回退 KV 存储: %s",
+                exc,
+                exc_info=True,
+            )
+            self.store = None
+            self.store_enabled = False
+
+    def _need_store(self) -> bool:
+        return bool(self.store_enabled and self.store is not None)
+
+    async def close(self) -> None:
+        """关闭 SQLite 存储；短连接模型下为空操作，保留给未来 aiosqlite。"""
+        if self.store is not None:
+            try:
+                await self.store.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("AccountRegistry 关闭存储失败: %s", exc)
+        self.store = None
+        self.store_enabled = False
+
+    async def restore_kv_from_backup(self, path: str | Path) -> Dict[str, int]:
+        """从迁移 JSON 备份恢复 4 个 KV key（回滚入口，需先停用 SQLite）。"""
+        backup = Path(path).expanduser().resolve()
+        data = json.loads(backup.read_text(encoding="utf-8"))
+        counts: Dict[str, int] = {}
+        for key in (
+            ACCOUNTS_KEY,
+            GROUP_RANK_KEY,
+            PENDING_BINDINGS_KEY,
+            RATING_SNAPSHOTS_KEY,
+        ):
+            value = data.get(key)
+            await self._put(key, value if isinstance(value, (dict, list)) else {})
+            counts[key] = (
+                len(value) if isinstance(value, (dict, list)) else 0
+            )
+        return counts
+
+    async def _dual(self, coro) -> None:
+        """Store 写成功后，尽力同步到旧 KV；失败只告警。"""
+        if not self.dual_write_kv:
+            return
+        try:
+            await coro
+        except Exception as exc:  # noqa: BLE001 - 双写失败不影响主存储
+            logger.warning("账号数据 KV 双写失败: %s", exc)
+
+    # ------------------------------------------------------------------
+    # accounts
+    # ------------------------------------------------------------------
     async def get_user_accounts(self, user_id: str) -> Dict[str, Dict[str, Any]]:
-        data = await self._get(ACCOUNTS_KEY, {})
-        if not isinstance(data, dict):
-            return {}
-        value = data.get(str(user_id), {})
-        return dict(value) if isinstance(value, dict) else {}
+        if self._need_store():
+            try:
+                return await self.store.get_user_accounts(str(user_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 读取账号失败，回退 KV: %s", exc)
+        return await self._kv_get_user_accounts(str(user_id))
 
     async def get_all_accounts(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        data = await self._get(ACCOUNTS_KEY, {})
-        if not isinstance(data, dict):
-            return {}
-        return {
-            str(user_id): dict(accounts)
-            for user_id, accounts in data.items()
-            if isinstance(accounts, dict)
-        }
+        if self._need_store():
+            try:
+                return await self.store.get_all_accounts()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 读取全量账号失败，回退 KV: %s", exc)
+        return await self._kv_get_all_accounts()
 
     async def save_binding(
         self,
@@ -66,7 +193,301 @@ class AccountRegistry:
         group_id: Optional[str] = None,
         qq_name: str = "",
     ) -> None:
-        accounts = await self.get_all_accounts()
+        user_key = str(user_id)
+        account = {
+            "platform": platform,
+            "handle": profile.handle,
+            "platform_user_id": profile.platform_user_id,
+            "display_name": profile.display_name or profile.handle,
+            "profile_url": profile.profile_url,
+            "verified_at": time.time(),
+            "qq_name": str(qq_name or "").strip(),
+        }
+        if self._need_store():
+            try:
+                await self.store.save_binding_atomic(
+                    user_key,
+                    platform,
+                    account,
+                    group_id=str(group_id) if group_id else None,
+                )
+            except ValueError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 存储故障回退 KV
+                logger.warning("SQLite 保存绑定失败，回退 KV: %s", exc)
+                await self._kv_save_binding(
+                    user_key, platform, profile, group_id=group_id, qq_name=qq_name
+                )
+                return
+            await self._dual(
+                self._kv_save_binding(
+                    user_key, platform, profile, group_id=group_id, qq_name=qq_name
+                )
+            )
+            return
+        await self._kv_save_binding(
+            user_key, platform, profile, group_id=group_id, qq_name=qq_name
+        )
+
+    async def set_user_display_name(self, user_id: str, qq_name: str) -> bool:
+        name = str(qq_name or "").strip()
+        if not name:
+            return False
+        user_key = str(user_id)
+        if self._need_store():
+            try:
+                changed = await self.store.set_user_display_name(user_key, name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 更新昵称失败，回退 KV: %s", exc)
+                changed = await self._kv_set_user_display_name(user_key, name)
+            if changed:
+                await self._dual(self._kv_set_user_display_name(user_key, name))
+            return changed
+        return await self._kv_set_user_display_name(user_key, name)
+
+    async def remove_binding(self, user_id: str, platform: str) -> bool:
+        user_key = str(user_id)
+        if self._need_store():
+            try:
+                removed = await self.store.remove_binding_atomic(user_key, platform)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 解绑失败，回退 KV: %s", exc)
+                removed = await self._kv_remove_binding(user_key, platform)
+            if removed:
+                await self._dual(
+                    self._kv_remove_binding(user_key, platform)
+                )
+                await self._dual(self._kv_clear_pending(user_key, platform))
+            return removed
+        return await self._kv_remove_binding(user_key, platform)
+
+    # ------------------------------------------------------------------
+    # pending bindings
+    # ------------------------------------------------------------------
+    async def create_pending(
+        self,
+        user_id: str,
+        platform: str,
+        profile: AccountProfile,
+        *,
+        group_id: Optional[str] = None,
+    ) -> str:
+        token = create_binding_token()
+        user_key = str(user_id)
+        if self._need_store():
+            try:
+                await self.store.create_pending(
+                    user_key,
+                    platform,
+                    token_hash=token_hash(token),
+                    group_id=str(group_id) if group_id else "",
+                    expires_at=time.time() + BINDING_TTL,
+                    handle=profile.handle,
+                    platform_user_id=profile.platform_user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 创建待确认绑定失败，回退 KV: %s", exc)
+                await self._kv_create_pending(
+                    user_key, platform, profile, group_id=group_id, token=token
+                )
+                return token
+            await self._dual(
+                self._kv_create_pending(
+                    user_key, platform, profile, group_id=group_id, token=token
+                )
+            )
+            return token
+        await self._kv_create_pending(
+            user_key, platform, profile, group_id=group_id, token=token
+        )
+        return token
+
+    async def get_pending(
+        self, user_id: str, platform: str
+    ) -> Optional[Dict[str, Any]]:
+        user_key = str(user_id)
+        if self._need_store():
+            try:
+                item = await self.store.get_pending(user_key, platform)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 读取待确认绑定失败，回退 KV: %s", exc)
+                return await self._kv_get_pending(user_key, platform)
+            if item is None:
+                return None
+            try:
+                expires_at = float(item.get("expires_at") or 0)
+            except (TypeError, ValueError):
+                expires_at = 0.0
+            if expires_at < time.time():
+                try:
+                    await self.store.clear_pending(user_key, platform)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("SQLite 清理过期待确认绑定失败: %s", exc)
+                await self._dual(self._kv_clear_pending(user_key, platform))
+                return None
+            return dict(item)
+        return await self._kv_get_pending(user_key, platform)
+
+    async def clear_pending(self, user_id: str, platform: str) -> None:
+        user_key = str(user_id)
+        if self._need_store():
+            try:
+                await self.store.clear_pending(user_key, platform)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 清理待确认绑定失败，回退 KV: %s", exc)
+                await self._kv_clear_pending(user_key, platform)
+                return
+            await self._dual(self._kv_clear_pending(user_key, platform))
+            return
+        await self._kv_clear_pending(user_key, platform)
+
+    @staticmethod
+    def token_matches(value: str, expected_hash: str) -> bool:
+        """校验验证码是否追加在公开资料字段中。"""
+        return any(
+            token_hash(candidate) == expected_hash
+            for candidate in TOKEN_RE.findall(str(value or ""))
+        )
+
+    # ------------------------------------------------------------------
+    # group membership
+    # ------------------------------------------------------------------
+    async def set_group_member(
+        self,
+        group_id: str,
+        user_id: str,
+        enabled: bool,
+        *,
+        preserve_opt_out: bool = False,
+    ) -> bool:
+        gid = str(group_id)
+        uid = str(user_id)
+        if self._need_store():
+            try:
+                changed = await self.store.set_group_member(
+                    gid, uid, enabled, preserve_opt_out=preserve_opt_out
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 更新群成员失败，回退 KV: %s", exc)
+                return await self._kv_set_group_member(
+                    gid, uid, enabled, preserve_opt_out=preserve_opt_out
+                )
+            if changed:
+                await self._dual(
+                    self._kv_set_group_member(
+                        gid, uid, enabled, preserve_opt_out=preserve_opt_out
+                    )
+                )
+            return changed
+        return await self._kv_set_group_member(
+            gid, uid, enabled, preserve_opt_out=preserve_opt_out
+        )
+
+    async def get_group_member_ids(self, group_id: str) -> List[str]:
+        gid = str(group_id)
+        if self._need_store():
+            try:
+                return await self.store.get_group_member_ids(gid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 读取群成员失败，回退 KV: %s", exc)
+        return await self._kv_get_group_member_ids(gid)
+
+    async def remove_user_from_all_groups(self, user_id: str) -> None:
+        uid = str(user_id)
+        if self._need_store():
+            try:
+                await self.store.disable_user_in_all_groups(uid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 退出全部群失败，回退 KV: %s", exc)
+                await self._kv_remove_user_from_all_groups(uid)
+                return
+            await self._dual(self._kv_remove_user_from_all_groups(uid))
+            return
+        await self._kv_remove_user_from_all_groups(uid)
+
+    # ------------------------------------------------------------------
+    # rating snapshots
+    # ------------------------------------------------------------------
+    async def record_rating(
+        self, user_id: str, platform: str, rating: Optional[int]
+    ) -> None:
+        await self.record_ratings([(user_id, platform, rating)])
+
+    async def record_ratings(
+        self,
+        entries: List[Tuple[str, str, Optional[int]]],
+    ) -> None:
+        if self._need_store():
+            try:
+                await self.store.record_ratings(entries)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 写入 Rating 快照失败，回退 KV: %s", exc)
+                await self._kv_record_ratings(entries)
+                return
+            await self._dual(self._kv_record_ratings(entries))
+            return
+        await self._kv_record_ratings(entries)
+
+    async def weekly_delta(
+        self,
+        user_id: str,
+        platform: str,
+        *,
+        days: int = 7,
+        now: Optional[float] = None,
+    ) -> Optional[int]:
+        return (
+            await self.get_weekly_deltas(
+                [(str(user_id), str(platform))],
+                days=days,
+                now=now,
+            )
+        ).get((str(user_id), str(platform)))
+
+    async def get_weekly_deltas(
+        self,
+        requests: List[Tuple[str, str]],
+        *,
+        days: int = 7,
+        now: Optional[float] = None,
+    ) -> Dict[Tuple[str, str], Optional[int]]:
+        if self._need_store():
+            try:
+                return await self.store.get_weekly_deltas(requests, days=days, now=now)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 计算周变化失败，回退 KV: %s", exc)
+        return await self._kv_get_weekly_deltas(requests, days=days, now=now)
+
+    # ==================================================================
+    # 旧 KV 实现（保持原语义；Store 双写与回退时复用）
+    # ==================================================================
+    async def _kv_get_user_accounts(self, user_id: str) -> Dict[str, Dict[str, Any]]:
+        data = await self._get(ACCOUNTS_KEY, {})
+        if not isinstance(data, dict):
+            return {}
+        value = data.get(str(user_id), {})
+        return dict(value) if isinstance(value, dict) else {}
+
+    async def _kv_get_all_accounts(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        data = await self._get(ACCOUNTS_KEY, {})
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(user_id): dict(accounts)
+            for user_id, accounts in data.items()
+            if isinstance(accounts, dict)
+        }
+
+    async def _kv_save_binding(
+        self,
+        user_id: str,
+        platform: str,
+        profile: AccountProfile,
+        *,
+        group_id: Optional[str] = None,
+        qq_name: str = "",
+    ) -> None:
+        accounts = await self._kv_get_all_accounts()
         user_key = str(user_id)
         for other_user, user_accounts in accounts.items():
             if other_user == user_key:
@@ -95,15 +516,14 @@ class AccountRegistry:
         }
         await self._put(ACCOUNTS_KEY, accounts)
         if group_id:
-            # 新绑定按约定自动加入当前群排行；此前退出排行的状态不阻止重新绑定。
-            await self.set_group_member(str(group_id), user_key, True)
-        await self.clear_pending(user_key, platform)
+            await self._kv_set_group_member(str(group_id), user_key, True)
+        await self._kv_clear_pending(user_key, platform)
 
-    async def set_user_display_name(self, user_id: str, qq_name: str) -> bool:
+    async def _kv_set_user_display_name(self, user_id: str, qq_name: str) -> bool:
         name = str(qq_name or "").strip()
         if not name:
             return False
-        accounts = await self.get_all_accounts()
+        accounts = await self._kv_get_all_accounts()
         user_accounts = accounts.get(str(user_id))
         if not isinstance(user_accounts, dict):
             return False
@@ -116,8 +536,8 @@ class AccountRegistry:
             await self._put(ACCOUNTS_KEY, accounts)
         return changed
 
-    async def remove_binding(self, user_id: str, platform: str) -> bool:
-        accounts = await self.get_all_accounts()
+    async def _kv_remove_binding(self, user_id: str, platform: str) -> bool:
+        accounts = await self._kv_get_all_accounts()
         user_key = str(user_id)
         user_accounts = accounts.get(user_key)
         if not isinstance(user_accounts, dict) or platform not in user_accounts:
@@ -128,18 +548,18 @@ class AccountRegistry:
         else:
             accounts.pop(user_key, None)
         await self._put(ACCOUNTS_KEY, accounts)
-        await self.clear_pending(user_id, platform)
+        await self._kv_clear_pending(user_id, platform)
         return True
 
-    async def create_pending(
+    async def _kv_create_pending(
         self,
         user_id: str,
         platform: str,
         profile: AccountProfile,
         *,
         group_id: Optional[str] = None,
+        token: str,
     ) -> str:
-        token = create_binding_token()
         pending = await self._get(PENDING_BINDINGS_KEY, {})
         if not isinstance(pending, dict):
             pending = {}
@@ -155,7 +575,7 @@ class AccountRegistry:
         await self._put(PENDING_BINDINGS_KEY, pending)
         return token
 
-    async def get_pending(
+    async def _kv_get_pending(
         self, user_id: str, platform: str
     ) -> Optional[Dict[str, Any]]:
         pending = await self._get(PENDING_BINDINGS_KEY, {})
@@ -167,29 +587,21 @@ class AccountRegistry:
         try:
             expires_at = float(item.get("expires_at", 0) or 0)
         except (TypeError, ValueError):
-            await self.clear_pending(user_id, platform)
+            await self._kv_clear_pending(user_id, platform)
             return None
         if expires_at < time.time():
-            await self.clear_pending(user_id, platform)
+            await self._kv_clear_pending(user_id, platform)
             return None
         return dict(item)
 
-    async def clear_pending(self, user_id: str, platform: str) -> None:
+    async def _kv_clear_pending(self, user_id: str, platform: str) -> None:
         pending = await self._get(PENDING_BINDINGS_KEY, {})
         if not isinstance(pending, dict):
             return
         pending.pop(f"{user_id}:{platform}", None)
         await self._put(PENDING_BINDINGS_KEY, pending)
 
-    @staticmethod
-    def token_matches(value: str, expected_hash: str) -> bool:
-        """校验验证码是否追加在公开资料字段中。"""
-        return any(
-            token_hash(candidate) == expected_hash
-            for candidate in TOKEN_RE.findall(str(value or ""))
-        )
-
-    async def set_group_member(
+    async def _kv_set_group_member(
         self,
         group_id: str,
         user_id: str,
@@ -225,7 +637,7 @@ class AccountRegistry:
         await self._put(GROUP_RANK_KEY, data)
         return True
 
-    async def get_group_member_ids(self, group_id: str) -> List[str]:
+    async def _kv_get_group_member_ids(self, group_id: str) -> List[str]:
         data = await self._get(GROUP_RANK_KEY, {})
         if not isinstance(data, dict):
             return []
@@ -238,16 +650,10 @@ class AccountRegistry:
             if isinstance(item, dict) and bool(item.get("enabled", False))
         ]
 
-    async def record_rating(
-        self, user_id: str, platform: str, rating: Optional[int]
-    ) -> None:
-        await self.record_ratings([(user_id, platform, rating)])
-
-    async def record_ratings(
+    async def _kv_record_ratings(
         self,
         entries: List[Tuple[str, str, Optional[int]]],
     ) -> None:
-        """批量写入 Rating 快照，避免大群排行逐成员读写 KV。"""
         normalized: Dict[Tuple[str, str], int] = {}
         for user_id, platform, rating in entries:
             if rating is None:
@@ -258,7 +664,6 @@ class AccountRegistry:
                 continue
         if not normalized:
             return
-
         data = await self._get(RATING_SNAPSHOTS_KEY, {})
         if not isinstance(data, dict):
             data = {}
@@ -287,30 +692,13 @@ class AccountRegistry:
         if changed:
             await self._put(RATING_SNAPSHOTS_KEY, data)
 
-    async def weekly_delta(
-        self,
-        user_id: str,
-        platform: str,
-        *,
-        days: int = 7,
-        now: Optional[float] = None,
-    ) -> Optional[int]:
-        return (
-            await self.get_weekly_deltas(
-                [(str(user_id), str(platform))],
-                days=days,
-                now=now,
-            )
-        ).get((str(user_id), str(platform)))
-
-    async def get_weekly_deltas(
+    async def _kv_get_weekly_deltas(
         self,
         requests: List[Tuple[str, str]],
         *,
         days: int = 7,
         now: Optional[float] = None,
     ) -> Dict[Tuple[str, str], Optional[int]]:
-        """批量计算多个用户/平台的近期 Rating 变化。"""
         data = await self._get(RATING_SNAPSHOTS_KEY, {})
         if not isinstance(data, dict):
             return {
@@ -354,7 +742,7 @@ class AccountRegistry:
             )
         return result
 
-    async def remove_user_from_all_groups(self, user_id: str) -> None:
+    async def _kv_remove_user_from_all_groups(self, user_id: str) -> None:
         data = await self._get(GROUP_RANK_KEY, {})
         if not isinstance(data, dict):
             return

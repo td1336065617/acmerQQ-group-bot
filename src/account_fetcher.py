@@ -60,6 +60,10 @@ DETAIL_CACHE_TTL = 10 * 60
 ANALYSIS_CACHE_TTL = 12 * 60 * 60
 ANALYSIS_FAILURE_CACHE_TTL = 5 * 60
 RESOURCE_CACHE_TTL = 24 * 60 * 60
+# 账号级负缓存：永久性失败（账号不存在/格式错）短缓存 5 分钟；
+# 临时性网络失败只缓存 2 分钟，避免每次排行 TTL 过期后重复重抓坏账号。
+FETCH_FAILURE_PERMANENT_TTL = 5 * 60
+FETCH_FAILURE_TEMP_TTL = 2 * 60
 CF_MIN_REQUEST_INTERVAL = 2.1
 RATING_HISTORY_LIMIT = 200
 CF_SUBMISSION_SCAN_LIMIT = 10000
@@ -297,9 +301,18 @@ class AccountFetcher:
         ] = {}
         self._cf_lock = asyncio.Lock()
         self._cf_last_request = 0.0
+        self._cf_bulk_lock = asyncio.Lock()
+        # 账号级负缓存：{(platform, handle_norm): (expires_at, message, temporary)}
+        self._failure_cache: Dict[Tuple[str, str], Tuple[float, str, bool]] = {}
+        # 可选持久化（AccountStore）：写缓存只标脏，周期批量 flush，避免请求路径变慢。
+        self.cache_store = None
+        self._profile_cache_dirty: set = set()
+        self._failure_cache_dirty: set = set()
 
     async def initialize(
-        self, session: Optional[aiohttp.ClientSession] = None
+        self,
+        session: Optional[aiohttp.ClientSession] = None,
+        cache_store=None,
     ) -> None:
         if session is not None:
             self.session = session
@@ -309,6 +322,82 @@ class AccountFetcher:
                 headers={"User-Agent": USER_AGENT}
             )
             self._owns_session = True
+        if cache_store is not None:
+            self.cache_store = cache_store
+            await self._load_persistent_caches()
+
+    async def _load_persistent_caches(self) -> None:
+        """启动时把 SQLite 中的资料/负缓存恢复到内存，避免重启后全部重爬。"""
+        if self.cache_store is None:
+            return
+        try:
+            rows = await self.cache_store.load_profile_cache()
+            loaded = 0
+            for row in rows:
+                key = self._key_from_kind(
+                    str(row["platform"]),
+                    str(row["handle_norm"]),
+                    str(row["kind"]),
+                )
+                if key is None:
+                    continue
+                try:
+                    payload = json.loads(str(row["payload"]))
+                    profile = AccountProfile(**payload)
+                    profile.fetched_at = float(row["fetched_at"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if key not in self._cache:
+                    self._cache[key] = (profile.fetched_at, profile)
+                    loaded += 1
+            failures = await self.cache_store.load_fetch_failures()
+            failed_loaded = 0
+            now = time.time()
+            for row in failures:
+                if float(row["expires_at"]) <= now:
+                    continue
+                fkey = (str(row["platform"]), str(row["handle_norm"]))
+                self._failure_cache[fkey] = (
+                    float(row["expires_at"]),
+                    str(row.get("reason") or "平台暂时无法访问，请稍后重试"),
+                    bool(int(row.get("temporary", 1))),
+                )
+                failed_loaded += 1
+            if loaded or failed_loaded:
+                logger.info(
+                    "账号持久化缓存已加载: profiles=%d failures=%d",
+                    loaded,
+                    failed_loaded,
+                )
+        except Exception as exc:  # noqa: BLE001 - 缓存加载失败不影响运行
+            logger.warning("账号持久化缓存加载失败，忽略: %s", exc)
+
+    @staticmethod
+    def _kind_for_key(key: tuple) -> str:
+        """内存缓存 key → 持久化 kind（basic/detail[/analysis] + submissions 变体）。"""
+        _, _, detail, submissions, analysis = key
+        if not detail:
+            return "basic"
+        suffix = "_s" if submissions else ""
+        if analysis:
+            return "analysis" + suffix
+        return "detail" + suffix
+
+    @classmethod
+    def _key_from_kind(
+        cls, platform: str, handle_norm: str, kind: str
+    ) -> Optional[tuple]:
+        if kind == "basic":
+            return (platform, handle_norm, False, False, False)
+        if kind == "detail":
+            return (platform, handle_norm, True, False, False)
+        if kind == "detail_s":
+            return (platform, handle_norm, True, True, False)
+        if kind == "analysis":
+            return (platform, handle_norm, True, False, True)
+        if kind == "analysis_s":
+            return (platform, handle_norm, True, True, True)
+        return None
 
     async def close(self) -> None:
         if self._owns_session and self.session is not None:
@@ -360,6 +449,7 @@ class AccountFetcher:
             return cached[1]
 
         lock = self._locks.setdefault(key, asyncio.Lock())
+        failure_key = (platform, normalized.casefold())
         async with lock:
             cached = self._cache.get(key)
             if (
@@ -369,31 +459,210 @@ class AccountFetcher:
                 < self._cache_ttl_for_profile(cached[1], ttl)
             ):
                 return cached[1]
-            profile = await self._fetch_profile(
+            if not force:
+                failure = self._failure_cache.get(failure_key)
+                if failure is not None and failure[0] > time.time():
+                    raise AccountFetchError(failure[1], temporary=failure[2])
+            logger.debug(
+                "account_fetch_miss platform=%s handle=%s detail=%s analysis=%s",
                 platform,
                 normalized,
                 detail,
-                include_submissions=include_submissions,
-                include_difficulty=analysis_requested,
-                include_analysis=analysis_requested,
+                analysis_requested,
             )
+            try:
+                profile = await self._fetch_profile(
+                    platform,
+                    normalized,
+                    detail,
+                    include_submissions=include_submissions,
+                    include_difficulty=analysis_requested,
+                    include_analysis=analysis_requested,
+                )
+            except AccountFetchError as exc:
+                self._record_failure(failure_key, exc)
+                raise
             profile.fetched_at = time.time()
+            # 成功抓取后清除该账号的旧负缓存，避免后续命中过期 failure。
+            if failure_key in self._failure_cache:
+                self._failure_cache.pop(failure_key, None)
+                self._failure_cache_dirty.discard(failure_key)
+                if self.cache_store is not None:
+                    try:
+                        await self.cache_store.delete_fetch_failure(
+                            platform, normalized.casefold(), ""
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "清除账号负缓存失败 %s: %s", failure_key, exc
+                        )
             self._cache[key] = (profile.fetched_at, profile)
+            self._profile_cache_dirty.add(key)
             # 详细资料可以复用为摘要资料，减少后续排行请求。
             if detail:
-                self._cache[
-                    (
-                        platform,
-                        normalized.casefold(),
-                        False,
-                        False,
-                        False,
-                    )
-                ] = (
+                basic_key = (
+                    platform,
+                    normalized.casefold(),
+                    False,
+                    False,
+                    False,
+                )
+                self._cache[basic_key] = (
                     profile.fetched_at,
                     profile,
                 )
+                self._profile_cache_dirty.add(basic_key)
             return profile
+
+    def _record_failure(
+        self,
+        failure_key: Tuple[str, str],
+        exc: AccountFetchError,
+    ) -> None:
+        """记录账号级负缓存；永久失败 5 分钟、临时失败 2 分钟。"""
+        ttl = (
+            FETCH_FAILURE_PERMANENT_TTL
+            if not getattr(exc, "temporary", True)
+            else FETCH_FAILURE_TEMP_TTL
+        )
+        self._failure_cache[failure_key] = (
+            time.time() + ttl,
+            str(exc).strip() or "平台暂时无法访问，请稍后重试",
+            bool(getattr(exc, "temporary", True)),
+        )
+        self._failure_cache_dirty.add(failure_key)
+
+    def prune_cache(
+        self,
+        *,
+        max_entries: int = 5000,
+        resource_max_entries: int = 2000,
+        failure_max_entries: int = 2000,
+    ) -> None:
+        """淘汰过期/超限的进程内缓存，避免长时间运行内存无界增长。
+
+        纯同步方法，在 asyncio 事件循环内短调用；只删除条目，不打断
+        正在进行的抓取（single-flight 锁对象仅在无等待者时清理）。
+        """
+        now = time.time()
+        # 负缓存：先清过期项，再按条数兜底。
+        self._failure_cache = {
+            key: value
+            for key, value in self._failure_cache.items()
+            if value[0] > now
+        }
+        overflow = len(self._failure_cache) - failure_max_entries
+        if overflow > 0:
+            oldest = sorted(
+                self._failure_cache.items(),
+                key=lambda pair: pair[1][0],
+            )[:overflow]
+            for key in oldest:
+                self._failure_cache.pop(key[0], None)
+        self._failure_cache_dirty &= set(self._failure_cache.keys())
+
+        # 资料缓存：按 fetched_at 保留最近 max_entries 条。
+        if len(self._cache) > max_entries:
+            newest = sorted(
+                self._cache.items(),
+                key=lambda pair: pair[1][0],
+                reverse=True,
+            )[:max_entries]
+            self._cache = dict(newest)
+        self._profile_cache_dirty &= set(self._cache.keys())
+        self._locks = {
+            key: lock
+            for key, lock in self._locks.items()
+            if key in self._cache or lock.locked()
+        }
+
+        # 资源缓存（题目模型等大对象）：先清过期，再限容。
+        self._resource_cache = {
+            key: value
+            for key, value in self._resource_cache.items()
+            if value[0] + RESOURCE_CACHE_TTL > now
+        }
+        if len(self._resource_cache) > resource_max_entries:
+            newest = sorted(
+                self._resource_cache.items(),
+                key=lambda pair: pair[1][0],
+                reverse=True,
+            )[:resource_max_entries]
+            self._resource_cache = dict(newest)
+        self._resource_locks = {
+            key: lock
+            for key, lock in self._resource_locks.items()
+            if key in self._resource_cache or lock.locked()
+        }
+
+        # 牛客题目元数据缓存。
+        self._nowcoder_problem_cache = {
+            key: value
+            for key, value in self._nowcoder_problem_cache.items()
+            if value[0] + RESOURCE_CACHE_TTL > now
+        }
+
+    async def flush_persistent_cache(self) -> None:
+        """把标脏的 profile/failure 缓存批量写回 SQLite（失败保留脏标记重试）。"""
+        if self.cache_store is None:
+            return
+        if not self._profile_cache_dirty and not self._failure_cache_dirty:
+            return
+        profile_snapshot = set(self._profile_cache_dirty)
+        failure_snapshot = set(self._failure_cache_dirty)
+        try:
+            profile_entries = []
+            for key in profile_snapshot:
+                item = self._cache.get(key)
+                if item is None:
+                    continue
+                fetched_at, profile = item
+                kind = self._kind_for_key(key)
+                base_ttl = (
+                    ANALYSIS_CACHE_TTL
+                    if kind in {"analysis", "analysis_s"}
+                    else max(self.cache_ttl, DETAIL_CACHE_TTL)
+                )
+                expires_at = fetched_at + self._cache_ttl_for_profile(
+                    profile, base_ttl
+                )
+                profile_entries.append(
+                    {
+                        "platform": str(key[0]),
+                        "handle_norm": str(key[1]),
+                        "kind": kind,
+                        "payload": json.dumps(
+                            profile.public_dict(), ensure_ascii=False
+                        ),
+                        "fetched_at": float(fetched_at),
+                        "expires_at": float(expires_at),
+                    }
+                )
+            failure_entries = []
+            for fkey in failure_snapshot:
+                entry = self._failure_cache.get(fkey)
+                if entry is None:
+                    continue
+                expires_at, message, temporary = entry
+                failure_entries.append(
+                    {
+                        "platform": str(fkey[0]),
+                        "handle_norm": str(fkey[1]),
+                        "kind": "",
+                        "reason": str(message),
+                        "temporary": bool(temporary),
+                        "expires_at": float(expires_at),
+                    }
+                )
+            if profile_entries:
+                await self.cache_store.upsert_profile_cache(profile_entries)
+            if failure_entries:
+                await self.cache_store.upsert_fetch_failures(failure_entries)
+            # 只清除本次快照中的脏标记；并发期间再次写脏的 key 会保留到下一轮。
+            self._profile_cache_dirty -= profile_snapshot
+            self._failure_cache_dirty -= failure_snapshot
+        except Exception as exc:  # noqa: BLE001 - flush 失败保留脏标记，下轮重试
+            logger.warning("账号持久化缓存 flush 失败（稍后重试）: %s", exc)
 
     @staticmethod
     def _cache_ttl_for_profile(
@@ -466,26 +735,108 @@ class AccountFetcher:
             else:
                 missing.append(identifier)
 
-        for offset in range(0, len(missing), 50):
-            chunk = missing[offset : offset + 50]
+        return await self._cf_bulk_fetch(missing, result, force)
+
+    async def _cf_bulk_fetch(
+        self,
+        missing: List[str],
+        result: Dict[str, AccountProfile],
+        force: bool,
+    ) -> Dict[str, AccountProfile]:
+        """CF user.info 批量拉取；进程内单飞，避免多群刷新重复请求。"""
+        async with self._cf_bulk_lock:
+            for offset in range(0, len(missing), 50):
+                chunk = missing[offset : offset + 50]
+                await self._cf_resolve_chunk(chunk, result, force)
+            return result
+
+    async def _cf_resolve_chunk(
+        self,
+        identifiers: List[str],
+        result: Dict[str, AccountProfile],
+        force: bool,
+    ) -> None:
+        """递归二分定位 user.info 中的失效账号。
+
+        CF user.info 是 all-or-nothing：任一失效 handle 会让整批 FAILED。
+        对失败批次二分，只对最小可疑子集做单账号请求，避免整 chunk 串行风暴。
+        """
+        if not identifiers:
+            return
+        try:
             data = await self._cf_json(
-                "user.info", {"handles": ";".join(chunk)}
+                "user.info", {"handles": ";".join(identifiers)}
             )
-            if not isinstance(data, dict) or data.get("status") != "OK":
-                raise AccountFetchError("Codeforces 用户信息暂时无法获取")
-            for user in data.get("result") or []:
-                profile = self._profile_from_codeforces_user(user)
-                profile.fetched_at = time.time()
-                key = (
-                    "codeforces",
-                    profile.handle.casefold(),
-                    False,
-                    False,
-                    False,
+        except AccountFetchError as exc:
+            if not getattr(exc, "temporary", True):
+                if len(identifiers) == 1:
+                    identifier = identifiers[0]
+                    try:
+                        profile = await self.get_profile(
+                            "codeforces", identifier, force=force
+                        )
+                    except AccountFetchError as err:
+                        logger.warning(
+                            "Codeforces 账号 %s 回退失败: %s",
+                            identifier,
+                            err,
+                        )
+                        return
+                    result[profile.handle.casefold()] = profile
+                    return
+                mid = len(identifiers) // 2
+                await self._cf_resolve_chunk(
+                    identifiers[:mid], result, force
                 )
-                self._cache[key] = (profile.fetched_at, profile)
-                result[profile.handle.casefold()] = profile
-        return result
+                await self._cf_resolve_chunk(
+                    identifiers[mid:], result, force
+                )
+                return
+            # 网络/服务临时失败：跳过本批。
+            logger.warning(
+                "Codeforces 批量 user.info 临时失败，跳过该批: %s", exc
+            )
+            return
+        if not isinstance(data, dict) or data.get("status") != "OK":
+            comment = str(
+                (data or {}).get("comment") or ""
+            ) if isinstance(data, dict) else ""
+            if "not found" in comment.casefold():
+                # 批内含失效账号：继续二分。
+                if len(identifiers) == 1:
+                    identifier = identifiers[0]
+                    try:
+                        profile = await self.get_profile(
+                            "codeforces", identifier, force=force
+                        )
+                    except AccountFetchError as err:
+                        logger.warning(
+                            "Codeforces 账号 %s 回退失败: %s",
+                            identifier,
+                            err,
+                        )
+                        return
+                    result[profile.handle.casefold()] = profile
+                    return
+                mid = len(identifiers) // 2
+                await self._cf_resolve_chunk(identifiers[:mid], result, force)
+                await self._cf_resolve_chunk(identifiers[mid:], result, force)
+                return
+            logger.warning("Codeforces 用户信息暂时无法获取")
+            return
+        for user in data.get("result") or []:
+            profile = self._profile_from_codeforces_user(user)
+            profile.fetched_at = time.time()
+            key = (
+                "codeforces",
+                profile.handle.casefold(),
+                False,
+                False,
+                False,
+            )
+            self._cache[key] = (profile.fetched_at, profile)
+            self._profile_cache_dirty.add(key)
+            result[profile.handle.casefold()] = profile
 
     async def verify(
         self, platform: str, identifier: str, token: str

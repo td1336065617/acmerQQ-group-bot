@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Dict, Set, Tuple
 
 from astrbot.api import logger
-from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Plain
 
 from .models import CN_TZ, PLATFORM_LABELS, GroupConfig
 from .utils import validate_hhmm
 
 TICK_SECONDS = 30
 REMIND_MINUTES = 15
+# 提醒去重表：超过该长度时只保留最近 1000 条（与旧实现一致）。
+REMINDED_SOFT_LIMIT = 2000
+REMINDED_KEEP = 1000
 
 
 class PushScheduler:
@@ -21,6 +23,7 @@ class PushScheduler:
     def __init__(self, plugin) -> None:
         self.plugin = plugin
         self._task: asyncio.Task | None = None
+        self._prune_counter = 0
 
     async def start(self) -> None:
         if self._task is None:
@@ -47,15 +50,63 @@ class PushScheduler:
 
     async def tick(self) -> None:
         now = datetime.now(CN_TZ)
+        # reminded 去重表每个 tick 只读一次，各群共享；仅在真正新增提醒时写回。
+        reminded: Set[str] = set(
+            await self.plugin.get_kv_data("reminded", []) or []
+        )
+        # 每个平台每个 tick 只抓一次，多个群复用同一份结果。
+        platform_cache: Dict[str, Tuple[list, object]] = {}
         for group in await self.plugin.get_groups():
             if not group.enabled:
                 continue
             try:
                 await self._maybe_morning_push(group, now)
                 if group.reminder_enabled:
-                    await self._maybe_remind(group, now)
+                    await self._maybe_remind(group, now, reminded, platform_cache)
             except Exception:
                 logger.exception("群 %s 定时推送处理失败", group.group_id)
+        # 约每 5 分钟（10 个 tick）淘汰一次账号抓取器的进程内缓存，
+        # 并把标脏的资料/负缓存批量落库（重启不冷）。
+        self._prune_counter += 1
+        if self._prune_counter >= 10:
+            self._prune_counter = 0
+            try:
+                prune = getattr(
+                    self.plugin.account_fetcher, "prune_cache", None
+                )
+                if callable(prune):
+                    prune()
+                flush = getattr(
+                    self.plugin.account_fetcher,
+                    "flush_persistent_cache",
+                    None,
+                )
+                if callable(flush):
+                    await flush()
+                registry = getattr(self.plugin, "account_registry", None)
+                if registry is not None and getattr(
+                    registry, "store_enabled", False
+                ):
+                    store = getattr(registry, "store", None)
+                    for cleaner in (
+                        "purge_expired_pending",
+                        "delete_expired_profile_cache",
+                        "delete_expired_fetch_failures",
+                    ):
+                        method = getattr(store, cleaner, None)
+                        if callable(method):
+                            await method()
+                refresh_stale = getattr(
+                    self.plugin, "rank_service", None
+                )
+                if refresh_stale is not None:
+                    stale_refresher = getattr(
+                        refresh_stale, "refresh_stale", None
+                    )
+                    if callable(stale_refresher):
+                        await stale_refresher()
+            except Exception:  # noqa: BLE001 - 缓存清理失败不影响推送
+                logger.warning("账号抓取器缓存清理失败", exc_info=True)
 
     async def _maybe_morning_push(self, group: GroupConfig, now: datetime) -> None:
         try:
@@ -83,10 +134,19 @@ class PushScheduler:
         else:
             logger.warning("群 %s 早报发送失败，下个周期重试", group.group_id)
 
-    async def _maybe_remind(self, group: GroupConfig, now: datetime) -> None:
-        reminded = set(await self.plugin.get_kv_data("reminded", []) or [])
+    async def _maybe_remind(
+        self,
+        group: GroupConfig,
+        now: datetime,
+        reminded: Set[str],
+        platform_cache: Dict[str, Tuple[list, object]],
+    ) -> None:
         for platform in group.push_platforms:
-            contests, err = await self.plugin.fetcher.fetch_platform(platform)
+            if platform not in platform_cache:
+                platform_cache[platform] = await self.plugin.fetcher.fetch_platform(
+                    platform
+                )
+            contests, err = platform_cache[platform]
             if err or not contests:
                 continue
             for contest in contests:
@@ -110,6 +170,13 @@ class PushScheduler:
                 if await self.plugin.send_notification(group, text):
                     reminded.add(dedupe_key)
                     reminded_list = sorted(reminded)
-                    if len(reminded_list) > 2000:
-                        reminded_list = reminded_list[-1000:]
-                    await self.plugin.put_kv_data("reminded", reminded_list)
+                    if len(reminded_list) > REMINDED_SOFT_LIMIT:
+                        reminded_list = reminded_list[-REMINDED_KEEP:]
+                    try:
+                        await self.plugin.put_kv_data("reminded", reminded_list)
+                    except Exception:  # noqa: BLE001 - 写失败回滚内存，下周期重试
+                        reminded.discard(dedupe_key)
+                        logger.warning(
+                            "赛前提醒去重表写回失败，下个周期重试",
+                            exc_info=True,
+                        )
