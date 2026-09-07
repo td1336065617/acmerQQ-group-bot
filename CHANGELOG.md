@@ -1,5 +1,26 @@
 # 更新日志
 
+## [1.3.0] - 2026-09-07
+
+### 优化
+- 账号、群成员、待确认绑定与 Rating 快照从 AstrBot KV 迁入本地 SQLite
+  （WAL），首次启动自动迁移并生成 JSON 备份，支持 KV 双写与回退。
+- 资料缓存与账号级负缓存持久化到 SQLite，重启后避免全量冷启动重爬；
+  按周期批量落盘并清理过期行。
+- 群排行改为物化快照 + 后台刷新（stale-while-revalidate，默认 60 分钟），
+  普通查询优先命中本地快照，不再全群同步抓取。
+- settings/groups 增加内存缓存；定时任务的 reminded 与平台比赛数据
+  每个 tick 只读取/抓取一次。
+- Codeforces 批量 user.info 失败时仅回退失败批次，并用二分定位失效账号；
+  增加账号级负缓存，避免坏账号反复拖慢排行。
+- 排行缓存 key 去除 record_metrics，自己查询与被 @ 查询共享同一次计算。
+- 增加渲染并发上限、账号抓取缓存上限、关键路径耗时日志。
+
+### 兼容
+- 默认仍保持用户可见指令/文案不变；`刷新我的战绩` 等 force 路径即时抓取。
+- 环境变量：`ACMER_STORE_BACKEND`（sqlite/kv）、`ACMER_STORE_DIR`、
+  `ACMER_DUAL_WRITE_KV`；如需回退旧 KV 模式可设置 `ACMER_STORE_BACKEND=kv`。
+
 ## [1.2.28] - 2026-09-06
 
 ### 修复

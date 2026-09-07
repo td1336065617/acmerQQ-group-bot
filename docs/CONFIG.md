@@ -216,3 +216,16 @@ QQ 官方适配器的主动推送限制——需要该群在机器人**本次运
 
 所有配置应通过 WebUI 修改。直接改 AstrBot 数据库的 KV 记录有一定风险
 （格式校验、并发写入），仅在排障时由维护者谨慎操作。
+
+## 8. 账号存储与回滚（1.3.0）
+
+- 账号/群成员/待确认绑定/Rating 快照默认存储在本地 SQLite：
+  `data/plugin_data/acmer_qq_group_bot/acmer_store.db`。
+- 首次启用 SQLite 时会自动从 AstrBot KV 迁移，并在同目录生成 JSON 备份
+  （`kv_backup_*.json`）。
+- 默认开启 KV 双写；如需完全回退到旧 KV 模式，设置环境变量
+  `ACMER_STORE_BACKEND=kv` 后重启插件。SQLite 数据不会删除，切回
+  `sqlite` 可继续使用。
+- 迁移失败不会阻断插件启动，会自动回退 KV 模式并在日志中记录原因。
+- 相关环境变量：`ACMER_STORE_BACKEND`、`ACMER_STORE_DIR`、
+  `ACMER_DUAL_WRITE_KV`。
