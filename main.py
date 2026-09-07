@@ -2633,9 +2633,6 @@ class AcmerGroupBot(Star):
             lines.append("（当前没有查到未开始的比赛）")
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # 指令：比赛查询
-    # ------------------------------------------------------------------
     async def _adaptive_results(
         self, event: AstrMessageEvent, text: str
     ):
@@ -2643,9 +2640,9 @@ class AcmerGroupBot(Star):
         value = str(text or "").strip()
         if not value:
             return
-        await self.get_settings()
         if not self.output_renderer.needs_image(value):
-            # 即使未超过“转图阈值”，仍要受单条安全长度约束：超过则分片。
+            # 短文本直接整段发送；不要在 yield 前 await get_settings，
+            # 否则 AstrBot 被动回复链路会丢失 Plain 内的换行（实测）。
             if len(value) > MAX_TEXT_CHUNK:
                 for piece in text_chunks(value):
                     yield event.plain_result(piece)
@@ -2655,6 +2652,7 @@ class AcmerGroupBot(Star):
 
         # HTML/浏览器调用是阻塞操作，放到线程中（受全局渲染信号量约束），
         # 避免卡住 AstrBot 事件循环或同时拉起多个浏览器。
+        await self.get_settings()
         try:
             image_path = await self._run_render(
                 self.output_renderer.render, value
