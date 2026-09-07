@@ -53,7 +53,11 @@ from .src.models import (
     PLATFORM_LABELS,
     GroupConfig,
 )
-from .src.output_renderer import AdaptiveOutputRenderer, text_chunks
+from .src.output_renderer import (
+    MAX_TEXT_CHUNK,
+    AdaptiveOutputRenderer,
+    text_chunks,
+)
 from .src.scheduler import PushScheduler
 from .src.utils import (
     contest_start_utc,
@@ -2542,13 +2546,35 @@ class AcmerGroupBot(Star):
             return False
 
     async def _send_text_chunks(self, session, text: str) -> bool:
-        """按安全长度发送文字分片，返回所有分片是否发送成功。"""
-        for piece in text_chunks(text):
-            if not await self.context.send_message(
-                session, MessageChain([Plain(piece)])
-            ):
-                return False
-        return True
+        """按安全长度发送文字分片，返回是否全部分片成功。
+
+        单片失败仍继续尝试剩余分片（提高送达率），并记录精确失败位置，
+        避免把原因都归到“未找到匹配平台”。
+        """
+        pieces = list(text_chunks(text))
+        all_ok = True
+        total = len(pieces)
+        for index, piece in enumerate(pieces, start=1):
+            try:
+                ok = await self.context.send_message(
+                    session, MessageChain([Plain(piece)])
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "acmerQQ群机器人 文字分片第 %d/%d 条发送异常：%s",
+                    index,
+                    total,
+                    exc,
+                )
+                ok = False
+            if not ok:
+                all_ok = False
+                logger.warning(
+                    "acmerQQ群机器人 文字分片第 %d/%d 条发送失败（已尝试继续后续分片）",
+                    index,
+                    total,
+                )
+        return all_ok
 
     async def build_morning_text(self, group: GroupConfig) -> Optional[str]:
         settings = await self.get_settings()
@@ -2619,7 +2645,12 @@ class AcmerGroupBot(Star):
             return
         await self.get_settings()
         if not self.output_renderer.needs_image(value):
-            yield event.plain_result(value)
+            # 即使未超过“转图阈值”，仍要受单条安全长度约束：超过则分片。
+            if len(value) > MAX_TEXT_CHUNK:
+                for piece in text_chunks(value):
+                    yield event.plain_result(piece)
+            else:
+                yield event.plain_result(value)
             return
 
         # HTML/浏览器调用是阻塞操作，放到线程中（受全局渲染信号量约束），

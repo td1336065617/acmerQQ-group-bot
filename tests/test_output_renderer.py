@@ -69,3 +69,22 @@ def test_text_chunks_respect_limit():
     chunks = list(text_chunks("第一行\n" + "x" * 3200, max_chunk=1000))
     assert len(chunks) >= 4
     assert all(len(chunk) <= 1000 for chunk in chunks)
+
+
+def test_text_chunks_preserves_indentation():
+    text = "\n".join(
+        ["标题", "1. 比赛", "   日期：2026-09-04", "   链接：https://example.com"] * 80
+    )
+    chunks = list(text_chunks(text, max_chunk=300))
+    assert len(chunks) > 1
+    assert any(chunk.startswith("   日期") for chunk in chunks[1:])
+
+
+def test_text_chunks_no_blank_overflow():
+    text = "开头\n" + "无空格长串" * 500 + "\n结尾"
+    chunks = list(text_chunks(text, max_chunk=200))
+    assert all(len(chunk) <= 200 for chunk in chunks)
+    joined = "".join(chunks)
+    assert joined.startswith("开头")
+    assert joined.endswith("结尾")
+    assert "无空格长串" in joined

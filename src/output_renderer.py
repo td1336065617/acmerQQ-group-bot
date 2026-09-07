@@ -905,16 +905,28 @@ class AdaptiveOutputRenderer:
 
 
 def text_chunks(text: str, max_chunk: int = MAX_TEXT_CHUNK):
-    """渲染失败时按换行拆分纯文本，避免再次超过单条消息限制。"""
+    """渲染失败时按换行拆分纯文本，避免再次超过单条消息限制。
+
+    只移除分片首尾的换行符，保留前导空格/tab 缩进；优先在行尾/空格处
+    断片，整行超长时才硬切。
+    """
     value = str(text or "")
     start = 0
-    while start < len(value):
-        end = min(start + max_chunk, len(value))
-        if end < len(value):
+    total = len(value)
+    limit = max(1, int(max_chunk))
+    while start < total:
+        end = min(start + limit, total)
+        if end < total:
             newline = value.rfind("\n", start, end)
-            if newline > start + 100:
-                end = newline
-        piece = value[start:end].strip()
+            space = value.rfind(" ", start, end)
+            best = -1
+            if newline > start:
+                best = newline + 1
+            elif space > start:
+                best = space + 1
+            if best > start:
+                end = min(best, start + limit)
+        piece = value[start:end].lstrip("\r\n").rstrip("\r\n")
         if piece:
             yield piece
-        start = end if end > start else start + 1
+        start = end
