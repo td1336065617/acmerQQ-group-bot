@@ -1818,14 +1818,17 @@ class AcmerGroupBot(Star):
             pass
 
     async def _mark_group_rank_dirty(self, group_id: str) -> None:
-        """让 SQLite rank_meta 对该群所有平台标记脏（异步后台执行）。"""
+        """让 SQLite 快照对该群所有平台标记脏（rank + progress）。"""
         registry = getattr(self, "account_registry", None)
         store = getattr(registry, "store", None)
         if store is None or not getattr(registry, "store_enabled", False):
             return
         try:
             for platform in ACCOUNT_PLATFORMS:
-                await store.mark_rank_dirty(group_id, platform)
+                for mode in ("rank", "progress"):
+                    await store.mark_rank_dirty(
+                        group_id, platform, mode=mode
+                    )
         except Exception as exc:  # noqa: BLE001 - 脏标记失败只影响刷新时机
             logger.warning("标记群 %s 排行脏失败: %s", group_id, exc)
 

@@ -62,6 +62,62 @@ def test_rank_read_persists_and_uses_snapshot(tmp_path):
     asyncio.run(scenario())
 
 
+def test_progress_read_persists_and_uses_snapshot(tmp_path):
+    """本周进步榜与群排行共用快照机制：首次计算落库，第二次直接读快照。"""
+
+    async def scenario():
+        store = AccountStore(tmp_path / "progress.db")
+        await store.initialize()
+        plugin = FakePlugin(store)
+        service = RankService(plugin)
+
+        rows, errors = await service.read("g1", "codeforces", progress=True)
+        assert rows and errors == []
+        assert plugin.compute_calls == 1
+        # 落库到 progress_snapshot（与 rank_snapshot 相互独立）
+        assert len(await store.get_rank_rows("g1", "codeforces", mode="progress")) == 1
+        assert await store.get_rank_rows("g1", "codeforces") == []
+
+        rows2, _ = await service.read("g1", "codeforces", progress=True)
+        assert rows2
+        assert plugin.compute_calls == 1  # 命中快照，不再全群重算
+
+        # 标脏后 progress 也应失效（rank 的脏标记不影响 progress 快照表）
+        await store.mark_rank_dirty("g1", "codeforces", mode="progress")
+        rows3, _ = await service.read("g1", "codeforces", progress=True)
+        assert rows3
+        for _ in range(50):
+            if plugin.compute_calls >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert plugin.compute_calls >= 2
+        meta = await store.get_rank_meta("g1", "codeforces", mode="progress")
+        assert meta is not None
+        assert float(meta["refreshed_at"]) >= float(meta["dirty_at"])
+
+    asyncio.run(scenario())
+
+
+def test_rank_and_progress_snapshots_are_isolated(tmp_path):
+    """两种快照表互不覆盖：写 rank 不改变 progress，反之亦然。"""
+
+    async def scenario():
+        store = AccountStore(tmp_path / "isolation.db")
+        await store.initialize()
+        rank_rows = [dict(ROWS[0], display_value="1700", sort_value=1700)]
+        progress_rows = [dict(ROWS[0], display_value="+42", sort_value=42)]
+        await store.replace_rank_snapshot("g1", "codeforces", rank_rows)
+        await store.replace_rank_snapshot(
+            "g1", "codeforces", progress_rows, mode="progress"
+        )
+        ranks = await store.get_rank_rows("g1", "codeforces")
+        progress = await store.get_rank_rows("g1", "codeforces", mode="progress")
+        assert ranks[0]["display_value"] == "1700"
+        assert progress[0]["display_value"] == "+42"
+
+    asyncio.run(scenario())
+
+
 def test_rank_meta_errors_shape():
     errors = RankService._meta_errors(
         {"errors_json": '[[\"u1\",\"未找到该 Codeforces 用户\"]]'}

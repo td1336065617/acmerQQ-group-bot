@@ -136,7 +136,49 @@ CREATE TABLE IF NOT EXISTS rank_meta (
     errors_json  TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (group_id, platform)
 );
+
+-- 本周进步榜物化读模型：与 rank_snapshot 结构一致，独立成表以避免
+-- 修改既有表主键（SQLite 不支持 ALTER PRIMARY KEY），对现有库零风险。
+CREATE TABLE IF NOT EXISTS progress_snapshot (
+    group_id      TEXT NOT NULL,
+    platform      TEXT NOT NULL,
+    user_id       TEXT NOT NULL,
+    handle        TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    metric_label  TEXT NOT NULL,
+    display_value TEXT NOT NULL,
+    sort_value    INTEGER NOT NULL,
+    delta         INTEGER,
+    current_metric_label TEXT NOT NULL DEFAULT '',
+    current_display_value TEXT NOT NULL DEFAULT '',
+    rating        INTEGER,
+    updated_at    REAL NOT NULL,
+    PRIMARY KEY (group_id, platform, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_progress_group_platform_sort
+    ON progress_snapshot (group_id, platform, sort_value DESC);
+
+CREATE TABLE IF NOT EXISTS progress_meta (
+    group_id     TEXT NOT NULL,
+    platform     TEXT NOT NULL,
+    refreshed_at REAL NOT NULL DEFAULT 0,
+    in_flight    INTEGER NOT NULL DEFAULT 0,
+    dirty_at     REAL NOT NULL DEFAULT 0,
+    errors_json  TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (group_id, platform)
+);
 """
+
+# 快照模式 → (快照表, 元数据表)。rank=群排行，progress=本周进步榜。
+_RANK_TABLES: Dict[str, Tuple[str, str]] = {
+    "rank": ("rank_snapshot", "rank_meta"),
+    "progress": ("progress_snapshot", "progress_meta"),
+}
+
+
+def _rank_tables(mode: str) -> Tuple[str, str]:
+    key = "progress" if str(mode).lower() == "progress" else "rank"
+    return _RANK_TABLES[key]
 
 
 def _now() -> float:
@@ -1059,22 +1101,25 @@ class AccountStore:
         group_id: str,
         platform: str,
         rows: List[Dict[str, Any]],
+        *,
+        mode: str = "rank",
     ) -> None:
-        """事务内整体替换某群某平台的排行快照。"""
+        """事务内整体替换某群某平台的排行快照（mode=rank/progress）。"""
+        table, _ = _rank_tables(mode)
 
         def _replace() -> None:
             conn = self._connect()
             try:
                 with conn:
                     conn.execute(
-                        "DELETE FROM rank_snapshot WHERE group_id=? AND platform=?",
+                        f"DELETE FROM {table} WHERE group_id=? AND platform=?",
                         (str(group_id), str(platform)),
                     )
                     now = _now()
                     for row in rows:
                         conn.execute(
-                            """
-                            INSERT OR REPLACE INTO rank_snapshot(
+                            f"""
+                            INSERT OR REPLACE INTO {table}(
                                 group_id, platform, user_id, handle, display_name,
                                 metric_label, display_value, sort_value, delta,
                                 current_metric_label, current_display_value, rating,
@@ -1111,12 +1156,13 @@ class AccountStore:
         await asyncio.to_thread(_replace)
 
     async def get_rank_rows(
-        self, group_id: str, platform: str
+        self, group_id: str, platform: str, *, mode: str = "rank"
     ) -> List[Dict[str, Any]]:
+        table, _ = _rank_tables(mode)
         rows = await asyncio.to_thread(
             self._query_sync,
-            """
-            SELECT * FROM rank_snapshot
+            f"""
+            SELECT * FROM {table}
             WHERE group_id=? AND platform=?
             ORDER BY sort_value DESC, display_name COLLATE NOCASE ASC, user_id ASC
             """,
@@ -1159,15 +1205,18 @@ class AccountStore:
         group_id: str,
         platform: str,
         errors: Optional[Sequence[Any]] = None,
+        *,
+        mode: str = "rank",
     ) -> None:
+        _, meta_table = _rank_tables(mode)
         errors_json = json.dumps(
             [self._format_error(item) for item in (errors or [])],
             ensure_ascii=False,
         )
         await asyncio.to_thread(
             self._execute_sync,
-            """
-            INSERT INTO rank_meta(
+            f"""
+            INSERT INTO {meta_table}(
                 group_id, platform, refreshed_at, in_flight, dirty_at, errors_json
             ) VALUES (?, ?, ?, 0, 0, ?)
             ON CONFLICT(group_id, platform) DO UPDATE SET
@@ -1185,11 +1234,14 @@ class AccountStore:
         platform: str,
         errors: Optional[Sequence[Any]] = None,
         refresh_started_at: Optional[float] = None,
+        *,
+        mode: str = "rank",
     ) -> None:
         """刷新成功后更新 refreshed_at，但保留刷新开始之后产生的新脏标记。
 
         避免“变更前的后台刷新完成，把刚产生的 dirty 清掉”。
         """
+        _, meta_table = _rank_tables(mode)
         errors_json = json.dumps(
             [self._format_error(item) for item in (errors or [])],
             ensure_ascii=False,
@@ -1197,15 +1249,15 @@ class AccountStore:
         started = float(refresh_started_at or _now())
         await asyncio.to_thread(
             self._execute_sync,
-            """
-            INSERT INTO rank_meta(
+            f"""
+            INSERT INTO {meta_table}(
                 group_id, platform, refreshed_at, in_flight, dirty_at, errors_json
             ) VALUES (?, ?, ?, 0, 0, ?)
             ON CONFLICT(group_id, platform) DO UPDATE SET
                 refreshed_at=excluded.refreshed_at,
                 in_flight=0,
                 dirty_at=CASE
-                    WHEN rank_meta.dirty_at > ? THEN rank_meta.dirty_at
+                    WHEN {meta_table}.dirty_at > ? THEN {meta_table}.dirty_at
                     ELSE 0
                 END,
                 errors_json=excluded.errors_json
@@ -1218,8 +1270,11 @@ class AccountStore:
         group_id: str,
         platform: str,
         errors: Optional[Sequence[Any]] = None,
+        *,
+        mode: str = "rank",
     ) -> None:
         """刷新出现错误时：保留错误摘要并把该快照标记为脏（短周期重试）。"""
+        _, meta_table = _rank_tables(mode)
         errors_json = json.dumps(
             [self._format_error(item) for item in (errors or [])],
             ensure_ascii=False,
@@ -1227,8 +1282,8 @@ class AccountStore:
         now = _now()
         await asyncio.to_thread(
             self._execute_sync,
-            """
-            INSERT INTO rank_meta(
+            f"""
+            INSERT INTO {meta_table}(
                 group_id, platform, refreshed_at, in_flight, dirty_at, errors_json
             ) VALUES (?, ?, 0, 0, ?, ?)
             ON CONFLICT(group_id, platform) DO UPDATE SET
@@ -1239,11 +1294,14 @@ class AccountStore:
             (str(group_id), str(platform), now, errors_json),
         )
 
-    async def mark_rank_dirty(self, group_id: str, platform: str) -> None:
+    async def mark_rank_dirty(
+        self, group_id: str, platform: str, *, mode: str = "rank"
+    ) -> None:
+        _, meta_table = _rank_tables(mode)
         await asyncio.to_thread(
             self._execute_sync,
-            """
-            INSERT INTO rank_meta(group_id, platform, refreshed_at, in_flight, dirty_at)
+            f"""
+            INSERT INTO {meta_table}(group_id, platform, refreshed_at, in_flight, dirty_at)
             VALUES (?, ?, 0, 0, ?)
             ON CONFLICT(group_id, platform) DO UPDATE SET dirty_at=excluded.dirty_at
             """,
@@ -1251,17 +1309,22 @@ class AccountStore:
         )
 
     async def list_stale_rank_meta(
-        self, *, max_age: float, active_platforms: Optional[Sequence[str]] = None
+        self,
+        *,
+        max_age: float,
+        active_platforms: Optional[Sequence[str]] = None,
+        mode: str = "rank",
     ) -> List[Dict[str, Any]]:
         """返回刷新时间超过 max_age（秒）或从未刷新的 (group, platform)。"""
+        _, meta_table = _rank_tables(mode)
 
         def _query() -> List[Dict[str, Any]]:
             conn = self._connect()
             try:
                 params: List[Any] = [_now() - float(max_age)]
-                sql = """
+                sql = f"""
                     SELECT group_id, platform, refreshed_at, dirty_at, in_flight
-                    FROM rank_meta
+                    FROM {meta_table}
                     WHERE refreshed_at < ? OR dirty_at > refreshed_at
                 """
                 if active_platforms:
@@ -1275,12 +1338,13 @@ class AccountStore:
         return await asyncio.to_thread(_query)
 
     async def get_rank_meta(
-        self, group_id: str, platform: str
+        self, group_id: str, platform: str, *, mode: str = "rank"
     ) -> Optional[Dict[str, Any]]:
+        _, meta_table = _rank_tables(mode)
         rows = await asyncio.to_thread(
             self._query_sync,
-            "SELECT group_id, platform, refreshed_at, in_flight, dirty_at, errors_json "
-            "FROM rank_meta WHERE group_id=? AND platform=?",
+            f"SELECT group_id, platform, refreshed_at, in_flight, dirty_at, errors_json "
+            f"FROM {meta_table} WHERE group_id=? AND platform=?",
             (str(group_id), str(platform)),
         )
         return rows[0] if rows else None
@@ -1298,6 +1362,7 @@ class AccountStore:
                     "profile_cache",
                     "fetch_failures",
                     "rank_snapshot",
+                    "progress_snapshot",
                 ):
                     row = conn.execute(
                         f"SELECT COUNT(*) AS n FROM {table}"
