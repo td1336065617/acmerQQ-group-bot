@@ -139,6 +139,10 @@ class RankService:
                 )
             except Exception as exc:  # noqa: BLE001 - 落库失败不影响本次回复
                 logger.warning("排行快照落库失败: %s", exc)
+        if progress and store is not None:
+            # 前台首次计算为了快速返回只补了“限量”成员的差值，
+            # 立即投递一次后台完整刷新，避免不完整快照被冻结整个窗口。
+            await self.request_refresh(gid, platform, progress=True)
         if dirty_pending is not None:
             dirty_pending.discard(gid)
         return rows, errors
@@ -174,6 +178,9 @@ class RankService:
                     platform,
                     progress=progress,
                     record_metrics=True,
+                    # 后台刷新没有人等待：允许补齐全部缺失成员的差值，
+                    # 这样前台首次查询的“限量快照”会被完整数据替换。
+                    full_detail=True,
                 )
                 if store is not None:
                     await self._persist(

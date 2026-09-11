@@ -37,7 +37,8 @@ class FakePlugin:
         return list(ROWS), []
 
     async def _collect_rank_rows_uncached(self, group_id, platform, *,
-                                          progress=False, record_metrics=True):
+                                          progress=False, record_metrics=True,
+                                          full_detail=False):
         self.compute_calls += 1
         return list(ROWS), [], [("u1", platform, 1700)]
 
@@ -73,25 +74,34 @@ def test_progress_read_persists_and_uses_snapshot(tmp_path):
 
         rows, errors = await service.read("g1", "codeforces", progress=True)
         assert rows and errors == []
-        assert plugin.compute_calls == 1
         # 落库到 progress_snapshot（与 rank_snapshot 相互独立）
         assert len(await store.get_rank_rows("g1", "codeforces", mode="progress")) == 1
         assert await store.get_rank_rows("g1", "codeforces") == []
 
+        # 首次（限量）计算后会投递一次后台完整刷新，等它结束
+        for _ in range(100):
+            if not service._jobs:
+                break
+            await asyncio.sleep(0.02)
+        calls_after_build = plugin.compute_calls
+        assert calls_after_build >= 1
+
         rows2, _ = await service.read("g1", "codeforces", progress=True)
         assert rows2
-        assert plugin.compute_calls == 1  # 命中快照，不再全群重算
+        assert plugin.compute_calls == calls_after_build  # 命中快照，不再全群重算
 
         # 标脏后 progress 也应失效（rank 的脏标记不影响 progress 快照表）
         await store.mark_rank_dirty("g1", "codeforces", mode="progress")
         rows3, _ = await service.read("g1", "codeforces", progress=True)
         assert rows3
-        for _ in range(50):
-            if plugin.compute_calls >= 2:
+        meta = None
+        for _ in range(100):
+            meta = await store.get_rank_meta(
+                "g1", "codeforces", mode="progress"
+            )
+            if meta is not None and float(meta["dirty_at"]) == 0:
                 break
             await asyncio.sleep(0.02)
-        assert plugin.compute_calls >= 2
-        meta = await store.get_rank_meta("g1", "codeforces", mode="progress")
         assert meta is not None
         assert float(meta["refreshed_at"]) >= float(meta["dirty_at"])
 

@@ -96,6 +96,10 @@ RANK_CACHE_TTL = 5 * 60
 RANK_CACHE_MAX_ENTRIES = 64
 RANK_FETCH_BATCH_SIZE = 100
 RANK_FETCH_CONCURRENCY = 8
+# 本周进步榜的差值优先用本地 Rating 历史计算（一次批量查询，零网络）。
+# 仅当本地缺少 7 天前基线时，才对“限量”成员回退拉取详细资料；
+# 这样首次计算的网络开销被限制在 K × (平台限速) 而非全群逐个拉取。
+PROGRESS_DETAIL_FALLBACK_LIMIT = 8
 # 配置/群快照的内存缓存时长：普通查询不需要每次都读 AstrBot KV；
 # WebUI 保存成功后会主动失效，外部直接改 KV 最多延迟该时长后生效。
 SETTINGS_CACHE_TTL_SECONDS = 2.0
@@ -377,6 +381,12 @@ class AcmerGroupBot(Star):
         await self.account_fetcher.initialize(
             self.fetcher.session, cache_store=cache_store
         )
+        # 启动时预热一次配置：确保渲染阈值（是否转图）在首个菜单/查询请求前
+        # 就是管理员配置的值，而不是渲染器默认值。
+        try:
+            await self.get_settings()
+        except Exception as exc:  # noqa: BLE001 - 配置读取失败不影响启动
+            logger.warning("启动预读配置失败: %s", exc)
         await self.scheduler.start()
         logger.info(
             "acmerQQ群机器人 已启动；若消息指令无响应，请检查 AstrBot "
@@ -450,6 +460,22 @@ class AcmerGroupBot(Star):
                 f"{field_name} 应在 {minimum} 到 {maximum} 之间"
             )
         return parsed
+
+    def _apply_cached_renderer_settings(self) -> None:
+        """在不能 await 的热路径上，用缓存里的 settings 同步刷新渲染阈值。
+
+        `_adaptive_results` 必须在 yield 纯文本前避免 await（否则被动回复会丢
+        换行），因此不能在它内部调用 `get_settings()`。这里改为读取已有的
+        settings 缓存来应用阈值，保证 needs_image 判断始终用管理员的配置值，
+        而不是渲染器的默认值。
+        """
+        cached = getattr(self, "_settings_cache", None)
+        if not cached:
+            return
+        try:
+            self._configure_output_renderer(cached[1])
+        except Exception as exc:  # noqa: BLE001 - 阈值应用失败不影响本次回复
+            logger.warning("应用渲染阈值失败: %s", exc)
 
     def _configure_output_renderer(self, settings: dict) -> None:
         renderer = getattr(self, "output_renderer", None)
@@ -1869,6 +1895,7 @@ class AcmerGroupBot(Star):
         *,
         progress: bool = False,
         record_metrics: bool = True,
+        full_detail: bool = False,
     ):
         started = time.perf_counter()
         member_ids = await self.account_registry.get_group_member_ids(group_id)
@@ -1890,7 +1917,6 @@ class AcmerGroupBot(Star):
         bulk_getter = getattr(self.account_fetcher, "get_profiles", None)
         if (
             platform == "codeforces"
-            and not progress
             and records
             and callable(bulk_getter)
         ):
@@ -1922,10 +1948,12 @@ class AcmerGroupBot(Star):
 
             async def fetch_one(item):
                 async with semaphore:
+                    # detail 一律用轻量资料：进步榜差值改由本地历史计算，
+                    # 避免全群逐个拉取平台 Rating 历史（CF 限速下可达 90 秒）。
                     return await self.account_fetcher.get_profile(
                         platform,
                         item[2],
-                        detail=progress,
+                        detail=False,
                         include_submissions=False,
                     )
 
@@ -2019,6 +2047,82 @@ class AcmerGroupBot(Star):
                     )
         if not isinstance(snapshot_deltas, dict):
             snapshot_deltas = {}
+
+        # 进步榜：本地历史缺少 7 天前基线的成员，限量回退拉取详细资料补差值。
+        # 首次计算因此只需 K 次网络请求（而非全群逐个拉取），其余成员会在
+        # 后续刷新中随本地 Rating 历史积累自动补齐；用轮转保证覆盖不同成员。
+        if progress and (PROGRESS_DETAIL_FALLBACK_LIMIT > 0 or full_detail):
+            identifier_by_user = {
+                str(user_id): identifier
+                for user_id, _record, identifier in records
+            }
+            missing = [
+                item
+                for item in metric_records
+                if direct_deltas.get(item[4]) is None
+                and snapshot_deltas.get(item[4]) is None
+            ]
+            if missing:
+                if full_detail:
+                    # 后台刷新：没有人等待，直接补齐全部缺失成员。
+                    selected = list(missing)
+                    self._progress_fallback_cursor = 0
+                else:
+                    cursor = int(getattr(self, "_progress_fallback_cursor", 0))
+                    cursor %= len(missing)
+                    ordered = missing[cursor:] + missing[:cursor]
+                    selected = ordered[:PROGRESS_DETAIL_FALLBACK_LIMIT]
+                    self._progress_fallback_cursor = (
+                        cursor + len(selected)
+                    ) % max(1, len(missing))
+                fallback_sem = asyncio.Semaphore(RANK_FETCH_CONCURRENCY)
+                fallback_calculator = delta_calculator
+
+                async def fetch_detail_delta(item):
+                    identifier = identifier_by_user.get(str(item[0]))
+                    if not identifier:
+                        return None
+                    async with fallback_sem:
+                        profile = await self.account_fetcher.get_profile(
+                            platform,
+                            identifier,
+                            detail=True,
+                            include_submissions=False,
+                        )
+                    value = (
+                        fallback_calculator(profile, days=7)
+                        if callable(fallback_calculator)
+                        else None
+                    )
+                    return item, profile, value
+
+                fallback_results = await asyncio.gather(
+                    *(fetch_detail_delta(item) for item in selected),
+                    return_exceptions=True,
+                )
+                filled_entries = []
+                for outcome in fallback_results:
+                    if isinstance(outcome, Exception) or outcome is None:
+                        continue
+                    item, profile, value = outcome
+                    if value is None:
+                        continue
+                    direct_deltas[item[4]] = value
+                    try:
+                        fallback_metric = self._profile_metric(profile)
+                    except Exception:  # noqa: BLE001 - 仅用于补历史
+                        fallback_metric = None
+                    if fallback_metric is not None:
+                        filled_entries.append(
+                            (
+                                item[0],
+                                fallback_metric["snapshot_key"],
+                                fallback_metric["value"],
+                            )
+                        )
+                if record_metrics and filled_entries:
+                    # 把补齐时拿到的 Rating 写入本地历史，后续刷新即可零网络。
+                    await self._record_rank_metrics(filled_entries)
 
         for user_id, record, result, metric, key in metric_records:
             delta = direct_deltas.get(key)
@@ -2643,6 +2747,8 @@ class AcmerGroupBot(Star):
         value = str(text or "").strip()
         if not value:
             return
+        # 同步应用已缓存的阈值配置（不 await，避免丢换行）。
+        self._apply_cached_renderer_settings()
         if not self.output_renderer.needs_image(value):
             # 短文本直接整段发送；不要在 yield 前 await get_settings，
             # 否则 AstrBot 被动回复链路会丢失 Plain 内的换行（实测）。
