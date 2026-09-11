@@ -20,7 +20,11 @@ from urllib.parse import urlparse
 
 from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
-from .output_renderer import AdaptiveOutputRenderer
+from .output_renderer import (
+    OUTPUT_CACHE_MAX_BYTES,
+    AdaptiveOutputRenderer,
+    prune_cache_dir,
+)
 
 CARD_FORMAT_VERSION = 16
 CARD_WIDTH = 1200
@@ -682,6 +686,13 @@ class AccountCardRenderer:
         ).expanduser().resolve()
         self.avatar_cache_dir = self.cache_dir / "avatars"
         self._lock = threading.Lock()
+
+    def prune(self, max_bytes: int = OUTPUT_CACHE_MAX_BYTES) -> int:
+        """按容量上限清理卡片/头像缓存，返回删除的文件数。"""
+        removed = prune_cache_dir(self.cache_dir, max_bytes)
+        # 头像单独设更小的上限，避免大量小文件长期堆积。
+        removed += prune_cache_dir(self.avatar_cache_dir, max_bytes // 4)
+        return removed
 
     def render_profile(
         self,

@@ -8,15 +8,94 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import unicodedata
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from astrbot.api import logger
 
 
 # QQ 消息不宜发送过长的纯文本；同时限制行数，避免很多短行挤成一条长消息。
 MAX_PLAIN_TEXT_CHARS = 1800
 MAX_PLAIN_TEXT_LINES = 36
 MAX_TEXT_CHUNK = 1500
+
+# 渲染失败后的冷却窗口：坏渲染环境（浏览器挂死/无字体）下，
+# 同进程内不重复等待几十秒，直接走纯文本兜底。
+RENDER_FAILURE_COOLDOWN = 300
+# 渲染器/字体探测结果的缓存时间，避免每次渲染都跑 which/fc-match。
+PROBE_CACHE_TTL = 600
+# 渲染图片缓存总容量上限（LRU 清理）。
+OUTPUT_CACHE_MAX_BYTES = 500 * 1024 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+_PROBE_CACHE: Dict[str, Tuple[float, Any]] = {}
+
+
+def _cached_probe(key: str, producer):
+    """带 TTL 的探测结果缓存（进程级）。"""
+    now = time.time()
+    hit = _PROBE_CACHE.get(key)
+    if hit is not None and now - hit[0] < PROBE_CACHE_TTL:
+        return hit[1]
+    value = producer()
+    _PROBE_CACHE[key] = (now, value)
+    return value
+
+
+def clear_probe_cache() -> None:
+    """清空探测缓存（测试或运行环境变化时使用）。"""
+    _PROBE_CACHE.clear()
+
+
+def prune_cache_dir(
+    cache_dir: Path, max_bytes: int = OUTPUT_CACHE_MAX_BYTES
+) -> int:
+    """按总容量上限清理渲染缓存（LRU：优先删除最久未使用的文件）。
+
+    返回删除的文件数。目录不存在或读取失败时静默返回 0。
+    """
+    directory = Path(cache_dir)
+    entries: List[Tuple[float, int, Path]] = []
+    total = 0
+    try:
+        for path in directory.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime, stat.st_size, path))
+            total += stat.st_size
+    except OSError:
+        return 0
+    if total <= max_bytes:
+        return 0
+    entries.sort(key=lambda item: item[0])
+    removed = 0
+    for _mtime, size, path in entries:
+        if total <= max_bytes:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        total -= size
+        removed += 1
+    return removed
+
+
+def _is_valid_png(path: Path) -> bool:
+    """基础 PNG 校验：排除损坏或被截断的图片。"""
+    try:
+        if not path.is_file() or path.stat().st_size <= 8:
+            return False
+        with path.open("rb") as handle:
+            return handle.read(8) == PNG_MAGIC
+    except OSError:
+        return False
 
 RENDER_WIDTH = 1200
 MIN_RENDER_HEIGHT = 420
@@ -148,11 +227,17 @@ class AdaptiveOutputRenderer:
         self.max_lines = 1
         self.configure(max_chars, max_lines)
         self._render_lock = threading.Lock()
+        # 上次渲染失败时间：冷却窗口内直接返回 None，避免重复长等待。
+        self._render_failed_at: Optional[float] = None
 
     def configure(self, max_chars: int, max_lines: int) -> None:
         """更新文字直发阈值；配置由调用方负责校验业务范围。"""
         self.max_chars = max(1, int(max_chars))
         self.max_lines = max(1, int(max_lines))
+
+    def prune(self, max_bytes: int = OUTPUT_CACHE_MAX_BYTES) -> int:
+        """按容量上限清理渲染图片缓存，返回删除的文件数。"""
+        return prune_cache_dir(self.cache_dir, max_bytes)
 
     def needs_image(self, text: str) -> bool:
         value = str(text or "").strip()
@@ -181,8 +266,19 @@ class AdaptiveOutputRenderer:
         with self._render_lock:
             try:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
-                if image_path.is_file() and image_path.stat().st_size > 0:
+                if _is_valid_png(image_path):
                     return image_path
+                if image_path.is_file():
+                    # 缓存文件损坏/被截断：删除后重新渲染。
+                    image_path.unlink(missing_ok=True)
+                    logger.warning("渲染缓存图片无效，已删除并重绘：%s", image_path.name)
+                # 刚失败过且仍在冷却期：不再重复启动浏览器/Pillow。
+                if (
+                    self._render_failed_at is not None
+                    and time.monotonic() - self._render_failed_at
+                    < RENDER_FAILURE_COOLDOWN
+                ):
+                    return None
                 html_tmp.write_text(
                     self._html_for_text(value), encoding="utf-8"
                 )
@@ -199,22 +295,33 @@ class AdaptiveOutputRenderer:
                     success = self._run_external_renderer(
                         kind, executable, html_path, image_tmp, height
                     )
-                if success:
+                if success and _is_valid_png(image_tmp):
                     try:
                         os.replace(image_tmp, image_path)
                     except OSError:
                         return None
+                    self._render_failed_at = None
                     return image_path
+                image_tmp.unlink(missing_ok=True)
 
             # Pillow 不一定被显式列入渲染器环境变量，最后再尝试一次，
             # 这样没有任何浏览器时仍能生成中文图片。
             image_tmp.unlink(missing_ok=True)
-            if self._render_with_pillow(value, image_tmp):
+            if self._render_with_pillow(value, image_tmp) and _is_valid_png(
+                image_tmp
+            ):
                 try:
                     os.replace(image_tmp, image_path)
                 except OSError:
                     return None
+                self._render_failed_at = None
                 return image_path
+            image_tmp.unlink(missing_ok=True)
+            self._render_failed_at = time.monotonic()
+            logger.warning(
+                "长文本转图片失败（无可用渲染器或渲染超时），%d 秒内不再重试",
+                RENDER_FAILURE_COOLDOWN,
+            )
             return None
 
     @staticmethod
@@ -328,6 +435,14 @@ class AdaptiveOutputRenderer:
             os.environ.get("ACMER_QQ_BOT_RENDERER")
             or os.environ.get("MENU_NAVIGATION_RENDERER")
         )
+        # 探测结果按环境变量缓存，避免每次渲染都跑 shutil.which。
+        return _cached_probe(
+            f"renderers:{configured or ''}",
+            lambda: AdaptiveOutputRenderer._probe_renderers(configured),
+        )
+
+    @staticmethod
+    def _probe_renderers(configured: Optional[str]) -> List[Tuple[str, str]]:
         candidates = [configured] if configured else []
         candidates.extend(
             [
@@ -374,6 +489,18 @@ class AdaptiveOutputRenderer:
 
     @staticmethod
     def _find_cjk_font_spec(*, bold: bool = False) -> Tuple[Optional[str], int]:
+        """返回中文字体路径（带进程级缓存，避免每次渲染跑 fc-match）。"""
+        key = "cjk:{}:{}:{}".format(
+            bool(bold),
+            os.environ.get("ACMER_QQ_BOT_FONT") or "",
+            os.environ.get("ACMER_QQ_BOT_FONT_INDEX") or "",
+        )
+        return _cached_probe(
+            key, lambda: AdaptiveOutputRenderer._probe_cjk_font_spec(bold=bold)
+        )
+
+    @staticmethod
+    def _probe_cjk_font_spec(*, bold: bool = False) -> Tuple[Optional[str], int]:
         """返回真正的简体中文字体路径及 TTC face index。"""
         configured = os.environ.get("ACMER_QQ_BOT_FONT")
         if configured and Path(configured).is_file():
@@ -463,6 +590,17 @@ class AdaptiveOutputRenderer:
 
     @staticmethod
     def _find_emoji_font_spec() -> Tuple[Optional[str], int]:
+        """返回 Emoji 字体路径（带进程级缓存）。"""
+        key = "emoji:{}:{}".format(
+            os.environ.get("ACMER_QQ_BOT_EMOJI_FONT") or "",
+            os.environ.get("ACMER_QQ_BOT_EMOJI_FONT_INDEX") or "",
+        )
+        return _cached_probe(
+            key, AdaptiveOutputRenderer._probe_emoji_font_spec
+        )
+
+    @staticmethod
+    def _probe_emoji_font_spec() -> Tuple[Optional[str], int]:
         """优先使用插件内置 Emoji 字体，再尝试系统字体。"""
         configured = os.environ.get("ACMER_QQ_BOT_EMOJI_FONT")
         if configured:

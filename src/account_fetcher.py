@@ -55,8 +55,10 @@ ATCODER_SUBMISSIONS_URL = (
     "https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions"
 )
 
-PROFILE_CACHE_TTL = 10 * 60
-DETAIL_CACHE_TTL = 10 * 60
+# 资料/详细资料新鲜窗口：按评审结论放宽到 30 分钟（各 OJ Rating 一天约变化
+# 1~2 次，无需高敏感度），force 路径仍然即时抓取。
+PROFILE_CACHE_TTL = 30 * 60
+DETAIL_CACHE_TTL = 30 * 60
 ANALYSIS_CACHE_TTL = 12 * 60 * 60
 ANALYSIS_FAILURE_CACHE_TTL = 5 * 60
 RESOURCE_CACHE_TTL = 24 * 60 * 60

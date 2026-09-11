@@ -104,6 +104,84 @@ def test_stale_cache_is_fallback_on_fetch_error(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_warm_refreshes_expiring_platform(tmp_path, monkeypatch):
+    async def scenario():
+        fetcher = ContestFetcher(
+            cache_path=tmp_path / "contest_cache.json",
+            cache_ttl=300,
+        )
+        # 在线平台 TTL 300s，缓存已存在 250s → 剩余 50s < 90s 窗口，应预热
+        fetcher._cache["codeforces"] = (time.time() - 250, [])
+        calls = 0
+
+        async def fake_fetch():
+            nonlocal calls
+            calls += 1
+            return []
+
+        monkeypatch.setattr(fetcher, "_fetch_codeforces", fake_fetch)
+        warmed = await fetcher.warm(
+            ["codeforces"], window=90, max_platforms=1
+        )
+        assert warmed == 1
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_warm_skips_fresh_and_uncached_platforms(tmp_path, monkeypatch):
+    async def scenario():
+        fetcher = ContestFetcher(
+            cache_path=tmp_path / "contest_cache.json",
+            cache_ttl=300,
+        )
+        # 刚抓取过：剩余 TTL 充足，不应预热
+        fetcher._cache["codeforces"] = (time.time(), [])
+        calls = 0
+
+        async def fake_fetch():
+            nonlocal calls
+            calls += 1
+            return []
+
+        monkeypatch.setattr(fetcher, "_fetch_codeforces", fake_fetch)
+        warmed = await fetcher.warm(["codeforces"], window=90, max_platforms=1)
+        assert warmed == 0
+        assert calls == 0
+        # 从未抓取过的平台也不在预热范围（交给首次用户请求）
+        warmed = await fetcher.warm(["luogu"], window=90, max_platforms=1)
+        assert warmed == 0
+
+    asyncio.run(scenario())
+
+
+def test_warm_failure_sets_backoff(tmp_path, monkeypatch):
+    async def scenario():
+        fetcher = ContestFetcher(
+            cache_path=tmp_path / "contest_cache.json",
+            cache_ttl=300,
+        )
+        fetcher._cache["codeforces"] = (time.time() - 250, [])
+        calls = 0
+
+        async def failed_fetch():
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(fetcher, "_fetch_codeforces", failed_fetch)
+        # 第一次：尝试并失败，进入退避
+        warmed = await fetcher.warm(["codeforces"], window=90, max_platforms=1)
+        assert warmed == 0
+        assert calls == 1
+        # 第二次：仍在退避窗口内，不再尝试
+        warmed = await fetcher.warm(["codeforces"], window=90, max_platforms=1)
+        assert warmed == 0
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
 async def _main():
     fetcher = ContestFetcher()
     await fetcher.initialize()

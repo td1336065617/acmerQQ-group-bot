@@ -114,6 +114,9 @@ class ContestFetcher:
         self._cache: Dict[str, Tuple[float, list]] = {}
         self._source_urls: Dict[str, str] = {}
         self._fetch_locks: Dict[str, asyncio.Lock] = {}
+        # 预热失败退避：{platform: (下次允许预热时间, 连续失败次数)}，
+        # 避免某个平台持续抓取失败时每 30 秒重试、打爆对端。
+        self._warm_backoff: Dict[str, Tuple[float, int]] = {}
         self._cache_loaded = False
         self.cache_path = Path(cache_path) if cache_path else (
             Path(__file__).resolve().parent.parent / "data" / CACHE_FILE_NAME
@@ -155,10 +158,11 @@ class ContestFetcher:
 
         async with lock:
             # 二次检查很重要：多个群同时触发时，排队中的协程直接复用
-            # 前一个协程刚写入的结果；force 只会绕过本次请求之前的缓存。
+            # 前一个协程刚写入的结果。force=True 时不再复用“本次请求之前
+            # 就存在的旧缓存”，但保留对并发刷新的复用（cached[0] >= 请求开始）。
             cached = self._cache.get(platform)
             if cached and (
-                self._is_cache_fresh(platform, cached)
+                (not force and self._is_cache_fresh(platform, cached))
                 or cached[0] >= request_started
             ):
                 self._log_cache_hit(platform, cached[0], joined=True)
@@ -218,6 +222,87 @@ class ContestFetcher:
     ) -> bool:
         current = time.time() if now is None else now
         return current - cached[0] < self._cache_ttl(platform)
+
+    def _is_cache_expiring_soon(
+        self,
+        platform: str,
+        window: float,
+        now: Optional[float] = None,
+    ) -> bool:
+        """缓存是否将在 window 秒内过期（用于后台预热）。"""
+        cached = self._cache.get(platform)
+        if cached is None:
+            return True
+        current = time.time() if now is None else now
+        remaining = self._cache_ttl(platform) - (current - cached[0])
+        return remaining <= window
+
+    async def warm(
+        self,
+        platforms: Optional[list] = None,
+        *,
+        window: float = 90.0,
+        max_platforms: int = 1,
+    ) -> int:
+        """后台预热：把即将过期的平台提前刷新，避免用户请求时同步等待。
+
+        返回本次实际刷新成功的平台数。失败按平台做指数退避，且每个 tick
+        的尝试次数受 max_platforms 限制，避免失败风暴打爆对端。
+        并发/失败都由 fetch_platform 内部的 single-flight 与旧缓存兜底处理。
+        """
+        candidates = list(platforms) if platforms else list(QUERY_PLATFORMS)
+        limit = max(1, int(max_platforms))
+        now = time.time()
+        warmed = 0
+        attempts = 0
+        for platform in candidates:
+            if attempts >= limit:
+                break
+            if platform not in self._cache:
+                # 从未抓取过：交给首次用户请求，避免启动瞬间打满网络。
+                continue
+            if not self._is_cache_expiring_soon(platform, window):
+                continue
+            backoff = self._warm_backoff.get(platform)
+            if backoff is not None and now < backoff[0]:
+                continue
+            label = PLATFORM_LABELS.get(platform, platform)
+            attempts += 1
+            before = self._cache.get(platform)
+            before_ts = before[0] if before else None
+            try:
+                # force=True：绕过尚未过期的缓存真正刷新，但 single-flight
+                # 仍然生效，多个并发预热不会重复抓取。
+                contests, error = await self.fetch_platform(platform, force=True)
+                after = self._cache.get(platform)
+                after_ts = after[0] if after else None
+                # 注意：抓取失败时 fetch_platform 会回退旧缓存并返回 error=None，
+                # 因此必须用“缓存时间戳是否前进”判断是否真的刷新成功。
+                refreshed = after_ts is not None and after_ts != before_ts
+                if error or not refreshed:
+                    self._record_warm_failure(platform)
+                    logger.warning(
+                        "后台预热 %s 未刷新（%s），进入退避",
+                        label,
+                        error or "回退旧缓存",
+                    )
+                else:
+                    self._warm_backoff.pop(platform, None)
+                    logger.info(
+                        "后台预热完成：%s，共 %d 场", label, len(contests)
+                    )
+                    warmed += 1
+            except Exception as exc:  # noqa: BLE001 - 预热失败不影响主流程
+                self._record_warm_failure(platform)
+                logger.warning("后台预热 %s 异常：%s", label, exc)
+        return warmed
+
+    def _record_warm_failure(self, platform: str) -> None:
+        """记录预热失败并设置指数退避（5 分钟起，最长 30 分钟）。"""
+        _, failures = self._warm_backoff.get(platform, (0.0, 0))
+        failures = min(failures + 1, 6)
+        delay = min(300 * (2 ** (failures - 1)), 1800)
+        self._warm_backoff[platform] = (time.time() + delay, failures)
 
     def _log_cache_hit(
         self, platform: str, fetched_at: float, *, joined: bool = False

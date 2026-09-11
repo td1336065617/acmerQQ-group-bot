@@ -12,6 +12,8 @@ from .utils import validate_hhmm
 
 TICK_SECONDS = 30
 REMIND_MINUTES = 15
+# 比赛数据后台预热窗口：TTL 到期前多少秒开始提前刷新（在线平台 TTL 5 分钟）。
+CONTEST_WARM_WINDOW_SECONDS = 90
 # 提醒去重表：超过该长度时只保留最近 1000 条（与旧实现一致）。
 REMINDED_SOFT_LIMIT = 2000
 REMINDED_KEEP = 1000
@@ -65,6 +67,17 @@ class PushScheduler:
                     await self._maybe_remind(group, now, reminded, platform_cache)
             except Exception:
                 logger.exception("群 %s 定时推送处理失败", group.group_id)
+        # 比赛数据后台预热：在 TTL 到期前 90 秒提前刷新一个平台，
+        # 使用户请求不再撞上“缓存过期后同步抓取”的卡顿。
+        try:
+            warmer = getattr(self.plugin.fetcher, "warm", None)
+            if callable(warmer):
+                await warmer(
+                    window=CONTEST_WARM_WINDOW_SECONDS,
+                    max_platforms=1,
+                )
+        except Exception:  # noqa: BLE001 - 预热失败不影响推送
+            logger.warning("比赛数据后台预热失败", exc_info=True)
         # 约每 5 分钟（10 个 tick）淘汰一次账号抓取器的进程内缓存，
         # 并把标脏的资料/负缓存批量落库（重启不冷）。
         self._prune_counter += 1
@@ -105,6 +118,18 @@ class PushScheduler:
                     )
                     if callable(stale_refresher):
                         await stale_refresher()
+                # 渲染图片缓存按容量上限（默认 500MB）LRU 清理，
+                # 避免 output_cache/account_cards 无限增长。
+                for holder in (
+                    getattr(self.plugin, "output_renderer", None),
+                    getattr(self.plugin, "account_card_renderer", None),
+                ):
+                    trimmer = getattr(holder, "prune", None)
+                    if callable(trimmer):
+                        try:
+                            await asyncio.to_thread(trimmer)
+                        except Exception:  # noqa: BLE001
+                            logger.warning("渲染缓存清理失败", exc_info=True)
             except Exception:  # noqa: BLE001 - 缓存清理失败不影响推送
                 logger.warning("账号抓取器缓存清理失败", exc_info=True)
 
