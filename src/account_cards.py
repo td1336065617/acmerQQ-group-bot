@@ -213,6 +213,33 @@ def _profile_field(profile: object, key: str, default=None):
     return default
 
 
+# Codeforces 标准段位 → 社区通用缩写。用户自定义头衔（maxRank 可能是任意文本，
+# 实测有用户直接把用户名当称号）不在映射内，会原样保留并由布局层兜底截断。
+CF_RANK_ABBREVIATIONS = {
+    "legendary grandmaster": "LG",
+    "international grandmaster": "IGM",
+    "grandmaster": "GM",
+    "international master": "IM",
+    "master": "M",
+    "candidate master": "CM",
+    "expert": "EX",
+    "specialist": "SP",
+    "pupil": "PU",
+    "newbie": "NB",
+    "unrated": "未评级",
+}
+
+
+def _abbreviate_rank_text(platform: object, value: object) -> str:
+    """把 Codeforces 标准段位名缩写为通用简称（其它平台/自定义头衔原样返回）。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if str(platform or "").casefold() != "codeforces":
+        return text
+    return CF_RANK_ABBREVIATIONS.get(text.casefold(), text)
+
+
 def _primary_metric(profile: object) -> tuple[str, str]:
     platform = str(_profile_field(profile, "platform", "") or "")
     rating = _profile_field(profile, "rating")
@@ -241,9 +268,10 @@ def _profile_stats(profile: object) -> List[tuple[str, str]]:
     if max_rating is not None:
         stats.append(("最高 Rating", _format_number(max_rating)))
 
-    max_rank_text = str(
-        _profile_field(profile, "max_rank_text", "") or ""
-    ).strip()
+    max_rank_text = _abbreviate_rank_text(
+        _profile_field(profile, "platform", ""),
+        _profile_field(profile, "max_rank_text", "") or "",
+    )
     if max_rank_text:
         stats.append(("最高段位", max_rank_text))
 
@@ -1254,6 +1282,28 @@ class AccountCardRenderer:
             else:
                 break
         return fitted
+
+    @classmethod
+    def _pillow_stat_columns(
+        cls,
+        values: List[str],
+        font,
+        max_width: float,
+        *,
+        preferred: int = 4,
+        padding: float = 14,
+    ) -> int:
+        """统计网格列数自适应：优先用 preferred，放不下最宽单元格就递减。
+
+        最少返回 2 列；若 2 列仍放不下，由调用方用省略号截断兜底。
+        """
+        if not values:
+            return max(2, int(preferred))
+        widest = max(cls._pillow_text_width(value, font) for value in values)
+        for columns in range(max(2, int(preferred)), 1, -1):
+            if widest + padding <= max_width / columns:
+                return columns
+        return 2
 
     @classmethod
     def _overview_row_height(cls, row: object) -> int:
@@ -2865,9 +2915,21 @@ class AccountCardRenderer:
                 font=body_font,
                 fill="#704966",
             )
+            rank_display = _abbreviate_rank_text(
+                profile.platform,
+                _profile_field(profile, "rank_text", "")
+                or _profile_field(profile, "color", "")
+                or "未评级",
+            )
+            rank_x = x + (420 if single else 370)
+            rank_y = y + (180 if single else 120)
             draw.text(
-                (x + (420 if single else 370), y + (180 if single else 120)),
-                profile.rank_text or profile.color or "未评级",
+                (rank_x, rank_y),
+                cls._fit_rank_pillow_text(
+                    rank_display,
+                    body_font,
+                    max(0, (x + card_w - 18) - rank_x),
+                ),
                 font=body_font,
                 fill="#5e3b5d",
             )
@@ -2875,18 +2937,31 @@ class AccountCardRenderer:
                 f"{label}：{value}"
                 for label, value in _profile_stats(profile)
             ]
-            columns = 4 if single else 2
-            detail_width = (card_w - 50) / columns
             detail_top = y + (220 if single else 164)
+            content_x = x + 25
+            content_w = card_w - 50
+            # C：列数按最宽单元格自适应（4→3→2）
+            columns = cls._pillow_stat_columns(
+                details,
+                body_font,
+                content_w,
+                preferred=4 if single else 2,
+            )
+            detail_width = content_w / columns
+            cell_padding = 14
             for line_index, value in enumerate(details):
                 detail_col = line_index % columns
                 detail_row = line_index // columns
+                # A：仍超宽的单元格（例如自定义长头衔）用省略号兜底
+                fitted = cls._fit_rank_pillow_text(
+                    value, body_font, detail_width - cell_padding
+                )
                 draw.text(
                     (
-                        int(x + 25 + detail_col * detail_width),
+                        int(content_x + detail_col * detail_width),
                         int(detail_top + detail_row * 27),
                     ),
-                    value,
+                    fitted,
                     font=body_font,
                     fill="#6e4a67",
                 )
