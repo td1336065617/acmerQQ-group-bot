@@ -8,7 +8,7 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
 import aiohttp
@@ -74,8 +74,10 @@ RATING_HISTORY_LIMIT = 200
 CF_SUBMISSION_SCAN_LIMIT = 50000
 CF_SUBMISSION_PAGE_SIZE = 10000
 # 分析缓存版本：扫描上限/分析口径变化时 +1，旧的持久化分析缓存会被自动忽略，
-# 无需等待 12 小时 TTL 或手动清库。（v1 = 旧的“最多 10000 条”口径）
-ANALYSIS_CACHE_VERSION = 2
+# 无需等待 12 小时 TTL 或手动清库。（v2 = CF 5万/AtCoder 2万 上限口径）
+ANALYSIS_CACHE_VERSION = 3
+# 打卡热力图窗口：近 12 个月。
+ACTIVITY_HEATMAP_DAYS = 365
 NOWCODER_ANALYSIS_PAGE_SIZE = 100
 NOWCODER_ANALYSIS_MAX_PAGES = 20
 NOWCODER_PROBLEM_META_LIMIT = 300
@@ -1092,15 +1094,17 @@ class AccountFetcher:
                         )
         return profile
 
-    async def _cf_scan_submissions(
-        self, canonical: str
-    ) -> Tuple[list, bool]:
+    async def _cf_scan_submissions(self, canonical: str) -> Tuple[list, bool]:
         """翻页扫描 Codeforces 提交记录；返回 (rows, 是否读完全部公开记录)。
 
         CF 单次请求文档上限为 CF_SUBMISSION_PAGE_SIZE 条，因此按页抓取：
         - 普通账号第一页就不满 → 一次请求返回，开销与旧实现相同；
-        - 重度账号（如 2 万+ 提交）会翻 2~5 页，但结果有 12 小时缓存，
-          且只在个人资料卡的分析路径触发，不影响群排行。
+        - 重度账号（如 2 万+ 提交）会翻 2~5 页，直到读完或触达上限，
+          结果有 12 小时缓存，且只在个人资料卡的分析路径触发，不影响群排行。
+
+        注意：这里**不能**为了“打卡热力图只需一年”而提前停止翻页——提交次数、
+        通过题数、难度分布等统计口径依赖全量扫描，提前收手会让重度账号的
+        统计被低估（曾因此让 5 万上限失效）。
         """
         rows: list = []
         offset = 1
@@ -1296,6 +1300,68 @@ class AccountFetcher:
         return distribution, len(accepted_ratings)
 
     @staticmethod
+    def _build_activity_daily(
+        timestamps: Iterable[Optional[float]],
+        *,
+        days: int = ACTIVITY_HEATMAP_DAYS,
+        now: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """把提交时间戳聚合成「按天打卡」数据，供热力图与连续天数使用。
+
+        - 分日统一按北京时间（CN_TZ），与卡片其它时间字段一致；
+        - 只保留最近 days 天（含今天），更早的记录丢弃；
+        - 计数口径为当天**提交条数**（与 Codeforces 官方热力图一致）。
+        """
+        current = time.time() if now is None else float(now)
+        today = datetime.fromtimestamp(current, tz=CN_TZ).date()
+        earliest = today - timedelta(days=max(1, int(days)) - 1)
+        daily: Dict[str, int] = {}
+        for value in timestamps:
+            timestamp = _parse_timestamp(value)
+            if timestamp is None:
+                continue
+            if timestamp > current + 86400:
+                # 未来时间戳（时钟偏差）直接忽略，避免把今天之后的日子点亮。
+                continue
+            day = datetime.fromtimestamp(timestamp, tz=CN_TZ).date()
+            if day < earliest or day > today:
+                continue
+            key = day.isoformat()
+            daily[key] = daily.get(key, 0) + 1
+
+        def _streak(anchor: date) -> int:
+            length = 0
+            cursor = anchor
+            while cursor >= earliest and daily.get(cursor.isoformat()):
+                length += 1
+                cursor -= timedelta(days=1)
+            return length
+
+        # 当前连续：今天有提交就从今天数；今天还没提交则从昨天数（不归零）。
+        anchor = today if daily.get(today.isoformat()) else today - timedelta(days=1)
+        current_streak = _streak(anchor)
+
+        longest = 0
+        running = 0
+        cursor = earliest
+        while cursor <= today:
+            if daily.get(cursor.isoformat()):
+                running += 1
+                longest = max(longest, running)
+            else:
+                running = 0
+            cursor += timedelta(days=1)
+
+        return {
+            "daily": daily,
+            "active_days": len(daily),
+            "current_streak": current_streak,
+            "longest_streak": longest,
+            "start": earliest.isoformat(),
+            "end": today.isoformat(),
+        }
+
+    @staticmethod
     def _build_cf_analysis(
         rows: list,
         difficulty_distribution: List[Dict[str, Any]],
@@ -1313,6 +1379,7 @@ class AccountFetcher:
         active_days_30 = set()
         active_days_90 = set()
         now = time.time()
+        submit_timestamps: List[Optional[float]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -1322,6 +1389,7 @@ class AccountFetcher:
             )
             language_counts[language] = language_counts.get(language, 0) + 1
             timestamp = _parse_timestamp(row.get("creationTimeSeconds"))
+            submit_timestamps.append(timestamp)
             if timestamp is None:
                 continue
             age = now - timestamp
@@ -1330,6 +1398,9 @@ class AccountFetcher:
                 active_days_30.add(day)
             if 0 <= age <= 90 * 86400:
                 active_days_90.add(day)
+        activity = AccountFetcher._build_activity_daily(
+            submit_timestamps, now=now
+        )
         # scanned_all=True 表示最后一页不满（已读完公开记录）；None 时按旧口径
         # 用 len(rows) < 上限推断，兼容其它调用方。
         complete = (
@@ -1360,6 +1431,14 @@ class AccountFetcher:
             "acceptance_rate": acceptance_rate,
             "active_days_30": len(active_days_30),
             "active_days_90": len(active_days_90),
+            "activity_daily": activity["daily"],
+            "activity_summary": {
+                "active_days": activity["active_days"],
+                "current_streak": activity["current_streak"],
+                "longest_streak": activity["longest_streak"],
+                "start": activity["start"],
+                "end": activity["end"],
+            },
             "difficulty_title": "Codeforces 题目难度分布",
             "difficulty_distribution": list(difficulty_distribution),
             "language_distribution": _distribution_rows(
@@ -2791,6 +2870,10 @@ class AccountFetcher:
                     timestamp,
                     tz=CN_TZ,
                 ).date())
+        activity = AccountFetcher._build_activity_daily(
+            (item.get("epoch_second") for item in submissions if isinstance(item, dict)),
+            now=now,
+        )
 
         acceptance_rate = (
             round(len(accepted) / len(submissions) * 100, 1)
@@ -2825,6 +2908,14 @@ class AccountFetcher:
             "active_days_90": len(active_days_90),
             "submissions_30": submissions_30,
             "submissions_90": submissions_90,
+            "activity_daily": activity["daily"],
+            "activity_summary": {
+                "active_days": activity["active_days"],
+                "current_streak": activity["current_streak"],
+                "longest_streak": activity["longest_streak"],
+                "start": activity["start"],
+                "end": activity["end"],
+            },
             "difficulty_title": "AtCoder 估计难度分布",
             "difficulty_distribution": difficulty_distribution,
             "category_title": "AtCoder 题目系列",

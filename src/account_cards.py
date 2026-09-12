@@ -13,7 +13,7 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
@@ -1098,6 +1098,13 @@ class AccountCardRenderer:
         analysis_height = _analysis_chart_height(profile)
         if analysis_height:
             height += analysis_height + 10
+        activity_height = cls._activity_heatmap_height(
+            profile,
+            1010 if compact else 471,
+            compact=not compact,
+        )
+        if activity_height:
+            height += activity_height + 10
         secondary_chart_height = _analysis_secondary_chart_height(profile)
         if secondary_chart_height:
             height += secondary_chart_height + 10
@@ -1502,6 +1509,57 @@ class AccountCardRenderer:
         )
 
     @classmethod
+    def _activity_heatmap_html(
+        cls, profile: object, *, compact: bool = False
+    ) -> str:
+        """打卡热力图（HTML 路径）；与 Pillow 路径共用同一份按天数据。"""
+        payload = cls._activity_payload(profile)
+        if payload is None:
+            return ""
+        daily, summary = payload
+        weeks = 26 if compact else 53
+        columns = cls._activity_columns(daily, summary, weeks=weeks)
+        active_days = int(summary.get("active_days") or len(daily))
+        current = int(summary.get("current_streak") or 0)
+        longest = int(summary.get("longest_streak") or 0)
+        cells = []
+        for column in columns:
+            for count in column:
+                if count is None:
+                    cells.append('<i class="activity-cell activity-empty"></i>')
+                    continue
+                level = cls._activity_level(count)
+                cells.append(
+                    '<i class="activity-cell activity-level-'
+                    f'{level}" title="{count} 次"></i>'
+                )
+        legend = "".join(
+            f'<i class="activity-cell activity-level-{level}"></i>'
+            for level in range(5)
+        )
+        if compact:
+            stats = f"活跃 {active_days} 天 · 连续 {current} 天"
+            title = "近 6 个月打卡"
+        else:
+            stats = (
+                f"一年活跃 {active_days} 天 · 当前连续 {current} 天 · "
+                f"最长 {longest} 天"
+            )
+            title = "近 12 个月打卡"
+        return (
+            '<div class="activity-panel">'
+            f'<div class="activity-title">{_escape(title)}</div>'
+            f'<div class="activity-grid" style="--weeks:{weeks}">'
+            f'{"".join(cells)}</div>'
+            '<div class="activity-legend">'
+            '<span class="activity-legend-scale">少'
+            f"{legend}多</span>"
+            f'<span class="activity-legend-text">{_escape(stats)}</span>'
+            "</div>"
+            "</div>"
+        )
+
+    @classmethod
     def _secondary_analysis_html(cls, profile: object) -> str:
         items, title = _analysis_secondary_chart_items(profile)
         if not items:
@@ -1655,6 +1713,7 @@ class AccountCardRenderer:
     ) -> str:
         rank_data = group_ranks or {}
         image_sources = avatar_sources or []
+        single = len(profiles) == 1
         cards = []
         for index, profile in enumerate(profiles):
             start, end = PLATFORM_COLORS.get(
@@ -1679,6 +1738,9 @@ class AccountCardRenderer:
             extras = _profile_extra_text(profile)
             latest = profile.recent_contests[0] if profile.recent_contests else {}
             difficulty_html = cls._difficulty_html(profile)
+            activity_html = cls._activity_heatmap_html(
+                profile, compact=not single
+            )
             secondary_analysis_html = cls._secondary_analysis_html(profile)
             analysis_summary_html = cls._analysis_summary_html(profile)
             rating_history_html = cls._rating_history_html(profile)
@@ -1745,6 +1807,7 @@ class AccountCardRenderer:
                   <div class="stats">{details_html}</div>
                   <div class="profile-meta">
                     {difficulty_html}
+                    {activity_html}
                     {secondary_analysis_html}
                     {rating_history_html}
                     {analysis_summary_html}
@@ -2037,6 +2100,20 @@ class AccountCardRenderer:
     .group-rank.muted {{ color:#6e4a67; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
     .difficulty-panel, .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
+    .activity-panel {{ flex:1 1 100%; min-width:0; padding:12px 14px 10px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
+    .activity-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; margin-bottom:8px; }}
+    .activity-grid {{ display:grid; grid-template-rows:repeat(7, 1fr); grid-auto-flow:column; grid-auto-columns:1fr; gap:2px; }}
+    .activity-cell {{ display:block; width:100%; aspect-ratio:1 / 1; border-radius:2px; background:#efe6ec; }}
+    .activity-empty {{ background:transparent; }}
+    .activity-level-0 {{ background:#efe6ec; }}
+    .activity-level-1 {{ background:#f7cfe1; }}
+    .activity-level-2 {{ background:#f0a1c4; }}
+    .activity-level-3 {{ background:#e467a5; }}
+    .activity-level-4 {{ background:#b83f7d; }}
+    .activity-legend {{ display:flex; align-items:center; gap:10px; margin-top:8px; color:#6e4a67; font-size:12px; line-height:1.2; }}
+    .activity-legend-scale {{ display:flex; align-items:center; gap:3px; color:#8a6b83; }}
+    .activity-legend-scale .activity-cell {{ width:9px; height:9px; aspect-ratio:auto; }}
+    .activity-legend-text {{ min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
     .difficulty-title {{ display:flex; align-items:center; color:#6b4564; font-size:14px; line-height:1.35; font-weight:800; letter-spacing:.2px; margin-bottom:9px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
     .difficulty-bars {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 14px; }}
     .difficulty-row {{ display:grid; grid-template-columns:90px minmax(48px,1fr) 42px; align-items:center; gap:8px; min-width:0; min-height:22px; }}
@@ -2401,6 +2478,172 @@ class AccountCardRenderer:
             )
         return height
 
+    # ------------------------------------------------------------------
+    # 打卡热力图（近 12 个月，Codeforces / AtCoder）
+    # ------------------------------------------------------------------
+    ACTIVITY_LEVEL_COLORS = (
+        "#efe6ec",  # 0 次
+        "#f7cfe1",  # 1-2 次
+        "#f0a1c4",  # 3-5 次
+        "#e467a5",  # 6-10 次
+        "#b83f7d",  # 10+ 次
+    )
+
+    @staticmethod
+    def _activity_payload(profile: object):
+        """取出按天打卡数据与摘要；平台不支持或无数据时返回 None。"""
+        analysis = _profile_field(profile, "analysis", {}) or {}
+        if not isinstance(analysis, dict):
+            return None
+        daily = analysis.get("activity_daily")
+        if not isinstance(daily, dict) or not daily:
+            return None
+        summary = analysis.get("activity_summary")
+        return daily, (summary if isinstance(summary, dict) else {})
+
+    @classmethod
+    def _activity_level(cls, count: int) -> int:
+        if count <= 0:
+            return 0
+        if count <= 2:
+            return 1
+        if count <= 5:
+            return 2
+        if count <= 10:
+            return 3
+        return 4
+
+    @classmethod
+    def _activity_columns(cls, daily: dict, summary: dict, *, weeks: int):
+        """构造 weeks 列 × 7 行（周一~周日）的日期矩阵，最后一列包含今天。
+
+        返回 [[count|None, ...7], ...]；未来日期用 None 占位不绘制。
+        """
+        end_text = str(summary.get("end") or "").strip()
+        try:
+            today = date.fromisoformat(end_text) if end_text else date.today()
+        except ValueError:
+            today = date.today()
+        end_of_week = today + timedelta(days=6 - today.weekday())
+        start = end_of_week - timedelta(days=weeks * 7 - 1)
+        columns = []
+        for col in range(weeks):
+            column = []
+            for row in range(7):
+                day = start + timedelta(days=col * 7 + row)
+                if day > today:
+                    column.append(None)
+                else:
+                    column.append(int(daily.get(day.isoformat()) or 0))
+            columns.append(column)
+        return columns
+
+    @classmethod
+    def _activity_heatmap_height(
+        cls, profile: object, width: int, *, compact: bool = False
+    ) -> int:
+        """预估热力图占用高度（供卡片总高计算），无数据返回 0。"""
+        if cls._activity_payload(profile) is None:
+            return 0
+        gap = 2
+        weeks = 26 if compact else 53
+        cell = max(3.0, min(15.0, (width + gap) / weeks - gap))
+        if cell < 6:
+            return 20 + 8 + 18 + 4  # 标题 + 间距 + 摘要行
+        return int(20 + (7 * (cell + gap) - gap) + 8 + 18 + 4)
+
+    @classmethod
+    def _pillow_activity_heatmap(
+        cls,
+        draw,
+        profile: object,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        title_font,
+        label_font,
+        compact: bool = False,
+    ) -> int:
+        """绘制「近 12 个月打卡」热力图，返回占用高度（0 表示未绘制）。"""
+        payload = cls._activity_payload(profile)
+        if payload is None:
+            return 0
+        daily, summary = payload
+        weeks = 26 if compact else 53
+        gap = 2
+        cell = max(3.0, min(15.0, (width + gap) / weeks - gap))
+        title = "近 6 个月打卡" if compact else "近 12 个月打卡"
+        active_days = int(summary.get("active_days") or len(daily))
+        current = int(summary.get("current_streak") or 0)
+        longest = int(summary.get("longest_streak") or 0)
+
+        cursor = float(y) + 4
+        draw.text((x, cursor), title, font=title_font, fill="#6b4564")
+        cursor += 20
+
+        if cell < 6:
+            # 太窄（例如极窄的双平台卡）：退化为纯文字摘要。
+            text = cls._fit_rank_pillow_text(
+                f"活跃 {active_days} 天 · 当前连续 {current} 天 · 最长 {longest} 天",
+                label_font,
+                width,
+            )
+            draw.text((x, cursor), text, font=label_font, fill="#6e4a67")
+            return int(cursor + 18 - y + 4)
+
+        columns = cls._activity_columns(daily, summary, weeks=weeks)
+        step = cell + gap
+        for col_index, column in enumerate(columns):
+            for row_index, count in enumerate(column):
+                if count is None:
+                    continue
+                left = x + col_index * step
+                top = cursor + row_index * step
+                draw.rounded_rectangle(
+                    (
+                        int(left),
+                        int(top),
+                        int(left + cell),
+                        int(top + cell),
+                    ),
+                    radius=2,
+                    fill=cls.ACTIVITY_LEVEL_COLORS[cls._activity_level(count)],
+                )
+        cursor += (7 * step - gap) + 8
+
+        # 图例：5 档色块 + 少/多 + 摘要文字（按剩余宽度截断，绝不越界）
+        legend_x = float(x)
+        draw.text((legend_x, cursor), "少", font=label_font, fill="#8a6b83")
+        legend_x += cls._pillow_text_width("少", label_font) + 4
+        for level in range(5):
+            draw.rounded_rectangle(
+                (
+                    int(legend_x),
+                    int(cursor + 2),
+                    int(legend_x + 9),
+                    int(cursor + 11),
+                ),
+                radius=2,
+                fill=cls.ACTIVITY_LEVEL_COLORS[level],
+            )
+            legend_x += 11
+        draw.text((legend_x + 2, cursor), "多", font=label_font, fill="#8a6b83")
+        legend_x += cls._pillow_text_width("多", label_font) + 12
+        stats = (
+            f"活跃 {active_days} 天 · 连续 {current} 天"
+            if compact
+            else f"一年活跃 {active_days} 天 · 当前连续 {current} 天 · 最长 {longest} 天"
+        )
+        remaining = max(0.0, (x + width) - legend_x)
+        draw.text(
+            (legend_x, cursor),
+            cls._fit_rank_pillow_text(stats, label_font, remaining),
+            font=label_font,
+            fill="#6e4a67",
+        )
+        return int(cursor + 18 - y + 4)
+
     @classmethod
     def _pillow_difficulty_chart(
         cls,
@@ -2761,6 +3004,8 @@ class AccountCardRenderer:
                 count += 1
             if profile.platform in group_ranks:
                 count += 1
+            if cls._activity_payload(profile) is not None:
+                count += 1
             return count
 
         card_rows = []
@@ -2992,6 +3237,18 @@ class AccountCardRenderer:
             )
             if difficulty_height:
                 meta_y += difficulty_height + 10
+            activity_height = cls._pillow_activity_heatmap(
+                draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+                compact=not single,
+            )
+            if activity_height:
+                meta_y += activity_height + 10
             secondary_height = cls._pillow_secondary_chart(
                 draw,
                 profile,
