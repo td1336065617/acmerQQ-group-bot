@@ -160,6 +160,38 @@ ACCOUNT_UNBIND_RE = re.compile(
     r"luogu|atc|atcoder)\s*$",
     re.I,
 )
+# 未绑定用户战绩查询：查询cf <用户名/UID/主页链接>
+# 平台别名与绑定指令保持同一套；标识由 normalize_account_identifier 归一化，
+# 自动兼容用户名、数字 UID 与主页链接三种形态。
+_ACCOUNT_LOOKUP_PLATFORM = (
+    r"(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|luogu|atc|atcoder)"
+)
+ACCOUNT_LOOKUP_RE = re.compile(
+    rf"^(?:查询|查|lookup)\s*{_ACCOUNT_LOOKUP_PLATFORM}\s+(.+?)\s*$",
+    re.I,
+)
+ACCOUNT_LOOKUP_USAGE_RE = re.compile(
+    rf"^(?:查询|查|lookup)\s*{_ACCOUNT_LOOKUP_PLATFORM}\s*$",
+    re.I,
+)
+# “详细”后缀：默认只出摘要卡，加后缀才抓难度分布/分析（更慢）。
+ACCOUNT_LOOKUP_DETAIL_RE = re.compile(
+    r"^(?P<target>.+?)\s+(?:详细|详情|detail)$",
+    re.I,
+)
+ACCOUNT_LOOKUP_USAGE_HINTS = {
+    "codeforces": "查询cf <Codeforces用户名>",
+    "atcoder": "查询atcoder <AtCoder用户名>",
+    "nowcoder": "查询牛客 <牛客数字UID>",
+    "luogu": "查询洛谷 <洛谷数字UID>",
+}
+# 这两个平台只能按数字 UID / 主页链接查询（公开接口无“用户名→UID”）。
+ACCOUNT_LOOKUP_UID_ONLY = {"nowcoder", "luogu"}
+# 防滥用：每用户冷却 + 每群每分钟次数上限；命中资料缓存时同样受限，
+# 但阈值足够宽松，正常使用不会触发。
+LOOKUP_USER_COOLDOWN_SECONDS = 30
+LOOKUP_GROUP_WINDOW_SECONDS = 60
+LOOKUP_GROUP_MAX_PER_WINDOW = 10
 MY_PLATFORM_COMMANDS = {
     normalize_command("我的cf"): "codeforces",
     normalize_command("我的codeforces"): "codeforces",
@@ -223,6 +255,7 @@ MENU_TEXT = (
     "• 我的战绩/我的账号 ─ 查看四平台个人战绩卡（群聊显示本群排行）\n"
     "• 我的cf/我的牛客/我的洛谷/我的atcoder ─ 查看单个平台战绩卡（群聊显示本群排行）\n"
     "• @某人 战绩 / @某人 查询战绩 ─ 查询该成员的竞赛战绩卡（群聊只读）\n"
+    "• 查询cf/查询atcoder <用户名> ─ 查询未绑定用户战绩卡（牛客/洛谷用数字UID）\n"
     "• 群排行 ─ 查看四个平台排行总览\n"
     "• 群cf排行/群牛客排行/群洛谷排行/群atcoder排行 ─ 查看平台排行（每页30人，可加页码）\n"
     "• 本周进步榜 ─ 查看各平台本周 Rating 变化\n"
@@ -1496,6 +1529,171 @@ class AcmerGroupBot(Star):
             yield event.plain_result(f"✅ 已解绑 {platform_label(platform)}{suffix}")
         else:
             yield event.plain_result(f"你还没有绑定{platform_label(platform)}账号")
+
+    # ------------------------------------------------------------------
+    # 指令：未绑定用户战绩查询（查询cf <用户名/UID/主页链接>）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _account_lookup_usage(platform: str) -> str:
+        example = ACCOUNT_LOOKUP_USAGE_HINTS.get(
+            platform, f"查询{platform} <账号>"
+        )
+        lines = [f"用法：{example}", "请把账号写在指令后面，不能只发送指令前缀。"]
+        if platform in ACCOUNT_LOOKUP_UID_ONLY:
+            lines.append(
+                f"注意：{platform_label(platform)}公开接口不支持用户名查询，"
+                "请填写数字 UID 或该用户的主页链接。"
+            )
+        lines.append("默认输出摘要卡；想同时看难度分布/分析，请在结尾加“详细”。")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _account_lookup_invalid_hint(platform: str) -> str:
+        label = platform_label(platform)
+        if platform == "codeforces":
+            detail = "Codeforces 只接受用户名（字母/数字/下划线）或主页链接。"
+        elif platform == "atcoder":
+            detail = "AtCoder 只接受用户名（字母/数字/下划线）或主页链接。"
+        elif platform == "nowcoder":
+            detail = (
+                "牛客公开接口不支持用户名查询，请填写数字用户 ID，"
+                "或形如 https://ac.nowcoder.com/acm/contest/profile/<UID> 的主页链接。"
+            )
+        else:
+            detail = (
+                "洛谷公开接口不支持用户名查询，请填写数字 UID，"
+                "或形如 https://www.luogu.com.cn/user/<UID> 的主页链接。"
+            )
+        return f"⚠️ 无法识别该{label}账号。\n{detail}"
+
+    @staticmethod
+    def _lookup_rate_verdict(
+        now: float, user_last: float, group_times: list
+    ) -> tuple[bool, int]:
+        """返回 (是否放行, 需等待秒数)；纯函数，便于测试。"""
+        if user_last and now - float(user_last) < LOOKUP_USER_COOLDOWN_SECONDS:
+            wait = LOOKUP_USER_COOLDOWN_SECONDS - (now - float(user_last))
+            return False, max(1, int(wait) + 1)
+        recent = [
+            float(item)
+            for item in (group_times or [])
+            if isinstance(item, (int, float))
+            and now - float(item) < LOOKUP_GROUP_WINDOW_SECONDS
+        ]
+        if len(recent) >= LOOKUP_GROUP_MAX_PER_WINDOW:
+            wait = LOOKUP_GROUP_WINDOW_SECONDS - (now - min(recent))
+            return False, max(1, int(wait) + 1)
+        return True, 0
+
+    async def _check_lookup_rate_limit(
+        self, event: AstrMessageEvent
+    ) -> tuple[bool, int]:
+        """查询指令的防滥用：每用户冷却 + 每群每分钟次数上限。"""
+        user_id = str(event.get_sender_id() or "").strip()
+        group_id = str(event.get_group_id() or "").strip()
+        now = time.time()
+        user_key = f"lookup_cd_{user_id}" if user_id else ""
+        group_key = f"lookup_win_{group_id}" if group_id else ""
+        try:
+            user_last = (
+                float(await self.get_kv_data(user_key, 0.0) or 0.0)
+                if user_key
+                else 0.0
+            )
+            group_times = (
+                await self.get_kv_data(group_key, []) if group_key else []
+            )
+        except Exception as exc:  # noqa: BLE001 - 限流读取失败不阻断功能
+            logger.warning("读取查询限流状态失败：%s", exc)
+            return True, 0
+        if not isinstance(group_times, list):
+            group_times = []
+        allowed, wait = self._lookup_rate_verdict(now, user_last, group_times)
+        if not allowed:
+            return False, wait
+        try:
+            if user_key:
+                await self.put_kv_data(user_key, now)
+            if group_key:
+                recent = [
+                    float(item)
+                    for item in group_times
+                    if isinstance(item, (int, float))
+                    and now - float(item) < LOOKUP_GROUP_WINDOW_SECONDS
+                ]
+                recent.append(now)
+                await self.put_kv_data(group_key, recent)
+        except Exception as exc:  # noqa: BLE001 - 写入失败只是限流失效
+            logger.warning("写入查询限流状态失败：%s", exc)
+        return True, 0
+
+    async def _reply_account_lookup(
+        self, event: AstrMessageEvent, platform: str, raw_target: str
+    ):
+        """按用户名/UID/主页链接查询任意（未绑定）用户的战绩卡。"""
+        target_text = str(raw_target or "").strip()
+        detail = False
+        detail_match = ACCOUNT_LOOKUP_DETAIL_RE.match(target_text)
+        if detail_match:
+            target_text = detail_match.group("target").strip()
+            detail = True
+        identifier = normalize_account_identifier(platform, target_text)
+        if not identifier:
+            yield event.plain_result(self._account_lookup_invalid_hint(platform))
+            return
+        allowed, wait = await self._check_lookup_rate_limit(event)
+        if not allowed:
+            yield event.plain_result(f"⏳ 查询太频繁了，请 {wait} 秒后再试")
+            return
+        label = platform_label(platform)
+        try:
+            profile = await self.account_fetcher.get_profile(
+                platform,
+                identifier,
+                detail=True,
+                include_submissions=False,
+                include_difficulty=detail,
+                include_analysis=detail,
+            )
+        except Exception as exc:  # noqa: BLE001 - 平台/网络错误统一文案
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+        delta = None
+        calculator = getattr(
+            self.account_fetcher, "rating_delta_for_period", None
+        )
+        if callable(calculator):
+            try:
+                delta = calculator(profile, days=7)
+            except Exception as exc:  # noqa: BLE001 - 变化值是可选展示项
+                logger.warning("计算 %s 的本周变化失败：%s", identifier, exc)
+        weekly_changes = {platform: delta}
+        # 未绑定用户不写 Rating 快照、不参与群排行，避免污染排行/进步榜数据。
+        try:
+            image_path = await self._render_profile_card(
+                [profile],
+                display_name=identifier,
+                weekly_changes=weekly_changes,
+                group_ranks={},
+            )
+        except Exception as exc:  # noqa: BLE001 - 渲染失败必须保证文字兜底
+            logger.error("未绑定用户资料卡渲染异常：%s", exc, exc_info=True)
+            image_path = None
+        if image_path is not None and image_path.is_file():
+            yield event.image_result(str(image_path))
+            return
+        title = f"📊 {identifier} 的{label}战绩（未绑定）"
+        text = self._format_account_text(
+            [profile], [], weekly_changes, title=title, group_ranks={}
+        )
+        if str(event.get_group_id() or "").strip():
+            # 群聊里顺带引导绑定；私聊不加，避免打扰。
+            text += (
+                f"\n\n💡 发送“{self._account_bind_command(platform)} "
+                f"{identifier}”可把该账号绑定到你的 QQ。"
+            )
+        async for result in self._adaptive_results(event, text):
+            yield result
 
     async def _reply_my_account(
         self,
@@ -3076,6 +3274,21 @@ class AcmerGroupBot(Star):
             if platform:
                 async for result in self._reply_account_unbind(event, platform):
                     yield result
+            return
+        lookup_match = ACCOUNT_LOOKUP_RE.match(raw_message)
+        if lookup_match:
+            platform = normalize_platform(lookup_match.group(1))
+            if platform:
+                async for result in self._reply_account_lookup(
+                    event, platform, lookup_match.group(2)
+                ):
+                    yield result
+            return
+        lookup_usage_match = ACCOUNT_LOOKUP_USAGE_RE.match(raw_message)
+        if lookup_usage_match:
+            platform = normalize_platform(lookup_usage_match.group(1))
+            if platform:
+                yield event.plain_result(self._account_lookup_usage(platform))
             return
         if message_str in MY_PLATFORM_COMMANDS:
             async for result in self._reply_my_account(
