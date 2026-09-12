@@ -1518,6 +1518,16 @@ class AccountCardRenderer:
             return ""
         daily, summary = payload
         weeks = 26 if compact else 53
+        title = "近 6 个月打卡" if compact else "近 12 个月打卡"
+        if not daily:
+            # 平台支持但近一年没有提交：显示说明而不是整块消失。
+            return (
+                '<div class="activity-panel">'
+                f'<div class="activity-title">{_escape(title)}</div>'
+                '<div class="activity-empty-note">'
+                f"{_escape(cls._activity_empty_note(profile))}</div>"
+                "</div>"
+            )
         columns = cls._activity_columns(daily, summary, weeks=weeks)
         active_days = int(summary.get("active_days") or len(daily))
         current = int(summary.get("current_streak") or 0)
@@ -2102,6 +2112,7 @@ class AccountCardRenderer:
     .difficulty-panel, .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
     .activity-panel {{ flex:1 1 100%; min-width:0; padding:12px 14px 10px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
     .activity-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; margin-bottom:8px; }}
+    .activity-empty-note {{ color:#8a6b83; font-size:12px; line-height:1.3; }}
     .activity-grid {{ display:grid; grid-template-rows:repeat(7, 1fr); grid-auto-flow:column; grid-auto-columns:1fr; gap:2px; }}
     .activity-cell {{ display:block; width:100%; aspect-ratio:1 / 1; border-radius:2px; background:#efe6ec; }}
     .activity-empty {{ background:transparent; }}
@@ -2491,15 +2502,38 @@ class AccountCardRenderer:
 
     @staticmethod
     def _activity_payload(profile: object):
-        """取出按天打卡数据与摘要；平台不支持或无数据时返回 None。"""
+        """取出按天打卡数据与摘要。
+
+        - 返回 None：平台不支持打卡热力图（分析里没有 activity_daily 字段，
+          例如牛客/洛谷），卡片不显示该区块；
+        - 返回 (daily, summary) 且 daily 为空：平台支持但近 12 个月没有提交，
+          此时显示一行说明文字，而不是整块消失（避免用户以为功能没生效）。
+        """
         analysis = _profile_field(profile, "analysis", {}) or {}
         if not isinstance(analysis, dict):
             return None
-        daily = analysis.get("activity_daily")
-        if not isinstance(daily, dict) or not daily:
+        if "activity_daily" not in analysis:
             return None
+        daily = analysis.get("activity_daily")
         summary = analysis.get("activity_summary")
-        return daily, (summary if isinstance(summary, dict) else {})
+        return (
+            daily if isinstance(daily, dict) else {},
+            summary if isinstance(summary, dict) else {},
+        )
+
+    @staticmethod
+    def _activity_empty_note(profile: object) -> str:
+        """近 12 个月无提交时的说明文字（带上历史提交总量，便于理解）。"""
+        analysis = _profile_field(profile, "analysis", {}) or {}
+        total = 0
+        if isinstance(analysis, dict):
+            try:
+                total = int(analysis.get("submission_count") or 0)
+            except (TypeError, ValueError):
+                total = 0
+        if total > 0:
+            return f"近 12 个月暂无提交记录（历史共 {total} 条提交，均在一年前）"
+        return "近 12 个月暂无提交记录"
 
     @classmethod
     def _activity_level(cls, count: int) -> int:
@@ -2542,15 +2576,21 @@ class AccountCardRenderer:
     def _activity_heatmap_height(
         cls, profile: object, width: int, *, compact: bool = False
     ) -> int:
-        """预估热力图占用高度（供卡片总高计算），无数据返回 0。"""
-        if cls._activity_payload(profile) is None:
+        """预估热力图占用高度（供卡片总高计算），平台不支持时返回 0。"""
+        payload = cls._activity_payload(profile)
+        if payload is None:
             return 0
+        daily, _summary = payload
+        # 与 _pillow_activity_heatmap 的返回公式保持一致：
+        # 4(顶部) + 20(标题) + 内容 + 8(间距) + 18(图例/说明行)
+        if not daily:
+            return 46
         gap = 2
         weeks = 26 if compact else 53
         cell = max(3.0, min(15.0, (width + gap) / weeks - gap))
         if cell < 6:
-            return 20 + 8 + 18 + 4  # 标题 + 间距 + 摘要行
-        return int(20 + (7 * (cell + gap) - gap) + 8 + 18 + 4)
+            return 46
+        return int(54 + (7 * (cell + gap) - gap))
 
     @classmethod
     def _pillow_activity_heatmap(
@@ -2574,13 +2614,22 @@ class AccountCardRenderer:
         gap = 2
         cell = max(3.0, min(15.0, (width + gap) / weeks - gap))
         title = "近 6 个月打卡" if compact else "近 12 个月打卡"
-        active_days = int(summary.get("active_days") or len(daily))
-        current = int(summary.get("current_streak") or 0)
-        longest = int(summary.get("longest_streak") or 0)
 
         cursor = float(y) + 4
         draw.text((x, cursor), title, font=title_font, fill="#6b4564")
         cursor += 20
+
+        if not daily:
+            # 平台支持但近一年没有提交：显示说明，避免整块消失让人以为功能失效。
+            note = cls._fit_rank_pillow_text(
+                cls._activity_empty_note(profile), label_font, width
+            )
+            draw.text((x, cursor), note, font=label_font, fill="#8a6b83")
+            return int(cursor + 18 - y + 4)
+
+        active_days = int(summary.get("active_days") or len(daily))
+        current = int(summary.get("current_streak") or 0)
+        longest = int(summary.get("longest_streak") or 0)
 
         if cell < 6:
             # 太窄（例如极窄的双平台卡）：退化为纯文字摘要。

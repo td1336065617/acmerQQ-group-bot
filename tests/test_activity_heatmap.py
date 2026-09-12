@@ -123,6 +123,7 @@ def test_activity_columns_shape_and_future_placeholder():
 def test_heatmap_height_zero_without_data():
     from src.account_models import AccountProfile
 
+    # 平台不支持（分析里没有 activity_daily 字段）→ 不显示该区块
     empty = AccountProfile(platform="codeforces", handle="x", analysis={})
     assert AccountCardRenderer._activity_heatmap_height(empty, 1010) == 0
     assert AccountCardRenderer._pillow_activity_heatmap(
@@ -134,6 +135,66 @@ def test_heatmap_height_zero_without_data():
         title_font=None,
         label_font=None,
     ) == 0
+    # 牛客/洛谷：分析存在但没有 activity_daily → 同样不显示
+    nowcoder = AccountProfile(
+        platform="nowcoder",
+        handle="645160704",
+        analysis={"submission_count": 120, "coverage": "近 30 天"},
+    )
+    assert AccountCardRenderer._activity_heatmap_height(nowcoder, 1010) == 0
+
+
+def test_heatmap_empty_state_shows_note():
+    """平台支持但近一年没有提交：显示说明文字，而不是整块消失。"""
+    from src.account_models import AccountProfile
+
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="idle_user",
+        analysis={
+            "activity_daily": {},
+            "activity_summary": {
+                "active_days": 0,
+                "current_streak": 0,
+                "longest_streak": 0,
+                "end": "2026-09-12",
+            },
+            "submission_count": 82,
+        },
+    )
+    height = AccountCardRenderer._activity_heatmap_height(profile, 1010)
+    assert height > 0  # 空态仍占一行高度
+    image = Image.new("RGB", (1200, 400), "#ffffff")
+    draw = ImageDraw.Draw(image)
+    texts: list[str] = []
+    original = ImageDraw.ImageDraw.text
+
+    def spy(self, xy, text, *args, **kwargs):
+        texts.append(str(text))
+        return original(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = spy
+    try:
+        drawn = AccountCardRenderer._pillow_activity_heatmap(
+            draw,
+            profile,
+            50,
+            50,
+            1010,
+            title_font=None,
+            label_font=None,
+        )
+    finally:
+        ImageDraw.ImageDraw.text = original
+    assert drawn == height
+    assert "近 12 个月打卡" in texts
+    note = [t for t in texts if "暂无提交记录" in t]
+    assert note and "82" in note[0]
+
+    html = AccountCardRenderer._activity_heatmap_html(profile)
+    assert "activity-empty-note" in html
+    assert "近 12 个月暂无提交记录" in html
+    assert "activity-grid" not in html
 
 
 def _draw_and_capture(profile, *, compact, width=1010):
