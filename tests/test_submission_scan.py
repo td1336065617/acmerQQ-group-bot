@@ -4,11 +4,55 @@ from __future__ import annotations
 import asyncio
 
 from src.account_fetcher import (
+    ANALYSIS_CACHE_VERSION,
     ATCODER_SUBMISSION_SCAN_LIMIT,
     CF_SUBMISSION_PAGE_SIZE,
     CF_SUBMISSION_SCAN_LIMIT,
     AccountFetcher,
 )
+
+
+def test_analysis_cache_version_invalidates_old_entries():
+    """提升扫描上限后，旧的持久化分析缓存必须被忽略，不能继续显示旧口径。"""
+    assert ANALYSIS_CACHE_VERSION >= 2
+    # 新版本 kind 可以正常还原 key
+    key = AccountFetcher._key_from_kind(
+        "codeforces", "maspy", f"analysis_v{ANALYSIS_CACHE_VERSION}"
+    )
+    assert key == ("codeforces", "maspy", True, False, True)
+    key_s = AccountFetcher._key_from_kind(
+        "codeforces", "maspy", f"analysis_s_v{ANALYSIS_CACHE_VERSION}"
+    )
+    assert key_s == ("codeforces", "maspy", True, True, True)
+    # 旧版 kind（无版本号 / 旧版本号）被丢弃
+    assert AccountFetcher._key_from_kind("codeforces", "maspy", "analysis") is None
+    assert (
+        AccountFetcher._key_from_kind("codeforces", "maspy", "analysis_s") is None
+    )
+    assert (
+        AccountFetcher._key_from_kind(
+            "codeforces", "maspy", f"analysis_v{ANALYSIS_CACHE_VERSION - 1}"
+        )
+        is None
+    )
+    # 非分析类缓存不受版本影响
+    assert AccountFetcher._key_from_kind("codeforces", "x", "basic") == (
+        "codeforces",
+        "x",
+        False,
+        False,
+        False,
+    )
+
+
+def test_kind_roundtrip_for_analysis():
+    for key in (
+        ("codeforces", "x", True, False, True),
+        ("codeforces", "x", True, True, True),
+    ):
+        kind = AccountFetcher._kind_for_key(key)
+        assert kind.startswith("analysis")
+        assert AccountFetcher._key_from_kind(key[0], key[1], kind) == key
 
 
 def test_scan_limits_raised():

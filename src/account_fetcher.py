@@ -73,6 +73,9 @@ RATING_HISTORY_LIMIT = 200
 # 因此按 CF_SUBMISSION_PAGE_SIZE 翻页到该上限；只有超大账号才会翻多页。
 CF_SUBMISSION_SCAN_LIMIT = 50000
 CF_SUBMISSION_PAGE_SIZE = 10000
+# 分析缓存版本：扫描上限/分析口径变化时 +1，旧的持久化分析缓存会被自动忽略，
+# 无需等待 12 小时 TTL 或手动清库。（v1 = 旧的“最多 10000 条”口径）
+ANALYSIS_CACHE_VERSION = 2
 NOWCODER_ANALYSIS_PAGE_SIZE = 100
 NOWCODER_ANALYSIS_MAX_PAGES = 20
 NOWCODER_PROBLEM_META_LIMIT = 300
@@ -383,13 +386,18 @@ class AccountFetcher:
 
     @staticmethod
     def _kind_for_key(key: tuple) -> str:
-        """内存缓存 key → 持久化 kind（basic/detail[/analysis] + submissions 变体）。"""
-        _, _, detail, submissions, analysis = key
+        """内存缓存 key → 持久化 kind（basic/detail[/analysis] + submissions 变体）。
+
+        分析类缓存带版本号后缀：当扫描上限或分析口径变化时（提升
+        ANALYSIS_CACHE_VERSION）旧缓存会被自动忽略，不必等 12 小时 TTL，
+        也不会继续展示旧的「最多读取 N 条」覆盖率文案。
+        """
+        _, _, detail, submissions, analysis = key[:5]
         if not detail:
             return "basic"
         suffix = "_s" if submissions else ""
         if analysis:
-            return "analysis" + suffix
+            return f"analysis{suffix}_v{ANALYSIS_CACHE_VERSION}"
         return "detail" + suffix
 
     @classmethod
@@ -402,10 +410,16 @@ class AccountFetcher:
             return (platform, handle_norm, True, False, False)
         if kind == "detail_s":
             return (platform, handle_norm, True, True, False)
-        if kind == "analysis":
-            return (platform, handle_norm, True, False, True)
-        if kind == "analysis_s":
-            return (platform, handle_norm, True, True, True)
+        # 分析类：只接受当前版本的 kind，旧版本直接丢弃（返回 None 即跳过）。
+        for suffix in ("", "_s"):
+            if kind == f"analysis{suffix}_v{ANALYSIS_CACHE_VERSION}":
+                return (
+                    platform,
+                    handle_norm,
+                    True,
+                    bool(suffix),
+                    True,
+                )
         return None
 
     async def close(self) -> None:
