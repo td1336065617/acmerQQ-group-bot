@@ -2111,8 +2111,8 @@ class AccountCardRenderer:
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
     .difficulty-panel, .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
     .activity-panel {{ flex:1 1 100%; min-width:0; padding:12px 14px 10px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
-    .activity-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; margin-bottom:8px; }}
-    .activity-empty-note {{ color:#8a6b83; font-size:12px; line-height:1.3; }}
+    .activity-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; margin-bottom:12px; }}
+    .activity-empty-note {{ color:#8a6b83; font-size:12px; line-height:1.3; padding:2px 0 4px; }}
     .activity-grid {{ display:grid; grid-template-rows:repeat(7, 1fr); grid-auto-flow:column; grid-auto-columns:1fr; gap:2px; }}
     .activity-cell {{ display:block; width:100%; aspect-ratio:1 / 1; border-radius:2px; background:#efe6ec; }}
     .activity-empty {{ background:transparent; }}
@@ -2121,7 +2121,7 @@ class AccountCardRenderer:
     .activity-level-2 {{ background:#f0a1c4; }}
     .activity-level-3 {{ background:#e467a5; }}
     .activity-level-4 {{ background:#b83f7d; }}
-    .activity-legend {{ display:flex; align-items:center; gap:10px; margin-top:8px; color:#6e4a67; font-size:12px; line-height:1.2; }}
+    .activity-legend {{ display:flex; align-items:center; gap:10px; margin-top:12px; color:#6e4a67; font-size:12px; line-height:1.2; }}
     .activity-legend-scale {{ display:flex; align-items:center; gap:3px; color:#8a6b83; }}
     .activity-legend-scale .activity-cell {{ width:9px; height:9px; aspect-ratio:auto; }}
     .activity-legend-text {{ min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
@@ -2499,6 +2499,12 @@ class AccountCardRenderer:
         "#e467a5",  # 6-10 次
         "#b83f7d",  # 10+ 次
     )
+    # 热力图内部间距（绘制与高度估算共用，避免两者漂移导致压字/裁切）
+    ACTIVITY_PAD_TOP = 6.0      # 区块顶部留白
+    ACTIVITY_TITLE_LINE = 26.0  # 标题行高（含标题与方格之间的留白）
+    ACTIVITY_LEGEND_GAP = 12.0  # 方格与图例之间的留白
+    ACTIVITY_LEGEND_LINE = 18.0  # 图例行高
+    ACTIVITY_PAD_BOTTOM = 6.0   # 区块底部留白
 
     @staticmethod
     def _activity_payload(profile: object):
@@ -2581,16 +2587,24 @@ class AccountCardRenderer:
         if payload is None:
             return 0
         daily, _summary = payload
-        # 与 _pillow_activity_heatmap 的返回公式保持一致：
-        # 4(顶部) + 20(标题) + 内容 + 8(间距) + 18(图例/说明行)
+        # 与 _pillow_activity_heatmap 共用同一套间距常量与公式：
+        # base = 顶部留白 + 标题行 + 图例行 + 底部留白（无方格时的高度）
+        base = (
+            cls.ACTIVITY_PAD_TOP
+            + cls.ACTIVITY_TITLE_LINE
+            + cls.ACTIVITY_LEGEND_LINE
+            + cls.ACTIVITY_PAD_BOTTOM
+        )
         if not daily:
-            return 46
+            return int(base)
         gap = 2
         weeks = 26 if compact else 53
         cell = max(3.0, min(15.0, (width + gap) / weeks - gap))
         if cell < 6:
-            return 46
-        return int(54 + (7 * (cell + gap) - gap))
+            return int(base)
+        return int(
+            base + cls.ACTIVITY_LEGEND_GAP + (7 * (cell + gap) - gap)
+        )
 
     @classmethod
     def _pillow_activity_heatmap(
@@ -2615,9 +2629,9 @@ class AccountCardRenderer:
         cell = max(3.0, min(15.0, (width + gap) / weeks - gap))
         title = "近 6 个月打卡" if compact else "近 12 个月打卡"
 
-        cursor = float(y) + 4
+        cursor = float(y) + cls.ACTIVITY_PAD_TOP
         draw.text((x, cursor), title, font=title_font, fill="#6b4564")
-        cursor += 20
+        cursor += cls.ACTIVITY_TITLE_LINE
 
         if not daily:
             # 平台支持但近一年没有提交：显示说明，避免整块消失让人以为功能失效。
@@ -2625,7 +2639,12 @@ class AccountCardRenderer:
                 cls._activity_empty_note(profile), label_font, width
             )
             draw.text((x, cursor), note, font=label_font, fill="#8a6b83")
-            return int(cursor + 18 - y + 4)
+            return int(
+                cursor
+                + cls.ACTIVITY_LEGEND_LINE
+                - y
+                + cls.ACTIVITY_PAD_BOTTOM
+            )
 
         active_days = int(summary.get("active_days") or len(daily))
         current = int(summary.get("current_streak") or 0)
@@ -2639,7 +2658,12 @@ class AccountCardRenderer:
                 width,
             )
             draw.text((x, cursor), text, font=label_font, fill="#6e4a67")
-            return int(cursor + 18 - y + 4)
+            return int(
+                cursor
+                + cls.ACTIVITY_LEGEND_LINE
+                - y
+                + cls.ACTIVITY_PAD_BOTTOM
+            )
 
         columns = cls._activity_columns(daily, summary, weeks=weeks)
         step = cell + gap
@@ -2659,7 +2683,7 @@ class AccountCardRenderer:
                     radius=2,
                     fill=cls.ACTIVITY_LEVEL_COLORS[cls._activity_level(count)],
                 )
-        cursor += (7 * step - gap) + 8
+        cursor += (7 * step - gap) + cls.ACTIVITY_LEGEND_GAP
 
         # 图例：5 档色块 + 少/多 + 摘要文字（按剩余宽度截断，绝不越界）
         legend_x = float(x)
@@ -2691,7 +2715,9 @@ class AccountCardRenderer:
             font=label_font,
             fill="#6e4a67",
         )
-        return int(cursor + 18 - y + 4)
+        return int(
+            cursor + cls.ACTIVITY_LEGEND_LINE - y + cls.ACTIVITY_PAD_BOTTOM
+        )
 
     @classmethod
     def _pillow_difficulty_chart(
