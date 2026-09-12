@@ -68,7 +68,11 @@ FETCH_FAILURE_PERMANENT_TTL = 5 * 60
 FETCH_FAILURE_TEMP_TTL = 2 * 60
 CF_MIN_REQUEST_INTERVAL = 2.1
 RATING_HISTORY_LIMIT = 200
-CF_SUBMISSION_SCAN_LIMIT = 10000
+# 提交扫描上限：LGM/重度选手的提交数可超过 2 万，1 万会造成通过题数/提交次数
+# 明显低估（实测 maspy 共 21459 条）。CF 单次请求文档上限为 1 万条，
+# 因此按 CF_SUBMISSION_PAGE_SIZE 翻页到该上限；只有超大账号才会翻多页。
+CF_SUBMISSION_SCAN_LIMIT = 50000
+CF_SUBMISSION_PAGE_SIZE = 10000
 NOWCODER_ANALYSIS_PAGE_SIZE = 100
 NOWCODER_ANALYSIS_MAX_PAGES = 20
 NOWCODER_PROBLEM_META_LIMIT = 300
@@ -94,7 +98,10 @@ LUOGU_DIFFICULTY_LABELS = {
     8: "NOI/NOI+/CTS",
 }
 ATCODER_SUBMISSION_PAGE_SIZE = 500
-ATCODER_SUBMISSION_SCAN_LIMIT = 10000
+ATCODER_SUBMISSION_SCAN_LIMIT = 20000
+# kenkoooo 分页接口每页 500 条，2 万条需要 40 次请求；页间留一点间隔，
+# 避免把公共接口打得太急（结果有 12 小时缓存，不会频繁发生）。
+ATCODER_SUBMISSION_PAGE_INTERVAL = 0.3
 ATCODER_DIFFICULTY_BUCKETS = (
     ("≤399", None, 399),
     ("400–799", 400, 799),
@@ -1046,19 +1053,8 @@ class AccountFetcher:
                 if parsed_history:
                     profile.recent_delta = parsed_history[0].get("delta")
             if include_submissions or include_difficulty:
-                status_data = await self._cf_json(
-                    "user.status",
-                    {
-                        "handle": canonical,
-                        "from": "1",
-                        "count": str(CF_SUBMISSION_SCAN_LIMIT),
-                    },
-                )
-                if (
-                    isinstance(status_data, dict)
-                    and status_data.get("status") == "OK"
-                ):
-                    rows = status_data.get("result") or []
+                rows, scanned_all = await self._cf_scan_submissions(canonical)
+                if rows or scanned_all:
                     if include_submissions:
                         profile.recent_submissions = (
                             self._parse_cf_submissions(rows)
@@ -1078,8 +1074,48 @@ class AccountFetcher:
                             rows,
                             profile.difficulty_distribution,
                             profile.solved_count,
+                            scanned_all=scanned_all,
                         )
         return profile
+
+    async def _cf_scan_submissions(
+        self, canonical: str
+    ) -> Tuple[list, bool]:
+        """翻页扫描 Codeforces 提交记录；返回 (rows, 是否读完全部公开记录)。
+
+        CF 单次请求文档上限为 CF_SUBMISSION_PAGE_SIZE 条，因此按页抓取：
+        - 普通账号第一页就不满 → 一次请求返回，开销与旧实现相同；
+        - 重度账号（如 2 万+ 提交）会翻 2~5 页，但结果有 12 小时缓存，
+          且只在个人资料卡的分析路径触发，不影响群排行。
+        """
+        rows: list = []
+        offset = 1
+        scanned_all = False
+        while len(rows) < CF_SUBMISSION_SCAN_LIMIT:
+            page_size = min(
+                CF_SUBMISSION_PAGE_SIZE,
+                CF_SUBMISSION_SCAN_LIMIT - len(rows),
+            )
+            status_data = await self._cf_json(
+                "user.status",
+                {
+                    "handle": canonical,
+                    "from": str(offset),
+                    "count": str(page_size),
+                },
+            )
+            if not (
+                isinstance(status_data, dict)
+                and status_data.get("status") == "OK"
+            ):
+                break
+            page = status_data.get("result") or []
+            rows.extend(page)
+            if len(page) < page_size:
+                scanned_all = True
+                break
+            offset += len(page)
+        return rows, scanned_all
 
     @classmethod
     def _profile_from_codeforces_user(
@@ -1250,6 +1286,8 @@ class AccountFetcher:
         rows: list,
         difficulty_distribution: List[Dict[str, Any]],
         solved_count: Optional[int],
+        *,
+        scanned_all: Optional[bool] = None,
     ) -> Dict[str, Any]:
         accepted_rows = [
             row
@@ -1278,7 +1316,13 @@ class AccountFetcher:
                 active_days_30.add(day)
             if 0 <= age <= 90 * 86400:
                 active_days_90.add(day)
-        complete = len(rows) < CF_SUBMISSION_SCAN_LIMIT
+        # scanned_all=True 表示最后一页不满（已读完公开记录）；None 时按旧口径
+        # 用 len(rows) < 上限推断，兼容其它调用方。
+        complete = (
+            bool(scanned_all)
+            if scanned_all is not None
+            else len(rows) < CF_SUBMISSION_SCAN_LIMIT
+        )
         acceptance_rate = (
             round(len(accepted_rows) / len(rows) * 100, 1)
             if rows and complete
@@ -2617,6 +2661,8 @@ class AccountFetcher:
             from_second = next_from
             if len(data) < ATCODER_SUBMISSION_PAGE_SIZE:
                 break
+            # 页间留一点间隔，避免 2 万条（40 页）时把 kenkoooo 打得太急。
+            await asyncio.sleep(ATCODER_SUBMISSION_PAGE_INTERVAL)
 
         if not submissions:
             return {
