@@ -216,7 +216,7 @@ def _profile_field(profile: object, key: str, default=None):
 # Codeforces 标准段位 → 社区通用缩写。用户自定义头衔（maxRank 可能是任意文本，
 # 实测有用户直接把用户名当称号）不在映射内，会原样保留并由布局层兜底截断。
 CF_RANK_ABBREVIATIONS = {
-    "legendary grandmaster": "LG",
+    "legendary grandmaster": "LGM",
     "international grandmaster": "IGM",
     "grandmaster": "GM",
     "international master": "IM",
@@ -238,6 +238,23 @@ def _abbreviate_rank_text(platform: object, value: object) -> str:
     if str(platform or "").casefold() != "codeforces":
         return text
     return CF_RANK_ABBREVIATIONS.get(text.casefold(), text)
+
+
+def _rank_display_text(profile: object) -> str:
+    """头部「当前段位」展示文本。
+
+    加“当前段位：”前缀是为了与左边的 Rating 数字区分——否则
+    `2947  Rating  LGM` 容易被误读成“Rating 的值是 LGM”。
+    """
+    value = (
+        _profile_field(profile, "rank_text", "")
+        or _profile_field(profile, "color", "")
+        or "未评级"
+    )
+    text = _abbreviate_rank_text(
+        _profile_field(profile, "platform", ""), value
+    )
+    return f"当前段位：{text}" if text else ""
 
 
 def _primary_metric(profile: object) -> tuple[str, str]:
@@ -1722,7 +1739,7 @@ class AccountCardRenderer:
                     <div class="rating-row">
                       <span class="rating">{_escape(primary_value)}</span>
                       <span class="rating-label">{_escape(primary_label)}</span>
-                      <span class="rank">{_escape(profile.rank_text or profile.color or "未评级")}</span>
+                      <span class="rank">{_escape(_rank_display_text(profile))}</span>
                     </div>
                   </div>
                   <div class="stats">{details_html}</div>
@@ -2915,12 +2932,7 @@ class AccountCardRenderer:
                 font=body_font,
                 fill="#704966",
             )
-            rank_display = _abbreviate_rank_text(
-                profile.platform,
-                _profile_field(profile, "rank_text", "")
-                or _profile_field(profile, "color", "")
-                or "未评级",
-            )
+            rank_display = _rank_display_text(profile)
             rank_x = x + (420 if single else 370)
             rank_y = y + (180 if single else 120)
             draw.text(

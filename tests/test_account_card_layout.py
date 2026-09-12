@@ -9,6 +9,7 @@ from src.account_cards import (
     AccountCardRenderer,
     _abbreviate_rank_text,
     _profile_stats,
+    _rank_display_text,
 )
 from src.account_models import AccountProfile
 
@@ -31,7 +32,9 @@ MULTI_CONTENT_WIDTH = MULTI_CARD_WIDTH - 50
 
 def test_cf_rank_abbreviations():
     assert _abbreviate_rank_text("codeforces", "international grandmaster") == "IGM"
-    assert _abbreviate_rank_text("codeforces", "Legendary Grandmaster") == "LG"
+    # 社区标准是 LGM（不是 LG）
+    assert _abbreviate_rank_text("codeforces", "legendary grandmaster") == "LGM"
+    assert _abbreviate_rank_text("codeforces", "Legendary Grandmaster") == "LGM"
     assert _abbreviate_rank_text("codeforces", "candidate master") == "CM"
     assert _abbreviate_rank_text("codeforces", "grandmaster") == "GM"
     # 自定义头衔（CF 允许把任意文本作为称号，实测有用户直接填用户名）
@@ -40,6 +43,26 @@ def test_cf_rank_abbreviations():
     assert _abbreviate_rank_text("atcoder", "red") == "red"
     assert _abbreviate_rank_text("luogu", "") == ""
     assert set(CF_RANK_ABBREVIATIONS) >= {"grandmaster", "international master"}
+
+
+def test_rank_display_text_marks_current_rank():
+    """头部段位必须带“当前段位”前缀，否则会被误读成 Rating 的值。"""
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="Petr",
+        rating=2947,
+        rank_text="legendary grandmaster",
+        max_rank_text="legendary grandmaster",
+    )
+    assert _rank_display_text(profile) == "当前段位：LGM"
+    stats = dict(_profile_stats(profile))
+    assert stats["最高段位"] == "LGM"
+
+    atcoder = AccountProfile(platform="atcoder", handle="tourist", color="red")
+    assert _rank_display_text(atcoder) == "当前段位：red"
+
+    blank = AccountProfile(platform="luogu", handle="123456")
+    assert _rank_display_text(blank) == "当前段位：未评级"
 
 
 def test_profile_stats_uses_abbreviation_for_max_rank():
