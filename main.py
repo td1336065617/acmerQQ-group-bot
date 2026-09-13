@@ -96,6 +96,8 @@ RANK_CACHE_TTL = 5 * 60
 RANK_CACHE_MAX_ENTRIES = 64
 RANK_FETCH_BATCH_SIZE = 100
 RANK_FETCH_CONCURRENCY = 8
+# 每日早报里附带的周榜，每个平台只列前几名，保持推送可读。
+WEEKLY_BOARD_PUSH_SIZE = 3
 # 本周进步榜的差值优先用本地 Rating 历史计算（一次批量查询，零网络）。
 # 仅当本地缺少 7 天前基线时，才对“限量”成员回退拉取详细资料；
 # 这样首次计算的网络开销被限制在 K × (平台限速) 而非全群逐个拉取。
@@ -2993,31 +2995,125 @@ class AcmerGroupBot(Star):
             return None
         return "\n".join(lines)
 
-    async def build_test_text(self, group: GroupConfig) -> str:
-        """测试推送内容：优先今日早报，今日无比赛时展示最近一场。"""
-        morning = await self.build_morning_text(group)
-        if morning:
-            return morning
+    async def build_weekly_boards_text(self, group: GroupConfig) -> str:
+        """构建「本周进步榜 + 本周退步榜」推送文本（每日早报的一部分）。
+
+        - 与交互指令共用同一份 progress 快照，**不额外抓取 OJ 数据**；
+        - 每个平台只列前 WEEKLY_BOARD_PUSH_SIZE 名，保持推送可读；
+        - 两个榜单都没有数据时返回空串（调用方据此判断是否还有内容可发）。
+        """
         settings = await self.get_settings()
         platforms = [
             p for p in settings["push_platforms"] if p in group.push_platforms
         ] or list(DEFAULT_PLATFORMS)
-        best = None
+        progress_sections: Dict[str, list] = {}
+        regress_sections: Dict[str, list] = {}
         for platform in platforms:
-            contests, err = await self.fetcher.fetch_platform(platform)
-            if err or not contests:
+            try:
+                rows, _errors = await self.rank_service.read(
+                    group.group_id,
+                    platform,
+                    progress=True,
+                    record_metrics=True,
+                    allow_stale=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - 单个平台失败不影响早报
+                logger.warning(
+                    "构建群 %s 的 %s 周榜失败：%s",
+                    group.group_id,
+                    platform,
+                    exc,
+                )
                 continue
-            for contest in contests:
-                if not contest.is_upcoming():
-                    continue
-                if best is None or contest.start_time < best.start_time:
-                    best = contest
-        lines = ["🧪 测试推送（今日无比赛，展示最近一场）"]
-        if best is not None:
-            lines.append(best.format_detail())
-        else:
-            lines.append("（当前没有查到未开始的比赛）")
+            improved = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and isinstance(row.get("delta"), int)
+                and row["delta"] > 0
+            ][: WEEKLY_BOARD_PUSH_SIZE]
+            regressed = self._regress_rows(rows)[:WEEKLY_BOARD_PUSH_SIZE]
+            if improved:
+                progress_sections[platform] = improved
+            if regressed:
+                regress_sections[platform] = regressed
+        if not progress_sections and not regress_sections:
+            return ""
+        lines: List[str] = []
+
+        def _append_board(title: str, sections: Dict[str, list]) -> None:
+            if not sections:
+                return
+            if lines:
+                lines.append("")
+            lines.append(title)
+            for platform, rows in sections.items():
+                lines.append(f"— {PLATFORM_LABELS.get(platform, platform)} —")
+                for index, row in enumerate(rows, 1):
+                    name = (
+                        str(row.get("display_name") or "").strip()
+                        or str(row.get("handle") or "未知成员")
+                    )
+                    current = (
+                        row.get("current_display_value")
+                        or row.get("display_value")
+                        or "—"
+                    )
+                    lines.append(
+                        f"{index}. {name} "
+                        f"{_format_signed_number(row.get('delta'))}"
+                        f"（当前 {current}）"
+                    )
+
+        _append_board("📈 本周进步榜", progress_sections)
+        _append_board("📉 本周退步榜", regress_sections)
+        lines.append("")
+        lines.append(
+            f"提示：每个平台仅显示前 {WEEKLY_BOARD_PUSH_SIZE} 名，"
+            "发送「本周进步榜」「本周退步榜」可查看完整榜单"
+        )
         return "\n".join(lines)
+
+    async def build_test_text(self, group: GroupConfig) -> str:
+        """测试推送内容：优先今日早报，今日无比赛时展示最近一场。
+
+        与真实早报保持一致：末尾同样附加本周进步榜/退步榜，
+        方便在 WebUI 里直接预览早报的完整形态。
+        """
+        boards = ""
+        try:
+            boards = await self.build_weekly_boards_text(group)
+        except Exception:  # noqa: BLE001 - 预览周榜失败不影响测试推送
+            logger.warning("构建测试推送周榜失败", exc_info=True)
+            boards = ""
+        parts: List[str] = []
+        morning = await self.build_morning_text(group)
+        if morning:
+            parts.append(morning)
+        else:
+            settings = await self.get_settings()
+            platforms = [
+                p for p in settings["push_platforms"] if p in group.push_platforms
+            ] or list(DEFAULT_PLATFORMS)
+            best = None
+            for platform in platforms:
+                contests, err = await self.fetcher.fetch_platform(platform)
+                if err or not contests:
+                    continue
+                for contest in contests:
+                    if not contest.is_upcoming():
+                        continue
+                    if best is None or contest.start_time < best.start_time:
+                        best = contest
+            lines = ["🧪 测试推送（今日无比赛，展示最近一场）"]
+            if best is not None:
+                lines.append(best.format_detail())
+            else:
+                lines.append("（当前没有查到未开始的比赛）")
+            parts.append("\n".join(lines))
+        if boards:
+            parts.append(boards)
+        return "\n\n".join(parts)
 
     async def _adaptive_results(
         self, event: AstrMessageEvent, text: str

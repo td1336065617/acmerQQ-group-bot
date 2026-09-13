@@ -147,12 +147,34 @@ class PushScheduler:
             logger.info("群 %s 今日早报已发送过，跳过", group.group_id)
             return
         text = await self.plugin.build_morning_text(group)
-        if not text:
-            logger.info("群 %s 今日无比赛，跳过早报", group.group_id)
+        # 周榜（本周进步榜 / 本周退步榜）算早报的一部分：即使今日没有比赛，
+        # 只要周榜有数据就照常推送。
+        boards = ""
+        board_builder = getattr(
+            self.plugin, "build_weekly_boards_text", None
+        )
+        if callable(board_builder):
+            try:
+                boards = await board_builder(group) or ""
+            except Exception:  # noqa: BLE001 - 周榜失败不影响比赛早报
+                logger.warning(
+                    "群 %s 周榜构建失败，仅推送比赛早报",
+                    group.group_id,
+                    exc_info=True,
+                )
+                boards = ""
+        parts = [item for item in (text, boards) if item]
+        if not parts:
+            logger.info(
+                "群 %s 今日无比赛且暂无周榜数据，跳过早报", group.group_id
+            )
             await self.plugin.put_kv_data(sent_key, True)
             logger.info("群 %s 早报处理完成", group.group_id)
             return
-        sent = await self.plugin.send_notification(group, text)
+        if not text:
+            logger.info("群 %s 今日无比赛，仅推送周榜", group.group_id)
+        combined = "\n\n".join(parts)
+        sent = await self.plugin.send_notification(group, combined)
         if sent:
             await self.plugin.put_kv_data(sent_key, True)
             logger.info("群 %s 早报处理完成", group.group_id)
