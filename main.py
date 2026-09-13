@@ -2995,12 +2995,14 @@ class AcmerGroupBot(Star):
             return None
         return "\n".join(lines)
 
-    async def build_weekly_boards_text(self, group: GroupConfig) -> str:
-        """构建「本周进步榜 + 本周退步榜」推送文本（每日早报的一部分）。
+    async def build_weekly_board_cards(
+        self, group: GroupConfig
+    ) -> List[Dict[str, Any]]:
+        """渲染「本周进步榜」「本周退步榜」两张总览卡（供早报追加推送）。
 
-        - 与交互指令共用同一份 progress 快照，**不额外抓取 OJ 数据**；
-        - 每个平台只列前 WEEKLY_BOARD_PUSH_SIZE 名，保持推送可读；
-        - 两个榜单都没有数据时返回空串（调用方据此判断是否还有内容可发）。
+        - 与交互指令 `本周进步榜` / `本周退步榜` 完全相同的卡片；
+        - 复用 progress 快照，**不额外抓取 OJ 数据**；
+        - 无数据的榜单不返回；卡片渲染失败时带纯文本兜底（image=None）。
         """
         settings = await self.get_settings()
         platforms = [
@@ -3017,7 +3019,7 @@ class AcmerGroupBot(Star):
                     record_metrics=True,
                     allow_stale=True,
                 )
-            except Exception as exc:  # noqa: BLE001 - 单个平台失败不影响早报
+            except Exception as exc:  # noqa: BLE001 - 单平台失败不影响早报
                 logger.warning(
                     "构建群 %s 的 %s 周榜失败：%s",
                     group.group_id,
@@ -3025,54 +3027,128 @@ class AcmerGroupBot(Star):
                     exc,
                 )
                 continue
-            improved = [
-                row
-                for row in rows
-                if isinstance(row, dict)
-                and isinstance(row.get("delta"), int)
-                and row["delta"] > 0
-            ][: WEEKLY_BOARD_PUSH_SIZE]
-            regressed = self._regress_rows(rows)[:WEEKLY_BOARD_PUSH_SIZE]
-            if improved:
-                progress_sections[platform] = improved
+            # 与交互指令保持一致：进步榜取快照前 N（按变化降序），
+            # 退步榜取下降成员前 N（按跌幅降序）。
+            if rows:
+                progress_sections[platform] = rows[:RANK_OVERVIEW_SIZE]
+            regressed = self._regress_rows(rows)[:RANK_OVERVIEW_SIZE]
             if regressed:
                 regress_sections[platform] = regressed
-        if not progress_sections and not regress_sections:
-            return ""
-        lines: List[str] = []
 
-        def _append_board(title: str, sections: Dict[str, list]) -> None:
+        boards: List[Dict[str, Any]] = []
+        for title, sections, hint in (
+            ("本群本周进步榜", progress_sections, "近 7 日 Rating 进步最多的成员"),
+            ("本群本周退步榜", regress_sections, "近 7 日 Rating 下降最多的成员"),
+        ):
             if not sections:
-                return
-            if lines:
-                lines.append("")
-            lines.append(title)
-            for platform, rows in sections.items():
-                lines.append(f"— {PLATFORM_LABELS.get(platform, platform)} —")
-                for index, row in enumerate(rows, 1):
-                    name = (
-                        str(row.get("display_name") or "").strip()
-                        or str(row.get("handle") or "未知成员")
-                    )
-                    current = (
-                        row.get("current_display_value")
-                        or row.get("display_value")
-                        or "—"
-                    )
-                    lines.append(
-                        f"{index}. {name} "
-                        f"{_format_signed_number(row.get('delta'))}"
-                        f"（当前 {current}）"
-                    )
+                continue
+            note = (
+                f"{hint} · 暂无完整一周快照的成员不计入 · "
+                f"每个平台仅前 {RANK_OVERVIEW_SIZE} 名"
+            )
+            image_path = await self._render_overview_card(
+                sections,
+                title=title,
+                subtitle=(
+                    f"四平台公开战绩矩阵 · 每个平台前 {RANK_OVERVIEW_SIZE} 名"
+                ),
+                metric_label="近7日变化",
+                note=note,
+                secondary_label="",
+                secondary_value_key="current_display_value",
+            )
+            boards.append(
+                {
+                    "title": title,
+                    "image": image_path,
+                    "text": self._weekly_board_text(title, sections, note),
+                }
+            )
+        return boards
 
-        _append_board("📈 本周进步榜", progress_sections)
-        _append_board("📉 本周退步榜", regress_sections)
-        lines.append("")
-        lines.append(
-            f"提示：每个平台仅显示前 {WEEKLY_BOARD_PUSH_SIZE} 名，"
-            "发送「本周进步榜」「本周退步榜」可查看完整榜单"
-        )
+    @staticmethod
+    def _weekly_board_text(
+        title: str, sections: Dict[str, list], note: str = ""
+    ) -> str:
+        """周榜卡片的纯文本兜底（卡片渲染不可用时发送）。"""
+        icon = "📉" if "退步" in title else "📈"
+        lines = [f"{icon} {title}"]
+        for platform, rows in sections.items():
+            lines.append(f"【{platform_label(platform)}】")
+            for index, row in enumerate(rows, 1):
+                name = (
+                    str(row.get("display_name") or "").strip()
+                    or str(row.get("handle") or "未知成员")
+                )
+                current = (
+                    row.get("current_display_value")
+                    or row.get("display_value")
+                    or "—"
+                )
+                lines.append(
+                    f"{index}. {name} "
+                    f"{_format_signed_number(row.get('delta'))}"
+                    f"（当前 {current}）"
+                )
+        if note:
+            lines.append(f"提示：{note}")
         return "\n".join(lines)
+
+    async def _send_group_image(
+        self, group: GroupConfig, image_path, *, caption: str = ""
+    ) -> bool:
+        """主动向群发送一张图片（用于周榜卡片）；失败返回 False。"""
+        if not self._group_scene_ready(group.group_id):
+            logger.warning(
+                "群 %s 主动推送会话未就绪，跳过图片推送（%s）",
+                group.group_id,
+                caption,
+            )
+            return False
+        session = MessageSesion(
+            platform_name=group.platform_id or self._qq_platform_id(),
+            message_type=MessageType.GROUP_MESSAGE,
+            session_id=str(group.group_id),
+        )
+        chain = MessageChain([Image.fromFileSystem(str(image_path))])
+        try:
+            ok = await self.context.send_message(session, chain)
+        except Exception as exc:  # noqa: BLE001 - 图片推送失败由调用方决定后续
+            logger.error(
+                "群 %s 图片推送异常（%s）：%s", group.group_id, caption, exc
+            )
+            return False
+        if not ok:
+            logger.warning(
+                "群 %s 图片推送失败（%s，可能未找到匹配平台）",
+                group.group_id,
+                caption,
+            )
+        return bool(ok)
+
+    async def push_weekly_boards(self, group: GroupConfig) -> bool:
+        """推送两张周榜卡：先进步榜、后退步榜。图片优先，渲染失败回退文字。"""
+        boards = await self.build_weekly_board_cards(group)
+        if not boards:
+            return True  # 没有可推送的周榜数据，不算失败
+        all_ok = True
+        for board in boards:
+            title = str(board.get("title") or "")
+            image_path = board.get("image")
+            if image_path is not None and Path(image_path).is_file():
+                ok = await self._send_group_image(
+                    group, image_path, caption=title
+                )
+            else:
+                ok = await self.send_notification(
+                    group, str(board.get("text") or "")
+                )
+            if ok:
+                logger.info("群 %s 已推送 %s", group.group_id, title)
+            else:
+                all_ok = False
+                logger.warning("群 %s 的 %s 推送失败", group.group_id, title)
+        return all_ok
 
     async def build_test_text(self, group: GroupConfig) -> str:
         """测试推送内容：优先今日早报，今日无比赛时展示最近一场。
@@ -3725,4 +3801,9 @@ class AcmerGroupBot(Star):
         sent = await self.send_notification(group, text)
         if not sent:
             return error_response("发送失败，请查看 AstrBot 日志")
+        # 与真实早报一致：正文之后追加两张周榜图片，便于在后台预览完整效果。
+        try:
+            await self.push_weekly_boards(group)
+        except Exception:  # noqa: BLE001 - 周榜预览失败不影响测试推送结果
+            logger.warning("测试推送的周榜发送失败", exc_info=True)
         return json_response({"status": "success", "data": {"message": "测试推送已发送"}})

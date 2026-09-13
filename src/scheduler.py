@@ -147,39 +147,47 @@ class PushScheduler:
             logger.info("群 %s 今日早报已发送过，跳过", group.group_id)
             return
         text = await self.plugin.build_morning_text(group)
-        # 周榜（本周进步榜 / 本周退步榜）算早报的一部分：即使今日没有比赛，
-        # 只要周榜有数据就照常推送。
-        boards = ""
-        board_builder = getattr(
-            self.plugin, "build_weekly_boards_text", None
-        )
-        if callable(board_builder):
-            try:
-                boards = await board_builder(group) or ""
-            except Exception:  # noqa: BLE001 - 周榜失败不影响比赛早报
-                logger.warning(
-                    "群 %s 周榜构建失败，仅推送比赛早报",
-                    group.group_id,
-                    exc_info=True,
-                )
-                boards = ""
-        parts = [item for item in (text, boards) if item]
-        if not parts:
+        # 早报正文保持原样（有比赛才发）；随后无论有没有比赛，都追加两张周榜图片
+        # （本周进步榜、本周退步榜）。周榜属于早报的一部分，不单独设开关。
+        board_pusher = getattr(self.plugin, "push_weekly_boards", None)
+        if not text:
             logger.info(
-                "群 %s 今日无比赛且暂无周榜数据，跳过早报", group.group_id
+                "群 %s 今日无比赛，仅推送周榜（若有数据）", group.group_id
             )
+        text_sent = True
+        if text:
+            text_sent = await self.plugin.send_notification(group, text)
+            if not text_sent:
+                logger.warning(
+                    "群 %s 早报发送失败，下个周期重试", group.group_id
+                )
+                return
+        boards_sent = True
+        if callable(board_pusher):
+            try:
+                boards_sent = await board_pusher(group)
+            except Exception:  # noqa: BLE001 - 周榜失败不影响已发出的早报
+                logger.warning(
+                    "群 %s 周榜推送异常", group.group_id, exc_info=True
+                )
+                boards_sent = False
+        if text:
+            # 正文已送达就标记完成，避免下个周期重复发送早报；
+            # 周榜失败仅记录日志（可用指令手动查看）。
             await self.plugin.put_kv_data(sent_key, True)
+            if not boards_sent:
+                logger.warning(
+                    "群 %s 早报已发送，但周榜推送失败", group.group_id
+                )
             logger.info("群 %s 早报处理完成", group.group_id)
             return
-        if not text:
-            logger.info("群 %s 今日无比赛，仅推送周榜", group.group_id)
-        combined = "\n\n".join(parts)
-        sent = await self.plugin.send_notification(group, combined)
-        if sent:
+        if boards_sent:
             await self.plugin.put_kv_data(sent_key, True)
-            logger.info("群 %s 早报处理完成", group.group_id)
+            logger.info("群 %s 周榜处理完成", group.group_id)
         else:
-            logger.warning("群 %s 早报发送失败，下个周期重试", group.group_id)
+            logger.warning(
+                "群 %s 周榜推送失败，下个周期重试", group.group_id
+            )
 
     async def _maybe_remind(
         self,

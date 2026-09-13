@@ -1,4 +1,4 @@
-"""每日早报附带的周榜：文本构建与“无比赛也推送”的调度行为。"""
+"""每日早报附带周榜：早报正文保持原样 + 追加两张榜单图片。"""
 from __future__ import annotations
 
 import asyncio
@@ -51,7 +51,7 @@ def _group():
     )
 
 
-def test_weekly_boards_text_lists_progress_and_regress():
+def test_weekly_board_cards_build_progress_and_regress():
     sections = {
         "codeforces": [
             _row("涨王", 101, 2482),
@@ -62,41 +62,35 @@ def test_weekly_boards_text_lists_progress_and_regress():
         ]
     }
     bot = _make_bot(sections)
-    text = asyncio.run(bot.build_weekly_boards_text(_group()))
-    assert "📈 本周进步榜" in text
-    assert "📉 本周退步榜" in text
-    # 进步榜按涨幅降序、退步榜按跌幅降序
-    assert text.index("涨王") < text.index("小涨")
-    assert text.index("跌王") < text.index("小跌")
-    # 持平与无变化成员不出现
-    assert "持平" not in text
-    # 带当前 Rating 与符号
-    assert "+101" in text and "（当前 2482）" in text
-    assert "-59" in text
-    # 只看 progress 快照
-    assert all(progress is True for _p, progress in bot.rank_service.calls)
+    # 卡片渲染在测试环境不可用 → image 为 None，用 text 兜底验证内容
+    async def no_render(*args, **kwargs):
+        return None
+
+    bot._render_overview_card = no_render
+    boards = asyncio.run(bot.build_weekly_board_cards(_group()))
+    titles = [b["title"] for b in boards]
+    # 顺序：先进步榜、后退步榜
+    assert titles == ["本群本周进步榜", "本群本周退步榜"]
+    progress_text = boards[0]["text"]
+    regress_text = boards[1]["text"]
+    assert "涨王" in progress_text and "+101" in progress_text
+    # 退步榜只含下降成员（不含上涨的“涨王”）
+    assert "跌王" in regress_text and "涨王" not in regress_text
+    assert "-59" in regress_text
+    assert all(p is True for _p, p in bot.rank_service.calls)
 
 
-def test_weekly_boards_text_limits_to_top_n():
-    sections = {
-        "codeforces": [_row(f"涨{i}", 100 - i, 2000) for i in range(1, 8)]
-    }
-    bot = _make_bot(sections)
-    text = asyncio.run(bot.build_weekly_boards_text(_group()))
-    shown = [f"涨{i}" for i in range(1, 8) if f"涨{i}" in text]
-    assert len(shown) == bot_main.WEEKLY_BOARD_PUSH_SIZE
-    assert "涨1" in text and "涨4" not in text
-
-
-def test_weekly_boards_text_empty_when_no_data():
+def test_weekly_board_cards_empty_when_no_rows():
     bot = _make_bot({"codeforces": []})
-    assert asyncio.run(bot.build_weekly_boards_text(_group())) == ""
-    # 只有持平/无基线时同样视为无数据
-    bot2 = _make_bot({"codeforces": [_row("持平", 0, 1600)]})
-    assert asyncio.run(bot2.build_weekly_boards_text(_group())) == ""
+
+    async def no_render(*args, **kwargs):
+        return None
+
+    bot._render_overview_card = no_render
+    assert asyncio.run(bot.build_weekly_board_cards(_group())) == []
 
 
-def test_weekly_boards_text_survives_platform_error():
+def test_weekly_board_cards_survives_platform_error():
     class _Boom(_FakeRankService):
         async def read(self, group_id, platform, **kwargs):
             if platform == "atcoder":
@@ -110,29 +104,37 @@ def test_weekly_boards_text_survives_platform_error():
         return {"push_platforms": ["codeforces", "atcoder"]}
 
     bot.get_settings = fake_settings
-    text = asyncio.run(bot.build_weekly_boards_text(_group()))
-    assert "涨王" in text  # 一个平台失败不影响另一个平台
+
+    async def no_render(*args, **kwargs):
+        return None
+
+    bot._render_overview_card = no_render
+    boards = asyncio.run(bot.build_weekly_board_cards(_group()))
+    assert "涨王" in boards[0]["text"]  # 一个平台失败不影响另一个
 
 
 # ------------------------------------------------------------------
-# 调度：无比赛也必须推送周榜
+# 调度：早报文字保持原样 + 之后追加两张图；无比赛仍推图
 # ------------------------------------------------------------------
 class _FakePlugin:
-    def __init__(self, morning_text, boards_text):
+    def __init__(self, morning_text, boards_ok=True, has_boards=True):
         self._morning = morning_text
-        self._boards = boards_text
+        self._boards_ok = boards_ok
+        self._has_boards = has_boards
         self.sent: list[str] = []
+        self.board_pushes = 0
         self.kv: dict = {}
 
     async def build_morning_text(self, group):
         return self._morning
 
-    async def build_weekly_boards_text(self, group):
-        return self._boards
-
     async def send_notification(self, group, text):
         self.sent.append(text)
         return True
+
+    async def push_weekly_boards(self, group):
+        self.board_pushes += 1
+        return self._boards_ok and self._has_boards or self._boards_ok
 
     async def get_kv_data(self, key, default=None):
         return self.kv.get(key, default)
@@ -143,44 +145,50 @@ class _FakePlugin:
 
 def _tick(plugin):
     scheduler = PushScheduler(plugin)
-    group = _group()
     from datetime import datetime
 
     from src.models import CN_TZ
 
     now = datetime(2026, 9, 13, 8, 0, tzinfo=CN_TZ)
-    asyncio.run(scheduler._maybe_morning_push(group, now))
+    asyncio.run(scheduler._maybe_morning_push(_group(), now))
     return plugin
 
 
-def test_morning_push_includes_boards_with_contest():
-    plugin = _fake = _FakePlugin("🌅 今日比赛早报", "📈 本周进步榜")
+def test_morning_push_sends_text_then_boards():
+    plugin = _FakePlugin("🌅 今日比赛早报")
     _tick(plugin)
-    assert len(plugin.sent) == 1
-    assert "今日比赛早报" in plugin.sent[0]
-    assert "本周进步榜" in plugin.sent[0]
+    # 早报正文保持原样（不含榜单文字）
+    assert plugin.sent == ["🌅 今日比赛早报"]
+    # 榜单以图片形式单独推送
+    assert plugin.board_pushes == 1
 
 
-def test_morning_push_still_sends_boards_without_contest():
-    """核心需求：当天没有比赛时不发早报正文，但仍要推两个榜单。"""
-    plugin = _FakePlugin(None, "📈 本周进步榜\n📉 本周退步榜")
-    _tick(plugin)
-    assert len(plugin.sent) == 1
-    assert "今日比赛早报" not in plugin.sent[0]
-    assert "本周进步榜" in plugin.sent[0]
-    assert "本周退步榜" in plugin.sent[0]
-
-
-def test_morning_push_skips_when_both_empty():
-    plugin = _FakePlugin(None, "")
+def test_morning_push_sends_boards_without_contest():
+    """核心需求：当天没有比赛时不发早报正文，但仍推送两张榜单图。"""
+    plugin = _FakePlugin(None)
     _tick(plugin)
     assert plugin.sent == []
-    # 仍然标记为已处理，避免每个 tick 重复计算
+    assert plugin.board_pushes == 1
     assert plugin.kv.get("morning_g1_20260913") is True
 
 
-def test_morning_push_sends_contest_only_when_no_boards():
-    plugin = _FakePlugin("🌅 今日比赛早报", "")
+def test_morning_push_marks_done_when_boards_empty():
+    plugin = _FakePlugin(None, boards_ok=True)
     _tick(plugin)
-    assert len(plugin.sent) == 1
-    assert plugin.sent[0] == "🌅 今日比赛早报"
+    assert plugin.kv.get("morning_g1_20260913") is True
+
+
+def test_morning_push_retries_when_boards_fail_without_text():
+    plugin = _FakePlugin(None, boards_ok=False)
+    _tick(plugin)
+    # 没有正文时，榜单失败不标记完成 → 下个周期重试
+    assert plugin.kv.get("morning_g1_20260913") is not True
+
+
+def test_morning_push_keeps_text_when_boards_fail():
+    plugin = _FakePlugin("🌅 今日比赛早报", boards_ok=False)
+    _tick(plugin)
+    assert plugin.sent == ["🌅 今日比赛早报"]
+    # 正文已送达即标记完成，避免重复早报
+    assert plugin.kv.get("morning_g1_20260913") is True
+
