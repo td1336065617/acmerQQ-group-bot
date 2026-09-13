@@ -229,6 +229,9 @@ LEAVE_RANK_COMMANDS = {
 GROUP_RANK_COMMANDS = {
     normalize_command("群排行"): None,
     normalize_command("本周进步榜"): "progress",
+    normalize_command("本周退步榜"): "regress",
+    normalize_command("本周掉分榜"): "regress",
+    normalize_command("退步榜"): "regress",
     normalize_command("群cf排行"): "codeforces",
     normalize_command("群codeforces排行"): "codeforces",
     normalize_command("群牛客排行"): "nowcoder",
@@ -259,6 +262,7 @@ MENU_TEXT = (
     "• 群排行 ─ 查看四个平台排行总览\n"
     "• 群cf排行/群牛客排行/群洛谷排行/群atcoder排行 ─ 查看平台排行（每页30人，可加页码）\n"
     "• 本周进步榜 ─ 查看各平台本周 Rating 变化\n"
+    "• 本周退步榜 ─ 查看各平台本周 Rating 下降最多的成员\n"
     "• 加入群排行/退出群排行 ─ 管理当前群的排行展示\n"
     "• 最近比赛 ─ 汇总所有平台未来 N 天内及进行中的比赛（N 可在 WebUI 设置）\n"
     "• nk比赛 / 牛客比赛 ─ 牛客全部未开始比赛\n"
@@ -2435,6 +2439,36 @@ class AcmerGroupBot(Star):
         else:
             yield event.plain_result("✅ 已退出本群排行")
 
+    @staticmethod
+    def _regress_rows(rows: List[dict]) -> List[dict]:
+        """本周退步榜：只保留近 7 日 Rating **下降**的成员，按下滑幅度从大到小排。
+
+        与进步榜共用同一份「近 7 日变化」数据：进步榜是 delta 降序取正，
+        退步榜是 delta 升序取负（例如 -120 排在 -30 前面）。
+        没有历史基线的成员 delta 为 None，不计入。
+        """
+        regressed = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            delta = row.get("delta")
+            try:
+                value = int(delta)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                continue  # 只统计下降；0 视为未变化
+            item = dict(row)
+            item["sort_value"] = value
+            regressed.append(item)
+        regressed.sort(
+            key=lambda item: (
+                int(item.get("sort_value") or 0),
+                str(item.get("display_name") or "").casefold(),
+            )
+        )
+        return regressed
+
     async def _reply_group_rank(
         self,
         event: AstrMessageEvent,
@@ -2462,6 +2496,10 @@ class AcmerGroupBot(Star):
             else list(ACCOUNT_PLATFORMS)
         )
         progress = mode == "progress"
+        regress = mode == "regress"
+        # 进步榜与退步榜共用同一份「近 7 日变化」数据（同一个 progress 快照），
+        # 区别只在筛选与排序：进步=变化为正且降序，退步=变化为负且升序。
+        delta_mode = progress or regress
         sections = {}
         errors = []
         for platform in platforms:
@@ -2469,7 +2507,7 @@ class AcmerGroupBot(Star):
                 rows, row_errors = await self.rank_service.read(
                     group_id,
                     platform,
-                    progress=progress,
+                    progress=delta_mode,
                     record_metrics=True,
                     allow_stale=True,
                 )
@@ -2482,6 +2520,8 @@ class AcmerGroupBot(Star):
                     exc_info=True,
                 )
                 rows, row_errors = [], [("", exc)]
+            if regress:
+                rows = self._regress_rows(rows)
             sections[platform] = rows
             errors.extend((platform, error) for _, error in row_errors)
 
@@ -2563,16 +2603,27 @@ class AcmerGroupBot(Star):
                     yield event.plain_result(
                         "⚠️ 群排行暂时无法读取，请稍后重试"
                     )
+                elif regress:
+                    yield event.plain_result(
+                        "🎉 本周没有成员 Rating 下降"
+                        "（也可能是成员暂无完整一周快照）"
+                    )
                 else:
                     yield event.plain_result("当前群还没有加入排行的成员")
                 return
-            title = "本群竞赛排行总览" if not progress else "本群本周进步榜"
-            metric = "Rating" if not progress else "近7日变化"
-            note = (
-                "各平台分开排行，不直接比较不同平台 Rating"
-                if not progress
-                else "暂无完整一周快照的成员会暂不计入"
-            )
+            if regress:
+                title = "本群本周退步榜"
+            elif progress:
+                title = "本群本周进步榜"
+            else:
+                title = "本群竞赛排行总览"
+            metric = "Rating" if not delta_mode else "近7日变化"
+            if regress:
+                note = "仅显示近 7 日 Rating 下降的成员；暂无完整一周快照的成员不计入"
+            elif progress:
+                note = "暂无完整一周快照的成员会暂不计入"
+            else:
+                note = "各平台分开排行，不直接比较不同平台 Rating"
             overview_sections = {
                 platform: rows[:RANK_OVERVIEW_SIZE]
                 for platform, rows in sections.items()
@@ -2587,9 +2638,9 @@ class AcmerGroupBot(Star):
                 subtitle=f"四平台公开战绩矩阵 · 每个平台前 {RANK_OVERVIEW_SIZE} 名",
                 metric_label=metric,
                 note=note,
-                secondary_label="" if progress else "近7日变化",
+                secondary_label="" if delta_mode else "近7日变化",
                 secondary_value_key=(
-                    "current_display_value" if progress else "delta"
+                    "current_display_value" if delta_mode else "delta"
                 ),
             )
             fallback_lines = [title]
@@ -2602,7 +2653,7 @@ class AcmerGroupBot(Star):
                 )
                 section_metric_header = (
                     progress_metric_header(section_metric)
-                    if progress
+                    if delta_mode
                     else current_metric_header(section_metric)
                 )
                 for i, row in enumerate(rows, 1):
@@ -2611,7 +2662,7 @@ class AcmerGroupBot(Star):
                         "current_display_value",
                         row.get("rating"),
                     )
-                    if progress:
+                    if delta_mode:
                         value_text = (
                             f"近7日变化：{value} · "
                             f"{section_metric_header}：{current_value or '—'}"
