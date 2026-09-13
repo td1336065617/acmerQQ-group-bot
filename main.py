@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # AstrBot 按 `data.plugins.<插件目录>.main` 加载插件，使用相对导入可避免
 # 不同插件/旧版本之间共享顶层 `src` 模块缓存。
@@ -2440,6 +2440,41 @@ class AcmerGroupBot(Star):
             yield event.plain_result("✅ 已退出本群排行")
 
     @staticmethod
+    def _rank_error_notice(errors) -> Optional[str]:
+        """把逐账号失败汇总成一条精确提示；无失败时返回 None。
+
+        - 含糊的“部分账号同步失败”会让用户以为插件坏了（实测反馈），
+          因此明确给出：平台、账号数量、一条原因、以及影响范围。
+        """
+        pairs = [
+            (str(platform or ""), str(error or "").strip())
+            for platform, error in (errors or [])
+        ]
+        if not pairs:
+            return None
+        counts: Dict[str, int] = {}
+        reasons: Dict[str, str] = {}
+        for platform, error in pairs:
+            counts[platform] = counts.get(platform, 0) + 1
+            if error:
+                reasons.setdefault(platform, error)
+        parts = []
+        for platform, count in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0])
+        ):
+            label = platform_label(platform)
+            parts.append(f"{label} {count} 个账号" if count != 1 else f"{label} 1 个账号")
+            reason = reasons.get(platform)
+            if reason:
+                parts.append(f"（{label}：{reason[:40]}）")
+        return (
+            "⚠️ 本次有账号资料同步失败："
+            + "".join(parts)
+            + "。常见原因是平台临时限流或账号资料暂不可读，"
+            "稍后重试即可；这些账号本次不计入排行。"
+        )
+
+    @staticmethod
     def _regress_rows(rows: List[dict]) -> List[dict]:
         """本周退步榜：只保留近 7 日 Rating **下降**的成员，按下滑幅度从大到小排。
 
@@ -2683,14 +2718,9 @@ class AcmerGroupBot(Star):
         else:
             async for result in self._adaptive_results(event, fallback):
                 yield result
-        if errors:
-            failed_platforms = list(
-                dict.fromkeys(platform for platform, _ in errors)
-            )
-            yield event.plain_result(
-                "⚠️ 部分账号同步失败，排行可能不完整："
-                + "、".join(platform_label(p) for p in failed_platforms)
-            )
+        notice = self._rank_error_notice(errors)
+        if notice:
+            yield event.plain_result(notice)
 
     async def _raw_groups(self, *, fresh: bool = False) -> dict:
         """读取 KV 中的群配置原始字典；非 fresh 时命中 30s 内存缓存。
