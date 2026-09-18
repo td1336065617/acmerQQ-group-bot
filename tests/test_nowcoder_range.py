@@ -596,3 +596,63 @@ def test_flush_persists_index_without_sqlite_store(tmp_path):
         assert fetcher._nowcoder_problem_index_dirty is False
 
     asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------
+# 平台内排名（rating_rank）
+# ----------------------------------------------------------------------
+
+
+def test_codeforces_global_rank_uses_cached_ratings():
+    """CF 全站排名 = 排序数组二分；命中缓存时不重复请求。"""
+    from src.account_fetcher import AccountFetcher
+
+    async def scenario():
+        fetcher = AccountFetcher()
+        fetcher._cf_rated_ratings = (time.time(), [3655, 3301, 2000, 1500, 1200, 800])
+
+        async def fail(*args, **kwargs):  # 不应被调用
+            raise AssertionError("命中缓存后不应再请求")
+
+        fetcher._cf_json = fail
+        assert await fetcher.codeforces_global_rank(3655) == 1
+        assert await fetcher.codeforces_global_rank(2000) == 3
+        # 1000 分：比它高的有 5 人（3655/3301/2000/1500/1200）→ 名次 6
+        assert await fetcher.codeforces_global_rank(1000) == 6
+        # 500 分：全部 6 人都比它高 → 名次 7
+        assert await fetcher.codeforces_global_rank(500) == 7
+        assert await fetcher.codeforces_global_rank(None) is None
+
+    asyncio.run(scenario())
+
+
+def test_atcoder_rank_parsed_from_user_page():
+    from src.account_fetcher import AccountFetcher
+
+    html = (
+        '<table><tr><th class="no-break">Rank</th>'
+        '<td>48th <span class="gray">(Top 0.04%)</span></td></tr></table>'
+    )
+    cell = AccountFetcher._atcoder_table_value(html, "Rank")
+    assert "48th" in cell
+    import re as _re
+
+    assert int(_re.search(r"(\d+)", cell).group(1)) == 48
+
+
+def test_profile_card_shows_platform_rank():
+    """资料卡必须把 rating_rank 渲染成「平台排名 #N」。"""
+    from src.account_models import AccountProfile
+
+    profile = AccountProfile(
+        platform="codeforces",
+        handle="tourist",
+        platform_user_id="tourist",
+        rating=3301,
+        rating_rank=5,
+    )
+    from src.account_cards import _profile_stats
+
+    stats = dict(_profile_stats(profile))
+    assert "平台排名" in stats, stats
+    assert stats["平台排名"] == "5", stats

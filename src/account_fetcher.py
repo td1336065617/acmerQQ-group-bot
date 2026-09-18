@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import html
 import json
 import os
@@ -103,6 +104,10 @@ NOWCODER_PROBLEM_INDEX_PAGE_SIZE = 50
 NOWCODER_PROBLEM_INDEX_CONCURRENCY = 6
 NOWCODER_PROBLEM_INDEX_TTL = 7 * 24 * 3600
 NOWCODER_PROBLEM_INDEX_VERSION = 2
+#: CF 全站 rating 榜（user.ratedList）：实测 3.8 万人 / 13.5MB / 约 20 秒，
+#: 只落盘排序后的 rating 数组（约 150KB），24 小时有效。
+CF_RATED_LIST_TTL = 24 * 3600
+CF_RATED_LIST_TIMEOUT = 60.0
 # 整库约 1.4 万题；条目数明显偏少说明抓取残缺，直接丢弃重建。
 NOWCODER_PROBLEM_INDEX_MIN_ENTRIES = 5000
 NOWCODER_PROBLEM_INDEX_FILENAME = "nowcoder_problem_index.json"
@@ -350,6 +355,7 @@ class AccountFetcher:
         # 牛客题库索引：{problem_id: {"d": difficulty|None, "t": [知识点]}}。
         # 整库抓取一次（约 1.4 万题）后本地查表，覆盖全部通过题。
         self._nowcoder_problem_index: Dict[str, Dict[str, Any]] = {}
+        self._cf_rated_ratings: Optional[Tuple[float, List[int]]] = None
         self._nowcoder_problem_index_loaded_at = 0.0
         self._nowcoder_problem_index_dirty = False
         self._nowcoder_problem_index_lock = asyncio.Lock()
@@ -1045,6 +1051,67 @@ class AccountFetcher:
         except json.JSONDecodeError as exc:
             raise AccountFetchError("平台返回的数据格式异常，请稍后重试") from exc
 
+    # ------------------------------------------------------------------
+    # 平台内排名（rating_rank）
+    # ------------------------------------------------------------------
+    def cf_rank_cache_path(self) -> Path:
+        """CF 全站 rating 数组的落盘位置（只存整数，约 150KB）。"""
+        return self.index_path().with_name("codeforces_rated_ratings.json")
+
+    async def codeforces_global_rank(self, rating: Optional[int]) -> Optional[int]:
+        """按 CF 全站已评级用户算该 rating 的名次（1 = 分数最高）。"""
+        if not rating:
+            return None
+        ratings = await self._codeforces_rated_ratings()
+        if not ratings:
+            return None
+        negative = [-value for value in ratings]
+        return bisect.bisect_left(negative, -int(rating)) + 1
+
+    async def _codeforces_rated_ratings(self) -> List[int]:
+        """CF 全站已评级用户的 rating（降序），带内存 + 落盘缓存。"""
+        cached = self._cf_rated_ratings
+        if cached is not None and time.time() - cached[0] < CF_RATED_LIST_TTL:
+            return cached[1]
+        path = self.cf_rank_cache_path()
+        try:
+            if path.is_file():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                fetched_at = float(payload.get("fetched_at") or 0)
+                ratings = [int(item) for item in (payload.get("ratings") or [])]
+                if ratings and time.time() - fetched_at < CF_RATED_LIST_TTL:
+                    self._cf_rated_ratings = (fetched_at, ratings)
+                    return ratings
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning("读取 CF 全站 rating 缓存失败：%s", exc)
+        payload = await self._cf_json(
+            "user.ratedList", {"activeOnly": "true"}, timeout=CF_RATED_LIST_TIMEOUT
+        )
+        if not isinstance(payload, dict) or payload.get("status") != "OK":
+            return []
+        rows = payload.get("result") or []
+        ratings = sorted(
+            (int(row.get("rating") or 0) for row in rows if isinstance(row, dict)),
+            reverse=True,
+        )
+        ratings = [value for value in ratings if value > 0]
+        if not ratings:
+            return []
+        self._cf_rated_ratings = (time.time(), ratings)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {"fetched_at": time.time(), "ratings": ratings},
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("写入 CF 全站 rating 缓存失败：%s", exc)
+        logger.info("CF 全站 rating 榜已更新：%d 人", len(ratings))
+        return ratings
+
     async def _cf_json(
         self,
         method: str,
@@ -1112,6 +1179,13 @@ class AccountFetcher:
         canonical = str(user.get("handle") or handle)
         profile = self._profile_from_codeforces_user(user)
         if detail:
+            # 平台内排名：按全站已评级用户的 rating 分布算名次
+            try:
+                profile.rating_rank = await self.codeforces_global_rank(
+                    profile.rating
+                )
+            except Exception as exc:  # noqa: BLE001 - 排名是附加信息
+                logger.warning("计算 CF 全站排名失败：%s", exc)
             rating_data = await self._cf_json(
                 "user.rating", {"handle": canonical}
             )
@@ -3224,6 +3298,12 @@ class AccountFetcher:
         rank_cell = self._atcoder_table_value(text, "Rank")
         rated_cell = self._atcoder_table_value(text, "Rated Matches")
         affiliation = self._atcoder_table_value(text, "Affiliation")
+        # 用户页 Rank 行形如「48th (Top 0.04%)」→ 平台内排名
+        rank_cell_html = self._atcoder_table_value(text, "Rank")
+        rank_number_match = re.search(r"(\d+)", _clean_text(rank_cell_html))
+        rating_rank = (
+            int(rank_number_match.group(1)) if rank_number_match else None
+        )
         avatar = self._extract_atcoder_avatar(text)
         rating_text = _clean_text(rating_cell)
         highest_text = _clean_text(highest_cell)
@@ -3254,6 +3334,7 @@ class AccountFetcher:
             profile_url=f"https://atcoder.jp/users/{quote(canonical)}",
             verification_value=_clean_text(affiliation),
             rating=rating,
+            rating_rank=rating_rank,
             rank_text=_clean_text(rank_cell),
             max_rating=max_rating,
             contest_count=_parse_int(rated_cell),
