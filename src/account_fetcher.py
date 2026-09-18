@@ -1184,6 +1184,8 @@ class AccountFetcher:
                 profile.rating_rank = await self.codeforces_global_rank(
                     profile.rating
                 )
+                ratings = await self._codeforces_rated_ratings()
+                profile.rating_rank_total = len(ratings) or None
             except Exception as exc:  # noqa: BLE001 - 排名是附加信息
                 logger.warning("计算 CF 全站排名失败：%s", exc)
             rating_data = await self._cf_json(
@@ -1683,7 +1685,10 @@ class AccountFetcher:
             re.I,
         )
         rating = _parse_int(status_numbers[0]) if status_numbers else None
-        rank = _parse_int(status_numbers[1]) if len(status_numbers) > 1 else None
+        # 页面对高排名会截断成「9999+」，这种不能当精确名次（精确值走 rating-basic 接口）
+        rank = None
+        if len(status_numbers) > 1 and "+" not in status_numbers[1]:
+            rank = _parse_int(status_numbers[1])
         count_match = re.search(
             r'class=["\']state-num["\']>(\d+)</div>\s*<span>次比赛',
             text,
@@ -3300,10 +3305,14 @@ class AccountFetcher:
         affiliation = self._atcoder_table_value(text, "Affiliation")
         # 用户页 Rank 行形如「48th (Top 0.04%)」→ 平台内排名
         rank_cell_html = self._atcoder_table_value(text, "Rank")
-        rank_number_match = re.search(r"(\d+)", _clean_text(rank_cell_html))
+        rank_cell_text = _clean_text(rank_cell_html)
+        rank_number_match = re.search(r"(\d+)", rank_cell_text)
         rating_rank = (
             int(rank_number_match.group(1)) if rank_number_match else None
         )
+        # 形如「48th (Top 0.04%)」→ 取出平台自带的百分位文案
+        percentile_match = re.search(r"(Top\s*[\d.]+%)", rank_cell_text, re.I)
+        rating_rank_note = percentile_match.group(1) if percentile_match else "" 
         avatar = self._extract_atcoder_avatar(text)
         rating_text = _clean_text(rating_cell)
         highest_text = _clean_text(highest_cell)
@@ -3335,6 +3344,7 @@ class AccountFetcher:
             verification_value=_clean_text(affiliation),
             rating=rating,
             rating_rank=rating_rank,
+            rating_rank_note=rating_rank_note,
             rank_text=_clean_text(rank_cell),
             max_rating=max_rating,
             contest_count=_parse_int(rated_cell),

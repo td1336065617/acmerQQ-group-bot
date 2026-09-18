@@ -214,3 +214,39 @@ def test_pillow_settlement_draws_column_headers(monkeypatch, tmp_path):
         assert label in drawn, label
     assert "#230" in drawn and "2/6 题" in drawn and "1273 人" in drawn
 
+
+
+def test_platform_rank_text_with_note_total_and_bare():
+    """平台排名文案：#48 · Top 0.04%（平台给百分位）/ 现算 / 只有名次。"""
+    from src.account_cards import _platform_rank_text
+    from src.account_models import AccountProfile
+
+    with_note = AccountProfile(platform="atcoder", handle="a", rating_rank=48,
+                               rating_rank_note="Top 0.04%")
+    assert _platform_rank_text(with_note) == "#48 · Top 0.04%"
+
+    with_total = AccountProfile(platform="codeforces", handle="b", rating_rank=5,
+                                rating_rank_total=37992)
+    assert _platform_rank_text(with_total) == "#5 · Top 0.01%"
+
+    coarse = AccountProfile(platform="codeforces", handle="c", rating_rank=1200,
+                            rating_rank_total=37992)
+    assert _platform_rank_text(coarse) == "#1200 · Top 3.2%"
+
+    bare = AccountProfile(platform="luogu", handle="d", rating_rank=3666)
+    assert _platform_rank_text(bare) == "#3666"
+
+    none = AccountProfile(platform="nowcoder", handle="e")
+    assert _platform_rank_text(none) == ""
+
+
+def test_nowcoder_truncated_page_rank_is_ignored():
+    """页面对高排名显示「9999+」，不能当精确名次。"""
+    import re
+
+    page_numbers = ["2500", "9999+", "31"]
+    rank = None
+    if len(page_numbers) > 1 and "+" not in page_numbers[1]:
+        rank = int(re.search(r"(\d+)", page_numbers[1]).group(1))
+    assert rank is None
+    assert int(re.search(r"(\d+)", page_numbers[1]).group(1)) == 9999  # 页面原值确实是截断的

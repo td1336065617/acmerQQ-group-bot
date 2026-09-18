@@ -655,4 +655,4 @@ def test_profile_card_shows_platform_rank():
 
     stats = dict(_profile_stats(profile))
     assert "平台排名" in stats, stats
-    assert stats["平台排名"] == "5", stats
+    assert stats["平台排名"] == "#5", stats

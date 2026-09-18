@@ -37,6 +37,7 @@ from .src.rank_service import RankService
 from .src.settlement import SETTLE_PLATFORMS, SettlementService
 from .src.problem_service import ProblemService, weak_tags_from_analysis
 from .src.account_cards import (
+    _platform_rank_text,
     AccountCardRenderer,
     current_metric_header,
     progress_metric_header,
@@ -1095,7 +1096,7 @@ class AcmerGroupBot(Star):
             return {
                 "snapshot_key": "luogu_rank",
                 "value": -rank,
-                "display_value": f"#{rank}",
+                "display_value": _platform_rank_text(profile) or f"#{rank}",
                 "metric_label": "平台排名",
                 "sort_value": -rank,
             }
@@ -2528,6 +2529,7 @@ class AcmerGroupBot(Star):
                     "sort_value": sort_value,
                     "delta": delta,
                     "rating": result.rating,
+                    "rating_rank": getattr(result, "rating_rank", None),
                     "current_display_value": metric["display_value"],
                 }
             )

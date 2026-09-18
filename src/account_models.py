@@ -47,6 +47,10 @@ class AccountProfile:
     verification_value: str = ""
     rating: Optional[int] = None
     rating_rank: Optional[int] = None
+    #: 平台已评级总人数（用于算百分位，CF 可得）
+    rating_rank_total: Optional[int] = None
+    #: 平台直接给出的百分位文案（AtCoder 形如 Top 0.04%）
+    rating_rank_note: str = ""
     rank_text: str = ""
     max_rating: Optional[int] = None
     max_rank_text: str = ""
@@ -79,6 +83,8 @@ class AccountProfile:
             "profile_url": self.profile_url,
             "rating": self.rating,
             "rating_rank": self.rating_rank,
+            "rating_rank_total": self.rating_rank_total,
+            "rating_rank_note": self.rating_rank_note,
             "rank_text": self.rank_text,
             "max_rating": self.max_rating,
             "max_rank_text": self.max_rank_text,

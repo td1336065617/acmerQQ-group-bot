@@ -28,7 +28,7 @@ from .output_renderer import (
     prune_cache_dir,
 )
 
-CARD_FORMAT_VERSION = 17
+CARD_FORMAT_VERSION = 18
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -135,6 +135,33 @@ def _format_delta(value: object) -> str:
     except (TypeError, ValueError):
         return str(value)
     return f"{number:+d}"
+
+
+def platform_rank_text(row: object) -> str:
+    """返回排行行携带的「平台排名 #N」；缺失或非法值返回空串。
+
+    与资料卡的「只展示有数据的项」风格一致：调用方据此决定是否追加，
+    避免出现「#None」「—」之类的占位符。
+    """
+    value = row.get("rating_rank") if isinstance(row, dict) else None
+    if value is None:
+        return ""
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if rank <= 0:
+        return ""
+    return f"平台排名 #{rank}"
+
+
+def _member_account_line(row: object, *, fallback: str = "未绑定") -> str:
+    """成员名下方小字行：账号 +（有数据时）平台排名。"""
+    handle = str(row.get("handle") or fallback) if isinstance(row, dict) else ""
+    suffix = platform_rank_text(row)
+    if not suffix:
+        return handle
+    return f"{handle} · {suffix}" if handle else suffix
 
 
 def current_metric_header(metric_label: object) -> str:
@@ -295,6 +322,31 @@ def _rank_display_text(profile: object) -> str:
     return f"当前段位：{text}" if text else ""
 
 
+def _platform_rank_text(profile: object) -> str:
+    """平台内排名展示文案：`#48 · Top 0.04%`（没有百分位时只有 `#48`）。
+
+    优先用平台自己给的百分位（AtCoder 的「Top 0.04%」），
+    否则用「名次 / 已评级总人数」现算（CF 可得总人数）。
+    """
+    rank = _profile_field(profile, "rating_rank")
+    if rank is None:
+        return ""
+    text = f"#{_format_number(rank)}"
+    note = str(_profile_field(profile, "rating_rank_note", "") or "").strip()
+    if note:
+        return f"{text} · {note}"
+    total = _profile_field(profile, "rating_rank_total")
+    try:
+        total_value = int(total) if total is not None else 0
+    except (TypeError, ValueError):
+        total_value = 0
+    if total_value > 0:
+        percent = float(rank) / total_value * 100
+        shown = f"{percent:.2f}%" if percent < 1 else f"{percent:.1f}%"
+        return f"{text} · Top {shown}"
+    return text
+
+
 def _primary_metric(profile: object) -> tuple[str, str]:
     platform = str(_profile_field(profile, "platform", "") or "")
     rating = _profile_field(profile, "rating")
@@ -303,7 +355,7 @@ def _primary_metric(profile: object) -> tuple[str, str]:
         if rating is not None:
             return "Elo", _format_number(rating)
         if rating_rank is not None:
-            return "平台排名", f"#{rating_rank}"
+            return "平台排名", _platform_rank_text(profile)
         return "平台排名", "—"
     return "Rating", _format_number(rating)
 
@@ -313,8 +365,7 @@ def _profile_stats(profile: object) -> List[tuple[str, str]]:
     primary_label, _ = _primary_metric(profile)
     stats: List[tuple[str, str]] = []
 
-    rating_rank = _profile_field(profile, "rating_rank")
-    rank_value = _format_number(rating_rank) if rating_rank is not None else ""
+    rank_value = _platform_rank_text(profile)
     # 洛谷没有 Elo 时主指标本身就是平台排名，不重复展示。
     if rank_value and primary_label != "平台排名":
         stats.append(("平台排名", rank_value))
@@ -1573,7 +1624,9 @@ class AccountCardRenderer:
         name_width = cls._ranking_text_width(
             row.get("display_name") or row.get("qq_name") or "未知用户"
         )
-        handle_width = cls._ranking_text_width(row.get("handle") or "")
+        handle_width = cls._ranking_text_width(
+            _member_account_line(row, fallback="")
+        )
         name_lines = max(1, (name_width + 15) // 16)
         handle_lines = max(1, (handle_width + 19) // 20)
         content_height = name_lines * 25 + 4 + handle_lines * 19
@@ -1587,7 +1640,7 @@ class AccountCardRenderer:
         display_name = cls._ranking_text_width(
             row.get("display_name") or row.get("qq_name") or "未知用户"
         )
-        handle = cls._ranking_text_width(row.get("handle") or "未绑定")
+        handle = cls._ranking_text_width(_member_account_line(row))
         # 普通排行的成员列会随指标列变宽而收窄，按新的字号估算
         # 44/64 个中英文混排单位，避免昵称或账号换行后覆盖下一行。
         name_lines = max(1, (display_name + 43) // 44)
@@ -2119,7 +2172,7 @@ class AccountCardRenderer:
                   <div class="rank-no">{index:02d}</div>
                   <div class="rank-user">
                     <b>{_escape(row.get("display_name") or row.get("qq_name") or "未知用户")}</b>
-                    <span>{_escape(row.get("handle") or "未绑定")}</span>
+                    <span>{_escape(_member_account_line(row))}</span>
                   </div>
                   <div class="rank-value">
                     <strong>{_escape(_format_number(row.get("display_value", row.get("value"))))}</strong>
@@ -2210,7 +2263,7 @@ class AccountCardRenderer:
                     f"""
                     <div class="mini-row">
                       <span class="mini-no">{index:02d}</span>
-                      <span class="mini-user"><b>{_escape(row.get("display_name") or row.get("qq_name") or "未知用户")}</b><small>{_escape(row.get("handle") or "")}</small></span>
+                      <span class="mini-user"><b>{_escape(row.get("display_name") or row.get("qq_name") or "未知用户")}</b><small>{_escape(_member_account_line(row, fallback=""))}</small></span>
                       <strong class="mini-value">{_escape(_format_number(value_text))}</strong>
                       <span class="mini-delta {delta_class}">{_escape(delta_text)}</span>
                     </div>
@@ -3772,7 +3825,7 @@ class AccountCardRenderer:
             draw.text(
                 (185, y + 43),
                 cls._fit_rank_pillow_text(
-                    row.get("handle") or "未绑定",
+                    _member_account_line(row),
                     subtitle_font,
                     user_max_width,
                 ),
@@ -4156,6 +4209,19 @@ class AccountCardRenderer:
                     font=body_font,
                     fill="#51315d",
                 )
+                account_line = _member_account_line(item, fallback="")
+                if account_line:
+                    account_font = cls._find_font(15) or subtitle_font
+                    draw.text(
+                        (x + 75, row_y + 24),
+                        cls._fit_rank_pillow_text(
+                            account_line,
+                            account_font,
+                            user_max_width,
+                        ),
+                        font=account_font,
+                        fill="#6e4a67",
+                    )
                 value_text = _format_number(
                     item.get("display_value", item.get("value"))
                 )

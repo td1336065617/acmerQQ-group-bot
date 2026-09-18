@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from astrbot.api import logger
+
 try:
     import aiosqlite  # type: ignore
 
@@ -121,6 +123,7 @@ CREATE TABLE IF NOT EXISTS rank_snapshot (
     current_metric_label TEXT NOT NULL DEFAULT '',
     current_display_value TEXT NOT NULL DEFAULT '',
     rating        INTEGER,
+    rating_rank   INTEGER,
     updated_at    REAL NOT NULL,
     PRIMARY KEY (group_id, platform, user_id)
 );
@@ -152,6 +155,7 @@ CREATE TABLE IF NOT EXISTS progress_snapshot (
     current_metric_label TEXT NOT NULL DEFAULT '',
     current_display_value TEXT NOT NULL DEFAULT '',
     rating        INTEGER,
+    rating_rank   INTEGER,
     updated_at    REAL NOT NULL,
     PRIMARY KEY (group_id, platform, user_id)
 );
@@ -183,6 +187,39 @@ def _rank_tables(mode: str) -> Tuple[str, str]:
 
 def _now() -> float:
     return time.time()
+
+
+#: 快照表新增列：(表名, 列名, 类型)。线上旧库没有迁移框架，
+#: 用 PRAGMA table_info 判定缺列后 ALTER；失败只记 warning，不阻塞启动。
+_RANK_SNAPSHOT_NEW_COLUMNS: Tuple[Tuple[str, str, str], ...] = (
+    ("rank_snapshot", "rating_rank", "INTEGER"),
+    ("progress_snapshot", "rating_rank", "INTEGER"),
+)
+
+
+def _ensure_rank_snapshot_columns(conn: sqlite3.Connection) -> None:
+    """幂等补齐快照表缺失列（目前是 rating_rank），已存在则跳过。"""
+    for table, column, column_type in _RANK_SNAPSHOT_NEW_COLUMNS:
+        try:
+            existing = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+        except sqlite3.Error as exc:
+            logger.warning(
+                "读取 %s 表结构失败，跳过 %s 列迁移：%s", table, column, exc
+            )
+            continue
+        if column in existing:
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+            )
+        except sqlite3.Error as exc:
+            logger.warning(
+                "为 %s 增加 %s 列失败（不影响启动）：%s", table, column, exc
+            )
 
 
 class AccountStore:
@@ -265,6 +302,7 @@ class AccountStore:
                             conn.execute(column_sql)
                         except sqlite3.OperationalError:
                             pass
+                    _ensure_rank_snapshot_columns(conn)
                     conn.execute(
                         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version', ?)",
                         (str(SCHEMA_VERSION),),
@@ -1123,8 +1161,8 @@ class AccountStore:
                                 group_id, platform, user_id, handle, display_name,
                                 metric_label, display_value, sort_value, delta,
                                 current_metric_label, current_display_value, rating,
-                                updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                rating_rank, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 str(group_id),
@@ -1145,6 +1183,11 @@ class AccountStore:
                                 (
                                     int(row["rating"])
                                     if row.get("rating") is not None
+                                    else None
+                                ),
+                                (
+                                    int(row["rating_rank"])
+                                    if row.get("rating_rank") is not None
                                     else None
                                 ),
                                 float(row.get("updated_at") or now),
@@ -1189,6 +1232,7 @@ class AccountStore:
                     "current_metric_label": row.get("current_metric_label") or "",
                     "current_display_value": row.get("current_display_value") or "",
                     "rating": row.get("rating"),
+                    "rating_rank": row.get("rating_rank"),
                 }
             )
         return normalized
