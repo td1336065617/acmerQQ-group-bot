@@ -35,6 +35,8 @@ XCPC Link（线下赛）
 - 每日早报：默认 08:00（北京时间），推送当天开始的已启用平台比赛；当天没有比赛时不发正文。
 - 早报附带「本周进步榜」与「本周退步榜」两张图片（各平台前 5 名），没有比赛时只推榜单。
 - 赛前 15 分钟提醒：按“平台 + 比赛 ID”去重，每个启用群各收一次。
+- 群训练周报：默认每周一 20:00 推送「本周进步榜 / 退步榜」两张卡 + 文字统计（参与人数、人均活跃天数与提交数、进步/退步最多），同一 ISO 周每群只推一次，无数据时静默跳过。
+- 报名截止提醒：牛客比赛报名截止前 24 小时与 2 小时各提醒一次（全局幂等，只发给推送平台含牛客的群）。
 - 主动推送依赖该群先与机器人产生过消息；`acmer激活` 可显式激活一次，重启后群内任意消息会自动恢复。
 
 ### 🔗 账号绑定与战绩
@@ -154,6 +156,16 @@ XCPC Link（线下赛）
 | 赛前提醒 `settings.reminder_enabled` | 开 | 比赛开始前 15 分钟提醒 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知尝试带 `<@everyone>`，失败自动降级为普通通知 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛` 查看未来几天，范围 1～30 |
+| 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附一道题（`每日一题` 指令同源） |
+| 每日一题平台 `settings.daily_problem_platform` | `nowcoder` | 牛客（本地索引）/ Codeforces / AtCoder / 洛谷 |
+| 推荐补题 `settings.recommend_enabled` | 开 | 详细资料卡之后推荐 3 道未通过题 |
+| 赛后赛果推送 `settings.settle_push_enabled` | 开 | 比赛结束后推送名次卡（名次/通过题数/参赛人数） |
+| 赛后推送延迟 `settings.settle_delay_minutes` | `10` | 赛后多少分钟推送，范围 1～60 |
+| 最少参赛人数 `settings.settle_min_participants` | `1` | 低于该人数不推送，范围 1～10 |
+| 附带未通过题目 `settings.settle_show_unsolved` | 开 | 仅 Codeforces 有效 |
+| 群训练周报 `settings.weekly_report_enabled` | 开 | 每周一次推「进步榜/退步榜」两张卡 + 文字统计 |
+| 周报推送星期 `settings.weekly_report_weekday` | `1` | `1`～`7`（周一=1），默认周一 |
+| 周报推送时间 `settings.weekly_report_time` | `20:00` | `HH:MM` 24 小时制（北京时间） |
 | 文字转图片最大字符数 `settings.max_plain_text_chars` | `1800` | 范围 200～10000 |
 | 文字转图片最大行数 `settings.max_plain_text_lines` | `36` | 范围 10～200；与字符数任一超限即转图 |
 
@@ -165,6 +177,7 @@ XCPC Link（线下赛）
 | `groups[].morning_push_time` | `08:00` | 覆盖全局早报时间 |
 | `groups[].push_platforms` | 全部 | 早报实际取“全局 ∩ 群”的平台 |
 | `groups[].reminder_enabled` | 开 | 该群是否发送赛前提醒 |
+| `groups[].settle_push_enabled` | 开 | 该群是否推送赛后赛果 |
 
 **环境变量（可选，仅用于排障）**
 

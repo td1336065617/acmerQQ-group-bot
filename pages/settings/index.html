@@ -144,6 +144,59 @@
     <span class="muted">默认 7 天，范围 1～30 天；包含正在进行的比赛</span>
   </div>
   <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="dailyProblemInput"> 早报附"今日一题"</label>
+    <span class="muted">按本群 Rating 中位数抽题、按星期轮换知识点；同一题在当天早报与 <code>每日一题</code> 指令里保持一致</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label for="dailyProblemPlatformInput">每日一题平台</label>
+    <select id="dailyProblemPlatformInput">
+      <option value="nowcoder">牛客（本地题库索引，零额外抓取）</option>
+      <option value="codeforces">Codeforces</option>
+      <option value="atcoder">AtCoder</option>
+      <option value="luogu">洛谷</option>
+    </select>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="recommendInput"> 详细资料里给"推荐补题"</label>
+    <span class="muted">按未通过 + 当前难度 + 薄弱知识点推荐 3 题</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="settlePushInput"> 赛后赛果推送</label>
+    <span class="muted">比赛结束后推一张名次卡（名次/通过题数/参赛人数，不含 Rating 变化）</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label for="settleDelayInput">赛后推送延迟</label>
+    <input type="number" id="settleDelayInput" min="1" max="60" step="1" inputmode="numeric">
+    <span>分钟</span>
+    <span class="muted">默认 10 分钟，范围 1～60；超过 2 小时未拿到赛果则不再补推</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label for="settleMinInput">最少参赛人数</label>
+    <input type="number" id="settleMinInput" min="1" max="10" step="1" inputmode="numeric">
+    <span class="muted">默认 1，范围 1～10；低于该人数不推送</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="settleUnsolvedInput"> 赛果卡附带"本场未通过题目"（仅 Codeforces）</label>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label class="check"><input type="checkbox" id="weeklyReportInput"> 群训练周报</label>
+    <span class="muted">每周一次推送「本周进步榜 / 退步榜」两张卡 + 一段文字统计（参与人数、人均活跃天数与提交数、进步/退步最多）</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <label for="weeklyWeekdayInput">周报推送星期</label>
+    <select id="weeklyWeekdayInput">
+      <option value="1">周一</option>
+      <option value="2">周二</option>
+      <option value="3">周三</option>
+      <option value="4">周四</option>
+      <option value="5">周五</option>
+      <option value="6">周六</option>
+      <option value="7">周日</option>
+    </select>
+    <input type="time" id="weeklyTimeInput">
+    <span class="muted">默认周一 20:00；同一 ISO 周每群只推一次，无数据时静默跳过</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
     <label for="nowcoderScopeInput">牛客赛事范围</label>
     <select id="nowcoderScopeInput">
       <option value="all">全部牛客赛事（含高校校赛、新生赛、集训营、自主创建赛）</option>
@@ -173,7 +226,7 @@
 <div class="card">
   <h2>群推送配置</h2>
   <table>
-    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th><th>赛后赛果</th><th>操作</th></tr></thead>
     <tbody id="groupBody"></tbody>
   </table>
   <div class="muted" style="margin-top:8px">机器人收到过消息的群会自动出现在这里；修改后点“保存群配置”。
@@ -197,6 +250,17 @@
     at_all_enabled: false,
     recent_contest_days: 7,
     nowcoder_scope: 'all',
+    daily_problem_enabled: true,
+    daily_problem_platform: 'nowcoder',
+    daily_problem_count: 1,
+    recommend_enabled: true,
+    settle_push_enabled: true,
+    settle_delay_minutes: 10,
+    settle_min_participants: 1,
+    settle_show_unsolved: true,
+    weekly_report_enabled: true,
+    weekly_report_weekday: 1,
+    weekly_report_time: '20:00',
     max_plain_text_chars: 1800,
     max_plain_text_lines: 36
   };
@@ -246,6 +310,16 @@
     document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
     document.getElementById('recentDaysInput').value = settings.recent_contest_days || 7;
     document.getElementById('nowcoderScopeInput').value = settings.nowcoder_scope === 'series_only' ? 'series_only' : 'all';
+    document.getElementById('dailyProblemInput').checked = settings.daily_problem_enabled !== false;
+    document.getElementById('dailyProblemPlatformInput').value = settings.daily_problem_platform || 'nowcoder';
+    document.getElementById('recommendInput').checked = settings.recommend_enabled !== false;
+    document.getElementById('settlePushInput').checked = settings.settle_push_enabled !== false;
+    document.getElementById('settleDelayInput').value = settings.settle_delay_minutes || 10;
+    document.getElementById('settleMinInput').value = settings.settle_min_participants || 1;
+    document.getElementById('settleUnsolvedInput').checked = settings.settle_show_unsolved !== false;
+    document.getElementById('weeklyReportInput').checked = settings.weekly_report_enabled !== false;
+    document.getElementById('weeklyWeekdayInput').value = String(settings.weekly_report_weekday || 1);
+    document.getElementById('weeklyTimeInput').value = settings.weekly_report_time || '20:00';
     document.getElementById('maxCharsInput').value = settings.max_plain_text_chars || 1800;
     document.getElementById('maxLinesInput').value = settings.max_plain_text_lines || 36;
   }
@@ -258,7 +332,7 @@
   function renderGroups() {
     groupBody.innerHTML = '';
     if (!groups.length) {
-      groupBody.innerHTML = '<tr><td colspan="4" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
+      groupBody.innerHTML = '<tr><td colspan="5" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
       return;
     }
     groups.sort((a, b) => String(a.group_id).localeCompare(String(b.group_id)));
@@ -279,6 +353,13 @@
       timeInput.dataset.gid = g.group_id;
       timeInput.className = 'group-time';
       td3.appendChild(timeInput);
+      const tdSettle = document.createElement('td');
+      const settleCb = document.createElement('input');
+      settleCb.type = 'checkbox';
+      settleCb.checked = g.settle_push_enabled !== false;
+      settleCb.dataset.gid = g.group_id;
+      settleCb.className = 'group-settle';
+      tdSettle.appendChild(settleCb);
       const td4 = document.createElement('td');
       const testBtn = document.createElement('button');
       testBtn.className = 'secondary';
@@ -292,7 +373,7 @@
         }
       };
       td4.appendChild(testBtn);
-      tr.append(td1, td2, td3, td4);
+      tr.append(td1, td2, td3, tdSettle, td4);
       groupBody.appendChild(tr);
     }
   }
@@ -343,6 +424,23 @@
       show('最近比赛查询范围应为 1～30 的整数', true);
       return;
     }
+    const settleDelay = Number(document.getElementById('settleDelayInput').value);
+    if (!Number.isInteger(settleDelay) || settleDelay < 1 || settleDelay > 60) {
+      show('赛后推送延迟应为 1～60 的整数', true);
+      return;
+    }
+    const settleMin = Number(document.getElementById('settleMinInput').value);
+    if (!Number.isInteger(settleMin) || settleMin < 1 || settleMin > 10) {
+      show('最少参赛人数应为 1～10 的整数', true);
+      return;
+    }
+    const weeklyWeekday = Number(document.getElementById('weeklyWeekdayInput').value);
+    if (!Number.isInteger(weeklyWeekday) || weeklyWeekday < 1 || weeklyWeekday > 7) {
+      show('周报推送星期应为 1～7（周一=1）', true);
+      return;
+    }
+    const weeklyTime = document.getElementById('weeklyTimeInput').value;
+    if (!weeklyTime) { show('请选择周报推送时间', true); return; }
     const maxChars = Number(document.getElementById('maxCharsInput').value);
     const maxLines = Number(document.getElementById('maxLinesInput').value);
     if (!Number.isInteger(maxChars) || maxChars < 200 || maxChars > 10000) {
@@ -360,6 +458,17 @@
       at_all_enabled: document.getElementById('atAllInput').checked,
       recent_contest_days: recentDays,
       nowcoder_scope: document.getElementById('nowcoderScopeInput').value === 'series_only' ? 'series_only' : 'all',
+      daily_problem_enabled: document.getElementById('dailyProblemInput').checked,
+      daily_problem_platform: document.getElementById('dailyProblemPlatformInput').value,
+      daily_problem_count: 1,
+      recommend_enabled: document.getElementById('recommendInput').checked,
+      settle_push_enabled: document.getElementById('settlePushInput').checked,
+      settle_delay_minutes: settleDelay,
+      settle_min_participants: settleMin,
+      settle_show_unsolved: document.getElementById('settleUnsolvedInput').checked,
+      weekly_report_enabled: document.getElementById('weeklyReportInput').checked,
+      weekly_report_weekday: weeklyWeekday,
+      weekly_report_time: weeklyTime,
       max_plain_text_chars: maxChars,
       max_plain_text_lines: maxLines
     };
@@ -375,12 +484,14 @@
     const updated = groups.map(g => {
       const cb = document.querySelector('.group-enabled[data-gid="' + g.group_id + '"]');
       const timeInput = document.querySelector('.group-time[data-gid="' + g.group_id + '"]');
+      const settleCb = document.querySelector('.group-settle[data-gid="' + g.group_id + '"]');
       return {
         group_id: g.group_id,
         enabled: cb ? cb.checked : !!g.enabled,
         morning_push_time: timeInput ? timeInput.value : (g.morning_push_time || '08:00'),
         push_platforms: g.push_platforms || [],
-        reminder_enabled: !!g.reminder_enabled
+        reminder_enabled: !!g.reminder_enabled,
+        settle_push_enabled: settleCb ? settleCb.checked : g.settle_push_enabled !== false
       };
     });
     try {

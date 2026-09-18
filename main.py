@@ -9,9 +9,9 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # AstrBot 按 `data.plugins.<插件目录>.main` 加载插件，使用相对导入可避免
 # 不同插件/旧版本之间共享顶层 `src` 模块缓存。
@@ -34,6 +34,8 @@ from .src.contest_fetcher import (
     ContestFetcher,
 )
 from .src.rank_service import RankService
+from .src.settlement import SETTLE_PLATFORMS, SettlementService
+from .src.problem_service import ProblemService, weak_tags_from_analysis
 from .src.account_cards import (
     AccountCardRenderer,
     current_metric_header,
@@ -64,6 +66,10 @@ from .src.output_renderer import (
     text_chunks,
 )
 from .src.scheduler import PushScheduler
+from .src.weekly_stats import (
+    WEEKLY_WINDOW_DAYS,
+    collect_weekly_activity,
+)
 from .src.utils import (
     contest_start_utc,
     is_contest_in_recent_window,
@@ -90,6 +96,33 @@ MAX_MAX_PLAIN_TEXT_LINES = 200
 DEFAULT_RECENT_CONTEST_DAYS = 7
 MIN_RECENT_CONTEST_DAYS = 1
 MAX_RECENT_CONTEST_DAYS = 30
+# 每日一题 / 推荐补题：题目池默认取牛客（题库索引已在 1.12.0 落地，零新增抓取）。
+DEFAULT_DAILY_PROBLEM_PLATFORM = "nowcoder"
+DAILY_PROBLEM_PLATFORMS = ("nowcoder", "codeforces", "atcoder", "luogu")
+DEFAULT_DAILY_PROBLEM_COUNT = 1
+MIN_DAILY_PROBLEM_COUNT = 1
+MAX_DAILY_PROBLEM_COUNT = 3
+RECOMMEND_PROBLEM_LIMIT = 3
+# 赛后赛果推送：比赛结束后 delay 分钟一次性推送"名次版"（不含 Rating 变化——
+# CF 要等系统重测、牛客固定次日 00:00 才更新评分，等不起；名次与通过题数
+# 在赛后即可从平台公开数据拿到）。窗口用于"重启后补推"，超出即放弃。
+DEFAULT_SETTLE_DELAY_MINUTES = 10
+MIN_SETTLE_DELAY_MINUTES = 1
+MAX_SETTLE_DELAY_MINUTES = 60
+SETTLE_WINDOW_HOURS = 2
+DEFAULT_SETTLE_MIN_PARTICIPANTS = 1
+MIN_SETTLE_MIN_PARTICIPANTS = 1
+MAX_SETTLE_MIN_PARTICIPANTS = 10
+# 群训练周报（A3）：默认每周一 20:00 推一次，ISO 周幂等（同一周每群只推一次）。
+DEFAULT_WEEKLY_REPORT_ENABLED = True
+DEFAULT_WEEKLY_REPORT_WEEKDAY = 1
+MIN_WEEKLY_REPORT_WEEKDAY = 1
+MAX_WEEKLY_REPORT_WEEKDAY = 7
+DEFAULT_WEEKLY_REPORT_TIME = "20:00"
+# 报名截止提醒（A4）：牛客比赛报名截止前的两个档位（小时）。
+# 幂等键是**全局键**（signup_<contestID>_<24h|2h>），报名截止对所有群一样，
+# 避免每个群各推一次造成重复打扰。
+SIGNUP_REMINDER_TIERS = (("24h", 24.0), ("2h", 2.0))
 # 牛客赛事口径：all = 日历里全部牛客赛事（含高校校赛/新生赛同步赛/自主创建赛）；
 # series_only = 仅比赛名含“牛客”的系列赛（旧口径）。抓取始终取全量，
 # 只在返回时按口径过滤，因此切换后立即生效。
@@ -280,6 +313,7 @@ MENU_TEXT = (
     "• 本周退步榜 ─ 查看各平台本周 Rating 下降最多的成员\n"
     "• 加入群排行/退出群排行 ─ 管理当前群的排行展示\n"
     "• 最近比赛 ─ 汇总所有平台未来 N 天内及进行中的比赛（N 可在 WebUI 设置）\n"
+    "• 每日一题 ─ 查看今天的每日一题（与早报同源同一题）\n"
     "• nk比赛 / 牛客比赛 ─ 牛客全部未开始比赛\n"
     "• 最近nk比赛 / 最近牛客比赛 ─ 牛客最近一场比赛\n"
     "• cf比赛 / Codeforces比赛 ─ Codeforces 全部未开始比赛\n"
@@ -337,6 +371,10 @@ UPDATE_COMMANDS = {
 RECENT_ALL_COMMANDS = {
     normalize_command(command) for command in ("最近比赛", "近期比赛")
 }
+DAILY_PROBLEM_COMMANDS = {
+    normalize_command(command)
+    for command in ("每日一题", "今日一题", "今日题目", "每日题目")
+}
 GROUP_RANK_PAGE_RE = re.compile(
     r"^(?P<command>.+?)(?:\s*第\s*)?(?P<page>\d+)\s*页?$",
     re.I,
@@ -374,6 +412,8 @@ class AcmerGroupBot(Star):
         )
         self.scheduler = PushScheduler(self)
         self.rank_service = RankService(self)
+        self.settlement = SettlementService(self.account_fetcher)
+        self.problem_service = ProblemService(self)
         # 本次运行期间已收到过消息的群（用于自动重新激活日志）
         self._seen_group_this_run: set = set()
         # settings/groups 内存缓存：避免每次消息/回复/tick 都整读 KV。
@@ -414,6 +454,12 @@ class AcmerGroupBot(Star):
 
     async def initialize(self) -> None:
         await self.fetcher.initialize()
+        # 赛程接口只返回"未开始"的比赛，结束后会从列表消失；重启后要能继续
+        # 结算"结束前已见过"的比赛，因此把最近记录从磁盘恢复。
+        try:
+            self.settlement.load_recent_contests()
+        except Exception as exc:  # noqa: BLE001 - 记录损坏不影响启动
+            logger.warning("加载最近比赛记录失败：%s", exc)
         # 存储后端：默认 SQLite（含 KV 自动迁移与双写）；设置环境变量
         # ACMER_STORE_BACKEND=kv 可回到纯 KV 模式用于回滚验证。
         backend = os.environ.get("ACMER_STORE_BACKEND", "sqlite").strip().lower()
@@ -592,6 +638,43 @@ class AcmerGroupBot(Star):
             "nowcoder_scope": self._read_nowcoder_scope(
                 raw.get("nowcoder_scope")
             ),
+            "settle_push_enabled": bool(raw.get("settle_push_enabled", True)),
+            "settle_delay_minutes": self._read_bounded_int(
+                raw.get("settle_delay_minutes"),
+                DEFAULT_SETTLE_DELAY_MINUTES,
+                MIN_SETTLE_DELAY_MINUTES,
+                MAX_SETTLE_DELAY_MINUTES,
+            ),
+            "settle_min_participants": self._read_bounded_int(
+                raw.get("settle_min_participants"),
+                DEFAULT_SETTLE_MIN_PARTICIPANTS,
+                MIN_SETTLE_MIN_PARTICIPANTS,
+                MAX_SETTLE_MIN_PARTICIPANTS,
+            ),
+            "settle_show_unsolved": bool(raw.get("settle_show_unsolved", True)),
+            "daily_problem_enabled": bool(raw.get("daily_problem_enabled", True)),
+            "daily_problem_platform": self._read_daily_problem_platform(
+                raw.get("daily_problem_platform")
+            ),
+            "daily_problem_count": self._read_bounded_int(
+                raw.get("daily_problem_count"),
+                DEFAULT_DAILY_PROBLEM_COUNT,
+                MIN_DAILY_PROBLEM_COUNT,
+                MAX_DAILY_PROBLEM_COUNT,
+            ),
+            "recommend_enabled": bool(raw.get("recommend_enabled", True)),
+            "weekly_report_enabled": bool(
+                raw.get("weekly_report_enabled", DEFAULT_WEEKLY_REPORT_ENABLED)
+            ),
+            "weekly_report_weekday": self._read_bounded_int(
+                raw.get("weekly_report_weekday"),
+                DEFAULT_WEEKLY_REPORT_WEEKDAY,
+                MIN_WEEKLY_REPORT_WEEKDAY,
+                MAX_WEEKLY_REPORT_WEEKDAY,
+            ),
+            "weekly_report_time": self._read_hhmm(
+                raw.get("weekly_report_time"), DEFAULT_WEEKLY_REPORT_TIME
+            ),
         }
         self._settings_cache = (time.monotonic(), settings)
         # 每次刷新配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
@@ -604,6 +687,21 @@ class AcmerGroupBot(Star):
         """校验牛客赛事口径，非法值回退到默认（全部牛客赛事）。"""
         scope = str(value or "").strip().lower()
         return scope if scope in NOWCODER_SCOPES else DEFAULT_NOWCODER_SCOPE
+
+    @staticmethod
+    def _read_daily_problem_platform(value: object) -> str:
+        platform = str(value or "").strip().lower()
+        if platform in DAILY_PROBLEM_PLATFORMS:
+            return platform
+        return DEFAULT_DAILY_PROBLEM_PLATFORM
+
+    @staticmethod
+    def _read_hhmm(value: object, default: str) -> str:
+        """校验 HH:MM 时间，非法值回退默认（读取旧配置时的容错）。"""
+        try:
+            return validate_hhmm(str(value or default))
+        except ValueError:
+            return default
 
     def _configure_contest_fetcher(self, settings: dict) -> None:
         """把抓取相关设置同步给 ContestFetcher（牛客口径切换立即生效）。"""
@@ -1875,6 +1973,12 @@ class AcmerGroupBot(Star):
                         ),
                     ):
                         yield result
+                # 详细资料（含题目级分析）之后追加"推荐补题"
+                if profile.analysis:
+                    async for result in self._maybe_recommend_problems(
+                        event, platform, profile
+                    ):
+                        yield result
             except Exception as exc:
                 yield event.plain_result(self._account_error_text(platform, exc))
             return
@@ -3030,7 +3134,38 @@ class AcmerGroupBot(Star):
                 lines.append(f"{contest.start_cn():%H:%M} {contest.name}")
         if not found:
             return None
+        daily = await self._daily_problem_lines(group, settings)
+        if daily:
+            lines.extend(daily)
         return "\n".join(lines)
+
+    async def _daily_problem_lines(
+        self, group: GroupConfig, settings: dict
+    ) -> List[str]:
+        """早报末尾的"今日一题"行；关闭开关或题目池不可用时返回空列表。"""
+        if not settings.get("daily_problem_enabled", True):
+            return []
+        platform = settings["daily_problem_platform"]
+        if platform not in group.push_platforms and platform not in settings["push_platforms"]:
+            return []
+        count = int(settings.get("daily_problem_count") or 1)
+        day = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        try:
+            problem = await self._daily_problem_for_group(
+                group.group_id, platform, day
+            )
+        except Exception as exc:  # noqa: BLE001 - 抽题失败不影响早报
+            logger.warning("群 %s 抽取每日一题失败：%s", group.group_id, exc)
+            return []
+        if problem is None:
+            return []
+        lines = [
+            f"— 🎯 今日一题（{PLATFORM_LABELS.get(platform, platform)}）—",
+            f"{problem.display()}",
+            problem.url,
+        ]
+        del count  # 目前固定 1 题：多题会拉长早报，保留配置位供后续扩展
+        return lines
 
     async def build_weekly_board_cards(
         self, group: GroupConfig
@@ -3186,6 +3321,710 @@ class AcmerGroupBot(Star):
                 all_ok = False
                 logger.warning("群 %s 的 %s 推送失败", group.group_id, title)
         return all_ok
+
+    # ------------------------------------------------------------------
+    # 每日一题 / 推荐补题（A2）
+    # ------------------------------------------------------------------
+    async def _group_rating_anchor(
+        self, group_id: str, platform: str
+    ) -> Optional[int]:
+        """群内该平台 Rating 的中位数（用作抽题难度锚点）；取不到返回 None。
+
+        只读排行快照（stale-while-revalidate）：冷群会退化为一次常规排行计算，
+        与用户主动查 `群xx排行` 的成本一致。
+        """
+        if not group_id:
+            return None
+        try:
+            rows, _errors = await self.rank_service.read(
+                group_id, platform, record_metrics=False, allow_stale=True
+            )
+        except Exception as exc:  # noqa: BLE001 - 锚点缺失时用默认档
+            logger.warning("读取群 %s 的 %s 排行锚点失败：%s", group_id, platform, exc)
+            return None
+        values = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            for key in ("rating", "sort_value"):
+                value = row.get(key)
+                if isinstance(value, int):
+                    values.append(value)
+                    break
+        if not values:
+            return None
+        values.sort()
+        return values[len(values) // 2]
+
+    def _cached_solved_ids(self, platform: str, identifiers: List[str]) -> List[List[str]]:
+        """只收集"分析缓存里已有"的成员已通过题（不为抽题额外抓取）。"""
+        fetcher = getattr(self, "account_fetcher", None)
+        if fetcher is None:
+            return []
+        out: List[List[str]] = []
+        for identifier in identifiers:
+            key = (platform, str(identifier).casefold(), True, False, True)
+            cached = fetcher._cache.get(key)
+            if not cached:
+                continue
+            analysis = getattr(cached[1], "analysis", None) or {}
+            solved = analysis.get("solved_problem_ids") or []
+            if solved:
+                out.append(list(solved))
+        return out
+
+    async def _daily_problem_for_group(
+        self, group_id: str, platform: str, day: str
+    ):
+        """取（必要时抽取并缓存）当天的每日一题；索引不可用时返回 None。"""
+        pool = await self.problem_service.ensure_index(platform)
+        if not pool:
+            return None
+        cache_key = f"daily_{group_id or 'private'}_{day}"
+        cached = await self.get_kv_data(cache_key, {}) or {}
+        problem_id = str(cached.get("problem_id") or "")
+        if problem_id:
+            for problem in pool:
+                if problem.problem_id == problem_id:
+                    return problem
+        anchor = await self._group_rating_anchor(group_id, platform)
+        solved_sets = []
+        if group_id:
+            members = await self._settlement_members(group_id, platform)
+            solved_sets = self._cached_solved_ids(
+                platform, [handle for _uid, _name, handle in members]
+            )
+        problem = self.problem_service.pick_daily(
+            group_id=group_id or "private",
+            day=day,
+            pool=pool,
+            rating=anchor,
+            exclude=self.problem_service._exclude_ids(solved_sets),
+        )
+        if problem is None:
+            return None
+        await self.put_kv_data(
+            cache_key,
+            {"problem_id": problem.problem_id, "platform": platform},
+        )
+        return problem
+
+    async def _reply_daily_problem(self, event: AstrMessageEvent):
+        """`每日一题`：与早报同源同一题（KV 缓存保证一致）。"""
+        settings = await self.get_settings()
+        platform = settings["daily_problem_platform"]
+        group_id = str(event.get_group_id() or "").strip()
+        day = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        problem = await self._daily_problem_for_group(group_id, platform, day)
+        if problem is None:
+            async for result in self._adaptive_results(
+                event,
+                "🎯 题目池尚未就绪（题库索引构建中或该平台不可用），请稍后再试\n"
+                "可在 WebUI 切换「每日一题平台」为牛客（本地索引，最快）。",
+            ):
+                yield result
+            return
+        lines = [
+            f"🎯 今日一题（{PLATFORM_LABELS.get(platform, platform)} · {day}）",
+            problem.display(),
+            problem.url,
+        ]
+        anchor = await self._group_rating_anchor(group_id, platform)
+        if anchor:
+            lines.append(f"📐 难度锚点：本群 {PLATFORM_LABELS.get(platform, platform)} 中位 Rating {anchor}")
+        async for result in self._adaptive_results(event, "\n".join(lines)):
+            yield result
+
+    async def _maybe_recommend_problems(self, event, platform: str, profile):
+        """详细资料卡之后追加"推荐补题"（仅当该平台有已通过题集合）。"""
+        settings = await self.get_settings()
+        if not settings.get("recommend_enabled", True):
+            return
+        analysis = getattr(profile, "analysis", None) or {}
+        solved = analysis.get("solved_problem_ids") or []
+        if not solved:
+            return
+        pool = await self.problem_service.ensure_index(platform)
+        if not pool:
+            return
+        picks = self.problem_service.recommend(
+            pool=pool,
+            solved=solved,
+            weak_tags=weak_tags_from_analysis(analysis, limit=3),
+            rating=getattr(profile, "rating", None),
+            limit=RECOMMEND_PROBLEM_LIMIT,
+        )
+        if not picks:
+            return
+        lines = ["🎯 推荐补题（未通过 · 贴合当前难度 · 优先薄弱知识点）"]
+        for index, problem in enumerate(picks, start=1):
+            lines.append(f"{index}. {problem.display()}\n   {problem.url}")
+        async for result in self._adaptive_results(event, "\n".join(lines)):
+            yield result
+
+    # ------------------------------------------------------------------
+    # 赛后赛果推送（A1）
+    # ------------------------------------------------------------------
+    async def _render_settlement_card(
+        self,
+        sections,
+        *,
+        title: str,
+        subtitle: str,
+        note: str = "",
+        platform_order=None,
+    ):
+        """渲染赛果卡；失败时返回 None，由调用方发送纯文本。"""
+        try:
+            return await self._run_render(
+                self.account_card_renderer.render_settlement,
+                sections,
+                title=title,
+                subtitle=subtitle,
+                note=note,
+                platform_order=platform_order,
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断推送
+            logger.error("赛果卡渲染失败，改用文字：%s", exc, exc_info=True)
+            return None
+
+    async def _settlement_members(
+        self, group_id: str, platform: str
+    ) -> List[tuple]:
+        """本群已绑定该平台的成员：[(user_id, display_name, handle)]。"""
+        member_ids = await self.account_registry.get_group_member_ids(group_id)
+        accounts = await self.account_registry.get_all_accounts()
+        members: List[tuple] = []
+        for user_id in member_ids:
+            record = accounts.get(user_id, {}).get(platform)
+            if not isinstance(record, dict):
+                continue
+            handle = str(
+                record.get("platform_user_id") or record.get("handle") or ""
+            ).strip()
+            if not handle:
+                continue
+            display = str(
+                record.get("display_name") or record.get("handle") or handle
+            ).strip()
+            members.append((str(user_id), display, handle))
+        return members
+
+    @staticmethod
+    def _settlement_text(result) -> str:
+        """赛果卡的纯文本兜底（渲染不可用时使用）。"""
+        lines = [f"🏁 {result.contest_name} 赛果"]
+        for row in result.rows:
+            rank = f"#{row.rank}" if row.rank else "—"
+            solved = (
+                f"{row.solved}/{row.total_problems} 题"
+                if row.solved is not None and row.total_problems
+                else "—"
+            )
+            count = f" · {row.user_count} 人参赛" if row.user_count else ""
+            lines.append(f"{rank} {row.display_name}（{row.handle}） {solved}{count}")
+        if result.extra_note:
+            lines.append(result.extra_note)
+        if result.note:
+            lines.append(f"📚 {result.note}")
+        lines.append("ℹ️ 评分变化以平台为准")
+        return "\n".join(lines)
+
+    async def tick_settlements(self, now: Optional[datetime] = None) -> int:
+        """赛后赛果巡检（由 scheduler 每 tick 调用）；返回实际推送的群次数。"""
+        settings = await self.get_settings()
+        if not settings.get("settle_push_enabled", True):
+            return 0
+        moment = now or datetime.now(timezone.utc)
+        delay_minutes = int(settings.get("settle_delay_minutes") or 0)
+        min_participants = int(settings.get("settle_min_participants") or 1)
+        show_unsolved = bool(settings.get("settle_show_unsolved", True))
+        pushed = 0
+        for group in await self.get_groups():
+            if not group.enabled or not getattr(
+                group, "settle_push_enabled", True
+            ):
+                continue
+            platforms = [
+                platform
+                for platform in settings["push_platforms"]
+                if platform in group.push_platforms
+            ]
+            for platform in platforms:
+                if platform not in SETTLE_PLATFORMS:
+                    continue
+                # 赛程接口只返回"未开始"的比赛：把"上一次缓存里的赛程"与
+                # "本次抓取到的赛程"都记入最近比赛记录，结束后再从记录里挑候选
+                # （否则比赛一结束就从列表消失，永远结算不到）。
+                previous = self.fetcher._cache.get(platform)
+                if previous and isinstance(previous[1], list):
+                    self.settlement.remember_contests(platform, previous[1])
+                contests, err = await self.fetcher.fetch_platform(platform)
+                if contests:
+                    self.settlement.remember_contests(platform, contests)
+                if err and not contests:
+                    continue
+                for contest in self.settlement.settlement_candidates(
+                    platform, moment, delay_minutes
+                ):
+                    key = f"settle_{group.group_id}_{platform}_{contest.contest_id}"
+                    if await self.get_kv_data(key, False):
+                        continue
+                    try:
+                        pushed += await self._push_settlement(
+                            group,
+                            platform,
+                            contest,
+                            key,
+                            min_participants=min_participants,
+                            show_unsolved=show_unsolved,
+                            platform_order=list(platforms),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 单场失败不影响其他群/平台
+                        logger.warning(
+                            "群 %s 的 %s %s 赛果处理失败：%s",
+                            group.group_id,
+                            platform,
+                            contest.contest_id,
+                            exc,
+                        )
+        try:
+            self.settlement.save_recent_contests()
+        except Exception as exc:  # noqa: BLE001 - 落盘失败不影响推送
+            logger.warning("保存最近比赛记录失败：%s", exc)
+        return pushed
+
+    async def _push_settlement(
+        self,
+        group: GroupConfig,
+        platform: str,
+        contest,
+        key: str,
+        *,
+        min_participants: int,
+        show_unsolved: bool,
+        platform_order: List[str],
+    ) -> int:
+        """处理单场赛果：采集 → 渲染 → 推送 → 写幂等键；返回 1/0。"""
+        members = await self._settlement_members(group.group_id, platform)
+        if len(members) < max(1, min_participants):
+            return 0
+        result = await self.settlement.collect(platform, contest, members)
+        if result is None or not result.has_content():
+            return 0
+        sections = {platform: [row.to_card_row() for row in result.rows]}
+        if show_unsolved:
+            unsolved = sorted(
+                {label for row in result.rows for label in row.unsolved}
+            )
+            if unsolved:
+                extra = "本场未通过：" + "、".join(unsolved)
+                result.note = f"{result.note} · {extra}" if result.note else extra
+        if result.extra_note:
+            result.note = (
+                f"{result.note} · {result.extra_note}"
+                if result.note
+                else result.extra_note
+            )
+        note = (
+            f"{result.note} · 评分变化以平台为准"
+            if result.note
+            else "评分变化以平台为准"
+        )
+        title = f"🏁 {result.contest_name} 赛果"
+        subtitle = f"本群 {len(result.rows)} 人参赛"
+        image_path = None
+        if sections:
+            image_path = await self._render_settlement_card(
+                sections,
+                title=title,
+                subtitle=subtitle,
+                note=note,
+                platform_order=platform_order,
+            )
+        if image_path is not None and Path(image_path).is_file():
+            ok = await self._send_group_image(group, image_path, caption=title)
+        else:
+            ok = await self.send_notification(
+                group, self._settlement_text(result)
+            )
+        if not ok:
+            logger.warning(
+                "群 %s 的 %s 赛果推送失败，下个周期重试",
+                group.group_id,
+                platform,
+            )
+            return 0
+        await self.put_kv_data(key, True)
+        logger.info(
+            "群 %s 已推送 %s %s 赛果（%d 人）",
+            group.group_id,
+            platform,
+            contest.contest_id,
+            len(result.rows),
+        )
+        return 1
+
+    # ------------------------------------------------------------------
+    # 群训练周报（A3）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _iso_week_key(moment: datetime) -> str:
+        """ISO 周键：``2026-W38``（周一为一周之始，跨年由 isocalendar 处理）。"""
+        iso = moment.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+
+    @staticmethod
+    def _delta_rows(rows) -> List[dict]:
+        """从进步榜行里挑出「有近 7 日变化」的成员（delta 为 None 的不计）。"""
+        picked: List[dict] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                delta = int(row.get("delta"))
+            except (TypeError, ValueError):
+                continue
+            picked.append(
+                {
+                    "user_id": str(row.get("user_id") or ""),
+                    "display_name": str(
+                        row.get("display_name")
+                        or row.get("handle")
+                        or "未知成员"
+                    ),
+                    "handle": str(row.get("handle") or ""),
+                    "delta": delta,
+                }
+            )
+        return picked
+
+    async def build_weekly_report(
+        self, group: GroupConfig
+    ) -> Optional[dict]:
+        """构建群训练周报：``{"cards": [...], "text": "..."}``；无数据返回 None。
+
+        - 卡片**直接复用** ``build_weekly_board_cards()``（进步榜/退步榜两张现有卡）；
+        - 文字统计来自 ``rank_service.read(progress=True)``（本地快照，零网络）
+          与 ``src/weekly_stats.py``（CF/AtCoder 近 7 日活跃，1~2 请求/成员）；
+        - 牛客/洛谷不统计活跃，文案如实标注。
+        """
+        settings = await self.get_settings()
+        platforms = [
+            p for p in settings["push_platforms"] if p in group.push_platforms
+        ] or list(DEFAULT_PLATFORMS)
+        moment = datetime.now(CN_TZ)
+        since = moment - timedelta(days=WEEKLY_WINDOW_DAYS)
+
+        # 1) 本地零请求：进步榜与退步榜共用同一份「近 7 日变化」快照。
+        deltas: List[dict] = []
+        for platform in platforms:
+            try:
+                rows, _errors = await self.rank_service.read(
+                    group.group_id,
+                    platform,
+                    progress=True,
+                    record_metrics=False,
+                    allow_stale=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - 单平台失败不影响周报
+                logger.warning(
+                    "周报读取群 %s 的 %s 进步榜失败：%s",
+                    group.group_id,
+                    platform,
+                    exc,
+                )
+                continue
+            for item in self._delta_rows(rows):
+                item["platform"] = platform
+                deltas.append(item)
+
+        # 2) 轻量活跃统计：只覆盖 CF / AtCoder（牛客/洛谷无等价轻量接口）。
+        activity_days = 0
+        submissions = 0
+        activity_records = 0
+        active_users: set = set()
+        for platform in ("codeforces", "atcoder"):
+            if platform not in platforms:
+                continue
+            try:
+                members = await self._settlement_members(
+                    group.group_id, platform
+                )
+            except Exception as exc:  # noqa: BLE001 - 活跃统计失败不阻塞周报
+                logger.warning(
+                    "周报读取群 %s 的 %s 成员失败：%s",
+                    group.group_id,
+                    platform,
+                    exc,
+                )
+                continue
+            if not members:
+                continue
+            activities = await collect_weekly_activity(
+                self, platform, members, since.timestamp()
+            )
+            for user_id, activity in activities.items():
+                if activity.source == "unavailable":
+                    continue
+                activity_records += 1
+                activity_days += int(activity.active_days)
+                submissions += int(activity.submissions)
+                if activity.submissions > 0:
+                    active_users.add(user_id)
+
+        # 3) 参与人数：本周有活跃或有 Rating 变化的成员。
+        participants = {
+            item["user_id"] for item in deltas if item["delta"] != 0
+        } | active_users
+        if not participants:
+            logger.info("群 %s 本周无训练数据，跳过周报", group.group_id)
+            return None
+
+        lines = [
+            f"📊 本周训练周报（{since:%m-%d} ~ {moment:%m-%d}）",
+            f"👥 参与人数：{len(participants)} 人",
+        ]
+        if activity_records:
+            lines.append(
+                f"🔥 人均活跃天数：{activity_days / activity_records:.1f} 天"
+                "（CF+AtCoder，按绑定账号计）"
+            )
+            lines.append(
+                f"📝 人均提交：{submissions / activity_records:.1f} 次"
+                "（CF+AtCoder）"
+            )
+        else:
+            lines.append(
+                "🔥 活跃数据：本周未取得 CF/AtCoder 活跃统计，仅统计 Rating 变化"
+            )
+        best = max(deltas, key=lambda item: item["delta"]) if deltas else None
+        worst = min(deltas, key=lambda item: item["delta"]) if deltas else None
+        if best is not None and best["delta"] > 0:
+            lines.append(
+                f"📈 进步最多：{best['display_name']} "
+                f"{_format_signed_number(best['delta'])}"
+                f"（{platform_label(best['platform'])}）"
+            )
+        if worst is not None and worst["delta"] < 0:
+            lines.append(
+                f"📉 退步最多：{worst['display_name']} "
+                f"{_format_signed_number(worst['delta'])}"
+                f"（{platform_label(worst['platform'])}）"
+            )
+        lines.append(
+            "📚 数据源：本地 Rating 快照 + CF user.status / AtCoder kenkoooo；"
+            "牛客、洛谷本周报不统计活跃"
+        )
+
+        cards: List[Dict[str, Any]] = []
+        try:
+            cards = await self.build_weekly_board_cards(group)
+        except Exception as exc:  # noqa: BLE001 - 卡片失败仍有文字统计
+            logger.warning("群 %s 周报卡片渲染失败：%s", group.group_id, exc)
+        return {"cards": cards, "text": "\n".join(lines)}
+
+    async def tick_weekly_report(
+        self, now: Optional[datetime] = None
+    ) -> int:
+        """群训练周报巡检（由 scheduler 每 tick 调用）；返回实际推送的群数。
+
+        触发条件：``weekly_report_enabled`` 开启 + 今天是指定星期 +
+        当前 HH:MM 等于 ``weekly_report_time``；幂等键 ``weekly_<群ID>_<ISO周>``
+        （发送成功才写键，失败下一 tick 重试）。
+        """
+        settings = await self.get_settings()
+        if not settings.get("weekly_report_enabled", True):
+            return 0
+        moment = now or datetime.now(CN_TZ)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=CN_TZ)
+        moment = moment.astimezone(CN_TZ)
+        weekday = int(
+            settings.get("weekly_report_weekday")
+            or DEFAULT_WEEKLY_REPORT_WEEKDAY
+        )
+        if moment.isoweekday() != weekday:
+            return 0
+        try:
+            push_time = validate_hhmm(
+                settings.get("weekly_report_time") or DEFAULT_WEEKLY_REPORT_TIME
+            )
+        except ValueError:
+            return 0
+        if moment.strftime("%H:%M") != push_time:
+            return 0
+
+        week_key = self._iso_week_key(moment)
+        pushed = 0
+        for group in await self.get_groups():
+            if not group.enabled:
+                continue
+            key = f"weekly_{group.group_id}_{week_key}"
+            if await self.get_kv_data(key, False):
+                continue
+            try:
+                report = await self.build_weekly_report(group)
+            except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
+                logger.warning(
+                    "群 %s 周报构建失败：%s", group.group_id, exc
+                )
+                continue
+            if not report:
+                continue
+            text = str(report.get("text") or "").strip()
+            text_sent = True
+            if text:
+                text_sent = await self.send_notification(group, text)
+            if not text_sent:
+                logger.warning(
+                    "群 %s 周报文字推送失败，下个周期重试", group.group_id
+                )
+                continue
+            cards_ok = True
+            sent_cards = 0
+            for card in report.get("cards") or []:
+                title = str(card.get("title") or "本周训练周报")
+                image_path = card.get("image")
+                if image_path is not None and Path(image_path).is_file():
+                    ok = await self._send_group_image(
+                        group, image_path, caption=title
+                    )
+                else:
+                    ok = await self.send_notification(
+                        group, str(card.get("text") or "")
+                    )
+                if ok:
+                    sent_cards += 1
+                else:
+                    cards_ok = False
+                    logger.warning(
+                        "群 %s 的 %s 推送失败", group.group_id, title
+                    )
+            if not text and sent_cards == 0:
+                # 既没有文字也没有卡片 → 视为未送达，不写幂等键。
+                logger.warning("群 %s 周报无可推送内容，跳过", group.group_id)
+                continue
+            await self.put_kv_data(key, True)
+            pushed += 1
+            logger.info(
+                "群 %s 已推送训练周报（%s，文字=%s，卡片=%d%s）",
+                group.group_id,
+                week_key,
+                "是" if text else "否",
+                sent_cards,
+                "" if cards_ok else "，部分卡片失败",
+            )
+        return pushed
+
+    # ------------------------------------------------------------------
+    # 报名截止提醒（A4）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _signup_reminder_text(
+        contest, deadline: datetime, remaining_seconds: float
+    ) -> str:
+        """报名截止提醒文案：比赛名 + 北京时间截止 + 剩余时长 + 链接。"""
+        if remaining_seconds >= 3600:
+            hours = f"{remaining_seconds / 3600:.1f}".rstrip("0").rstrip(".")
+            left = f"还有 {hours} 小时"
+        else:
+            minutes = max(1, int(remaining_seconds // 60))
+            left = f"还有 {minutes} 分钟"
+        return (
+            f"📝 报名即将截止：{contest.name}\n"
+            f"🕐 截止 {deadline.astimezone(CN_TZ):%Y-%m-%d %H:%M}（北京时间）\n"
+            f"⏳ {left}\n"
+            f"🔗 {contest.url}"
+        )
+
+    async def tick_signup_reminders(
+        self, now: Optional[datetime] = None
+    ) -> int:
+        """牛客报名截止提醒（由 scheduler 每 tick 调用）；返回提醒的比赛数。
+
+        - 只提醒"未开始且报名截止在 ``[now, now+24h]``（或 ``[now, now+2h]``）"的比赛；
+        - 幂等键 ``signup_<contestID>_<24h|2h>`` 是**全局键**（不按群）：
+          报名截止对所有群一样，避免每个群各推一次造成重复打扰；
+        - 只向"推送平台包含 nowcoder"的群发送；发送成功才写键。
+        """
+        groups = [
+            group
+            for group in await self.get_groups()
+            if group.enabled and "nowcoder" in (group.push_platforms or [])
+        ]
+        if not groups:
+            return 0
+        moment = now or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.astimezone(timezone.utc)
+        try:
+            contests, err = await self.fetcher.fetch_platform("nowcoder")
+        except Exception as exc:  # noqa: BLE001 - 抓取异常不能打断 tick
+            logger.warning("报名提醒读取牛客赛程失败：%s", exc)
+            return 0
+        if err or not contests:
+            return 0
+
+        reminded = 0
+        for contest in contests:
+            deadline = getattr(contest, "signup_end_time", None)
+            if not isinstance(deadline, datetime):
+                continue
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            deadline = deadline.astimezone(timezone.utc)
+            start = getattr(contest, "start_time", None)
+            if not isinstance(start, datetime):
+                continue
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            if start <= moment:
+                continue  # 已开始的比赛不再提醒报名
+            remaining = (deadline - moment).total_seconds()
+            if remaining < 0:
+                continue
+            # 取"当前适用"的最小档位：剩余 ≤2h 发 2h 档，否则发 24h 档；
+            # 超出 24h 不提醒。这样插件晚启动时不会同一 tick 连发两条。
+            tier = None
+            for name, hours in sorted(
+                SIGNUP_REMINDER_TIERS, key=lambda item: item[1]
+            ):
+                if remaining <= hours * 3600:
+                    tier = name
+                    break
+            if tier is None:
+                continue
+            key = f"signup_{contest.contest_id}_{tier}"
+            if await self.get_kv_data(key, False):
+                continue
+            text = self._signup_reminder_text(contest, deadline, remaining)
+            sent = False
+            for group in groups:
+                try:
+                    if await self.send_notification(group, text):
+                        sent = True
+                except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
+                    logger.warning(
+                        "群 %s 报名提醒发送异常：%s", group.group_id, exc
+                    )
+            if not sent:
+                logger.warning(
+                    "牛客比赛 %s 报名提醒发送失败，下个周期重试",
+                    contest.contest_id,
+                )
+                continue
+            await self.put_kv_data(key, True)
+            reminded += 1
+            logger.info(
+                "已推送牛客比赛 %s 的报名截止提醒（%s，剩余 %.1f 小时，%d 个群）",
+                contest.contest_id,
+                tier,
+                max(0.0, remaining / 3600),
+                len(groups),
+            )
+        return reminded
 
     async def build_test_text(self, group: GroupConfig) -> str:
         """测试推送内容：优先今日早报，今日无比赛时展示最近一场。
@@ -3614,6 +4453,10 @@ class AcmerGroupBot(Star):
             async for result in self._adaptive_results(event, MENU_TEXT):
                 yield result
             return
+        if message_str in DAILY_PROBLEM_COMMANDS:
+            async for result in self._reply_daily_problem(event):
+                yield result
+            return
         if message_str in RECENT_ALL_COMMANDS:
             async for result in self._reply_recent_all(event):
                 yield result
@@ -3767,6 +4610,45 @@ class AcmerGroupBot(Star):
                 nowcoder_scope = self._read_nowcoder_scope(
                     settings.get("nowcoder_scope", current["nowcoder_scope"])
                 )
+                settle_delay_minutes = self._validate_bounded_int(
+                    settings.get(
+                        "settle_delay_minutes", current["settle_delay_minutes"]
+                    ),
+                    "赛后赛果推送延迟",
+                    MIN_SETTLE_DELAY_MINUTES,
+                    MAX_SETTLE_DELAY_MINUTES,
+                )
+                daily_problem_count = self._validate_bounded_int(
+                    settings.get(
+                        "daily_problem_count", current["daily_problem_count"]
+                    ),
+                    "每日一题数量",
+                    MIN_DAILY_PROBLEM_COUNT,
+                    MAX_DAILY_PROBLEM_COUNT,
+                )
+                settle_min_participants = self._validate_bounded_int(
+                    settings.get(
+                        "settle_min_participants",
+                        current["settle_min_participants"],
+                    ),
+                    "赛后赛果最少参赛人数",
+                    MIN_SETTLE_MIN_PARTICIPANTS,
+                    MAX_SETTLE_MIN_PARTICIPANTS,
+                )
+                weekly_report_weekday = self._validate_bounded_int(
+                    settings.get(
+                        "weekly_report_weekday",
+                        current["weekly_report_weekday"],
+                    ),
+                    "训练周报推送星期",
+                    MIN_WEEKLY_REPORT_WEEKDAY,
+                    MAX_WEEKLY_REPORT_WEEKDAY,
+                )
+                weekly_report_time = validate_hhmm(
+                    settings.get(
+                        "weekly_report_time", current["weekly_report_time"]
+                    )
+                )
                 await self.put_kv_data(
                     "settings",
                     {
@@ -3786,6 +4668,47 @@ class AcmerGroupBot(Star):
                         "max_plain_text_lines": max_plain_text_lines,
                         "recent_contest_days": recent_contest_days,
                         "nowcoder_scope": nowcoder_scope,
+                        "settle_push_enabled": bool(
+                            settings.get(
+                                "settle_push_enabled",
+                                current["settle_push_enabled"],
+                            )
+                        ),
+                        "settle_delay_minutes": settle_delay_minutes,
+                        "settle_min_participants": settle_min_participants,
+                        "settle_show_unsolved": bool(
+                            settings.get(
+                                "settle_show_unsolved",
+                                current["settle_show_unsolved"],
+                            )
+                        ),
+                        "daily_problem_enabled": bool(
+                            settings.get(
+                                "daily_problem_enabled",
+                                current["daily_problem_enabled"],
+                            )
+                        ),
+                        "daily_problem_platform": self._read_daily_problem_platform(
+                            settings.get(
+                                "daily_problem_platform",
+                                current["daily_problem_platform"],
+                            )
+                        ),
+                        "daily_problem_count": daily_problem_count,
+                        "recommend_enabled": bool(
+                            settings.get(
+                                "recommend_enabled",
+                                current["recommend_enabled"],
+                            )
+                        ),
+                        "weekly_report_enabled": bool(
+                            settings.get(
+                                "weekly_report_enabled",
+                                current["weekly_report_enabled"],
+                            )
+                        ),
+                        "weekly_report_weekday": weekly_report_weekday,
+                        "weekly_report_time": weekly_report_time,
                     },
                 )
                 # 保存成功后立即更新当前实例，无需等待下一次消息或重启插件。

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import re
@@ -69,6 +70,11 @@ from .utils import LENTILLE_RE, USER_AGENT, fetch_text_with_retry
 CF_API_URL = "https://codeforces.com/api/contest.list"
 NC_CALENDAR_URL = "https://ac.nowcoder.com/acm/calendar/contest"
 NC_REFERER = "https://ac.nowcoder.com/acm/contest/calendar"
+# 牛客比赛列表页（vip-index）里每场比赛都有一个 data-json 属性，内含
+# contestSignUpEndTime（报名截止时间，毫秒时间戳）。赛程日历接口没有该字段，
+# 因此 A4 报名提醒额外抓这一次页面（约 100KB HTML）并在日历结果上合并。
+NC_VIP_INDEX_URL = "https://ac.nowcoder.com/acm/contest/vip-index"
+NC_SIGNUP_JSON_RE = re.compile(r'data-json="([^"]+)"')
 LUOGU_CONTEST_URL = "https://www.luogu.com.cn/contest/list"
 ATCODER_CONTESTS_URL = "https://atcoder.jp/contests/"
 # 牛客日历按自然月返回，且只收录"已排期"的比赛；多取几个月可以在牛客提前
@@ -112,7 +118,9 @@ PLATFORM_LABELS.setdefault(OFFLINE_PLATFORM, "线下赛")
 # 使用更长缓存并落盘，避免插件重载后第一次查询又重新下载首页和 JS chunk。
 DEFAULT_CACHE_TTL = 5 * 60
 OFFLINE_CACHE_TTL = 30 * 60
-CACHE_VERSION = 1
+# 2：Contest 新增 signup_end_time 字段（A4），旧缓存反序列化会缺字段，
+# 提升版本号让旧缓存整体失效、重新抓取。
+CACHE_VERSION = 2
 CACHE_FILE_NAME = "contest_cache.json"
 OFFLINE_SCRIPT_BATCH_SIZE = 8
 MAX_OFFLINE_SCRIPTS = 32
@@ -655,7 +663,116 @@ class ContestFetcher:
             f"（其他 OJ：{others}）" if others else "",
             f"（未识别 OJ {unknown} 场）" if unknown else "",
         )
+        if platform == "nowcoder" and merged:
+            # 报名截止时间只存在于比赛列表页（vip-index），日历接口没有；
+            # 合并一次即可，解析失败只记 warning，不影响赛程主流程。
+            try:
+                deadlines = await self._fetch_nowcoder_signup_deadlines()
+            except Exception as exc:  # noqa: BLE001 - 报名截止是附加信息
+                logger.warning(
+                    "牛客报名截止时间抓取失败（不影响赛程）：%s", exc
+                )
+                deadlines = {}
+            matched = 0
+            for contest in merged:
+                deadline = None
+                for candidate in self._nc_contest_id_candidates(contest):
+                    deadline = deadlines.get(candidate)
+                    if deadline is not None:
+                        break
+                if deadline is not None:
+                    contest.signup_end_time = deadline
+                    matched += 1
+            if deadlines:
+                logger.info(
+                    "牛客报名截止时间：解析 %d 场，匹配到当前赛程 %d 场",
+                    len(deadlines),
+                    matched,
+                )
         return merged
+
+    @staticmethod
+    def _nc_contest_id_candidates(contest: object) -> List[str]:
+        """牛客日历条目的"真实比赛 ID"候选。
+
+        实测（2026-09-18）日历接口的 ``contestId`` 是**日历行 ID**
+        （如 1139935），真实比赛 ID 在链接里（``/acm/contest/139935``）；
+        报名截止表（vip-index）用的是真实比赛 ID，因此两个都要试。
+        """
+        candidates: List[str] = []
+        contest_id = str(getattr(contest, "contest_id", "") or "").strip()
+        if contest_id:
+            candidates.append(contest_id)
+        match = re.search(
+            r"/contest/(\d+)", str(getattr(contest, "url", "") or "")
+        )
+        if match and match.group(1) not in candidates:
+            candidates.append(match.group(1))
+        return candidates
+
+    async def _fetch_nowcoder_signup_deadlines(self) -> Dict[str, datetime]:
+        """解析牛客比赛列表页的 ``data-json``，取 ``{contestId: 报名截止时间}``。
+
+        - ``data-json`` 是 HTML 转义的 JSON（真实页面为**双重转义**），由
+          ``_decode_signup_json`` 逐层 unescape 后 ``json.loads``；
+        - 字段名是 ``contestSignUpEndTime``（毫秒时间戳），不是 ``contestEndTime``；
+        - 解析失败的条目直接跳过（宁缺勿错），页面整体失败由调用方兜底。
+        """
+        if self.session is None:
+            raise RuntimeError("session 未初始化")
+        text = await fetch_text_with_retry(
+            self.session,
+            NC_VIP_INDEX_URL,
+            retries=1,
+            headers={"Referer": NC_REFERER},
+        )
+        deadlines: Dict[str, datetime] = {}
+        for raw in NC_SIGNUP_JSON_RE.findall(text):
+            payload = self._decode_signup_json(raw)
+            if payload is None:
+                continue
+            for item in self._iter_signup_items(payload):
+                contest_id = item.get("contestId")
+                end_ms = item.get("contestSignUpEndTime")
+                if contest_id in (None, "") or end_ms in (None, ""):
+                    continue
+                try:
+                    end_ts = int(end_ms)
+                except (TypeError, ValueError):
+                    continue
+                if end_ts <= 0:
+                    continue
+                deadlines[str(contest_id)] = datetime.fromtimestamp(
+                    end_ts / 1000, tz=timezone.utc
+                )
+        return deadlines
+
+    @staticmethod
+    def _decode_signup_json(raw: str) -> object:
+        """解码 ``data-json`` 属性值；失败返回 None。
+
+        实测（2026-09-18）真实页面里的属性是**双重转义**：
+        ``data-json="{&amp;quot;contestId&amp;quot;:...}"``，单次 ``html.unescape``
+        得到的仍是 ``&quot;`` 形式、无法 ``json.loads``。这里逐层 unescape
+        （最多 3 次）直到能解析，兼容单层与双层两种写法。
+        """
+        text = str(raw or "")
+        for _ in range(3):
+            text = html.unescape(text)
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    @staticmethod
+    def _iter_signup_items(payload: object) -> List[dict]:
+        """把一段 data-json 载荷摊平成比赛条目列表（兼容 dict / list）。"""
+        if isinstance(payload, dict):
+            return [payload]
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
 
     async def _fetch_nc_month(self, month: str) -> List[dict]:
         """取某个月的牛客日历原始条目（不做平台筛选）。

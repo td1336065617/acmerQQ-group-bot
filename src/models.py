@@ -31,6 +31,8 @@ class Contest(BaseModel):
     duration_minutes: int = 0
     url: str = ""
     contest_id: str = ""
+    #: 报名截止时间（UTC 带时区）；目前只有牛客提供（A4 报名提醒）
+    signup_end_time: Optional[datetime] = None
 
     def start_cn(self) -> datetime:
         return self.start_time.astimezone(CN_TZ)
@@ -109,3 +111,5 @@ class GroupConfig(BaseModel):
     morning_push_time: str = "08:00"
     push_platforms: List[str] = Field(default_factory=lambda: list(DEFAULT_PLATFORMS))
     reminder_enabled: bool = True
+    #: 赛后赛果推送（群级覆盖全局开关）
+    settle_push_enabled: bool = True

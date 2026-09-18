@@ -15,6 +15,9 @@
 | `groups` | 各群配置（自动注册） |
 | `reminded` | 已提醒的比赛去重记录 |
 | `morning_<群ID>_<日期>` | 当日早报是否已发送 |
+| `settle_<群ID>_<平台>_<contestID>` | 赛后赛果是否已推送（每群每场一次） |
+| `weekly_<群ID>_<YYYY-Www>` | 训练周报是否已推送（每群每 ISO 周一次） |
+| `signup_<contestID>_<24h\|2h>` | 报名截止提醒是否已推送（全局，不按群） |
 | `at_all_blocked_until_<群ID>` | @全体失败后的冷却截止时间 |
 | `linked_accounts` | QQ 用户与竞赛平台账号绑定关系（不含验证码） |
 | `pending_account_bindings` | 尚未完成的绑定挑战（只保存验证码哈希） |
@@ -31,6 +34,16 @@
 | 赛前提醒 `settings.reminder_enabled` | 开 | 开始前 15 分钟提醒 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知带 `<@everyone>`，失败自动降级 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛`查看未来几天，范围 1～30 |
+| 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附"今日一题"，与 `每日一题` 指令同源同一题 |
+| 每日一题平台 `settings.daily_problem_platform` | `nowcoder` | 题目来源：牛客（复用本地题库索引，零新增抓取）/ Codeforces / AtCoder / 洛谷（首次使用构建索引，7 天有效） |
+| 推荐补题 `settings.recommend_enabled` | 开 | 单平台详细资料卡之后追加 3 道推荐题（未通过 + 贴合难度 + 优先薄弱知识点） |
+| 赛后赛果推送 `settings.settle_push_enabled` | 开 | 比赛结束后推一张名次卡：名次 / 通过题数 / 参赛人数（**不含 Rating 变化**——CF 要等系统重测、牛客固定次日 00:00 才更新评分） |
+| 赛后推送延迟 `settings.settle_delay_minutes` | `10` | 赛后多少分钟推送，范围 1～60；超过 2 小时未拿到赛果则不再补推 |
+| 最少参赛人数 `settings.settle_min_participants` | `1` | 低于该人数不推送，范围 1～10 |
+| 附带未通过题目 `settings.settle_show_unsolved` | 开 | 赛果卡附"本场未通过题目"，仅 Codeforces 有效 |
+| 群训练周报 `settings.weekly_report_enabled` | 开 | 每周一次推「本周进步榜/退步榜」两张卡 + 文字统计（参与人数、人均活跃天数与提交数、进步/退步最多） |
+| 周报推送星期 `settings.weekly_report_weekday` | `1` | `1`～`7`（周一=1），默认周一；当天该时刻触发一次 |
+| 周报推送时间 `settings.weekly_report_time` | `20:00` | `HH:MM`（24 小时制，北京时间）；同一 ISO 周每群只推一次，无数据时静默跳过 |
 | 牛客赛事范围 `settings.nowcoder_scope` | `all` | `all`＝全部牛客赛事（含高校校赛、新生赛、集训营、自主创建赛）；`series_only`＝仅比赛名含“牛客”的系列赛。抓取始终取全量，切换后立即生效 |
 | 文字转图片最大字符数 `settings.max_plain_text_chars` | `1800` | 文字超过此字符数时转图，范围 200～10000 |
 | 文字转图片最大行数 `settings.max_plain_text_lines` | `36` | 文字超过此行数时转图，范围 10～200 |

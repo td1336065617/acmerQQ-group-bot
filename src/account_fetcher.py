@@ -80,7 +80,10 @@ CF_SUBMISSION_PAGE_SIZE = 10000
 # 分析缓存版本：扫描上限/分析口径变化时 +1，旧的持久化分析缓存会被自动忽略，
 # 无需等待 12 小时 TTL 或手动清库。
 # （v2 = CF 5万/AtCoder 2万 上限口径；v3 = 热力图；v4 = 牛客 2 万条 + 题库索引）
-ANALYSIS_CACHE_VERSION = 4
+ANALYSIS_CACHE_VERSION = 5
+# 分析结果里保留的"已通过题"上限（供每日一题/推荐补题使用）：
+# 2000 个 ID 约 20KB，随 12h 分析缓存写入 SQLite，体积可接受。
+SOLVED_PROBLEM_IDS_LIMIT = 2000
 # 打卡热力图窗口：近 12 个月。
 ACTIVITY_HEATMAP_DAYS = 365
 # 牛客练习页：pageSize 服务端上限为 200（201 起返回 “pageSize is too big”），
@@ -1042,7 +1045,15 @@ class AccountFetcher:
         except json.JSONDecodeError as exc:
             raise AccountFetchError("平台返回的数据格式异常，请稍后重试") from exc
 
-    async def _cf_json(self, method: str, params: Dict[str, str]) -> object:
+    async def _cf_json(
+        self,
+        method: str,
+        params: Dict[str, str],
+        *,
+        timeout: float = 10.0,
+    ) -> object:
+        # timeout 可调：contest.standings 实测单场约 10 秒（248KB），
+        # 默认 10 秒会偶发超时，调用方按需放宽（见 src/settlement.py）。
         query = urlencode(params)
         url = f"{CF_API_URL}/{method}?{query}"
         if self.session is None:
@@ -1057,7 +1068,7 @@ class AccountFetcher:
             last_error: Optional[Exception] = None
             for attempt in range(2):
                 try:
-                    async with self.session.get(url, timeout=10) as response:
+                    async with self.session.get(url, timeout=timeout) as response:
                         text = await response.text()
                         try:
                             data = json.loads(text)
@@ -1274,6 +1285,38 @@ class AccountFetcher:
         return out
 
     @staticmethod
+    def _cf_solved_problem_ids(rows: list) -> List[str]:
+        """已通过题的稳定标识：`<contestId><index>`（题集题用 `set:<name>:<index>`）。"""
+        ids: List[str] = []
+        seen: set = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("verdict") or "").upper() != "OK":
+                continue
+            problem = row.get("problem") or {}
+            if not isinstance(problem, dict):
+                problem = {}
+            index = problem.get("index") or row.get("problemIndex") or ""
+            contest_id = problem.get("contestId") or row.get("contestId")
+            problemset_name = problem.get("problemsetName") or row.get(
+                "problemsetName"
+            )
+            if contest_id and index:
+                key = f"{contest_id}{index}"
+            elif problemset_name and index:
+                key = f"set:{problemset_name}:{index}"
+            else:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            ids.append(key)
+            if len(ids) >= SOLVED_PROBLEM_IDS_LIMIT:
+                break
+        return ids
+
+    @staticmethod
     def _parse_cf_difficulty_distribution(
         rows: list,
     ) -> Tuple[List[Dict[str, Any]], int]:
@@ -1421,6 +1464,7 @@ class AccountFetcher:
             if isinstance(row, dict)
             and str(row.get("verdict") or "").upper() == "OK"
         ]
+        solved_problem_ids = AccountFetcher._cf_solved_problem_ids(rows)
         language_counts: Dict[str, int] = {}
         active_days_30 = set()
         active_days_90 = set()
@@ -1485,6 +1529,7 @@ class AccountFetcher:
                 "start": activity["start"],
                 "end": activity["end"],
             },
+            "solved_problem_ids": solved_problem_ids,
             "difficulty_title": "Codeforces 题目难度分布",
             "difficulty_distribution": list(difficulty_distribution),
             "language_distribution": _distribution_rows(
@@ -2503,6 +2548,9 @@ class AccountFetcher:
             and challenged_count > 0
             else None
         )
+        solved_problem_ids = sorted(
+            item for item in unique_solved if item
+        )[:SOLVED_PROBLEM_IDS_LIMIT]
         index_ready = self.nowcoder_problem_index_ready()
         coverage = (
             f"练习页读取 {len(rows)}/{total_submissions} 条提交；"
@@ -2532,6 +2580,7 @@ class AccountFetcher:
             "active_days_90": len(active_days_90),
             "submissions_30": submissions_30,
             "submissions_90": submissions_90,
+            "solved_problem_ids": solved_problem_ids,
             "difficulty_title": "牛客题目难度分布",
             "difficulty_distribution": [
                 {"label": label, "count": difficulty_counts[label]}
@@ -3291,6 +3340,8 @@ class AccountFetcher:
                 "accepted_submission_count": 0,
                 "solved_count": 0,
                 "acceptance_rate": None,
+                # 没有公开提交 → 已通过题集合为空（此前误用了未定义的变量）
+                "solved_problem_ids": [],
                 "difficulty_title": "AtCoder 估计难度分布",
                 "difficulty_distribution": [],
                 "category_title": "AtCoder 题目系列",

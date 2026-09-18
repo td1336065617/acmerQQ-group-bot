@@ -78,6 +78,20 @@ class PushScheduler:
                 )
         except Exception:  # noqa: BLE001 - 预热失败不影响推送
             logger.warning("比赛数据后台预热失败", exc_info=True)
+        # 功能钩子：赛后赛果 / 训练周报 / 报名提醒（实现放在 main.py，
+        # 这里只做失败隔离的薄封装，避免 scheduler 依赖具体业务）。
+        for hook_name in (
+            "tick_settlements",
+            "tick_weekly_report",
+            "tick_signup_reminders",
+        ):
+            hook = getattr(self.plugin, hook_name, None)
+            if not callable(hook):
+                continue
+            try:
+                await hook(now)
+            except Exception:  # noqa: BLE001 - 单个钩子失败不影响推送
+                logger.warning("%s 执行失败", hook_name, exc_info=True)
         # 牛客题库索引巡检：缺失/过期时整库重建（约 290 次请求），
         # 由本方法内部按 7 天 TTL 与失败退避控制，不在用户请求路径上同步构建。
         try:

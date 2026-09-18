@@ -26,7 +26,7 @@ from .output_renderer import (
     prune_cache_dir,
 )
 
-CARD_FORMAT_VERSION = 16
+CARD_FORMAT_VERSION = 17
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -48,6 +48,10 @@ RANKING_FOOTER_OVERHEAD = 44
 RANKING_PAGE_BOTTOM = 62
 RANKING_HEIGHT_SAFETY = 24
 RANKING_MIN_RENDER_HEIGHT = 520
+# 赛果卡（赛后名次版）：每平台最多展示 SETTLE_CARD_MAX_ROWS 行，2 列栅格。
+SETTLE_CARD_MAX_ROWS = 10
+SETTLE_CARD_ROW_STEP = 62
+SETTLE_CARD_SECTION_BASE = 66
 OVERVIEW_PAGE_START = 215
 OVERVIEW_SECTION_BASE = 74
 OVERVIEW_HEADER_HEIGHT = 36
@@ -953,6 +957,184 @@ class AccountCardRenderer:
             secondary_value_key,
         )
 
+    def render_settlement(
+        self,
+        sections: Dict[str, List[Dict[str, Any]]],
+        *,
+        title: str,
+        subtitle: str,
+        note: str = "",
+        platform_order: Optional[List[str]] = None,
+    ) -> Optional[Path]:
+        """赛后赛果卡（名次版）：只展示名次类信息，不含 Rating 变化。
+
+        sections: {platform: [{"rank","user_count","display_name","handle",
+                              "solved","total_problems","ak","source"}]}
+        """
+        ordered = self._ordered_settlement_sections(sections, platform_order)
+        source = {
+            "kind": "settlement",
+            "title": title,
+            "subtitle": subtitle,
+            "note": note,
+            "sections": ordered,
+        }
+        body = self._settlement_html(
+            ordered, title=title, subtitle=subtitle, note=note
+        )
+        return self._render(
+            body,
+            source,
+            self._pillow_settlement,
+            ordered,
+            title,
+            subtitle,
+            note,
+        )
+
+    @staticmethod
+    def _ordered_settlement_sections(
+        sections: Dict[str, List[Dict[str, Any]]],
+        platform_order: Optional[List[str]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """按给定平台顺序排列分区；有赛果的平台排在无赛果平台之前。"""
+        order = list(platform_order or sections.keys())
+        for platform in sections:
+            if platform not in order:
+                order.append(platform)
+        ordered: Dict[str, List[Dict[str, Any]]] = {}
+        for platform in order:
+            rows = sections.get(platform)
+            if not rows:
+                continue
+            ordered[platform] = sorted(
+                rows,
+                key=lambda row: (
+                    row.get("rank") is None,
+                    row.get("rank") or 0,
+                    str(row.get("display_name") or ""),
+                ),
+            )[:SETTLE_CARD_MAX_ROWS]
+        return ordered
+
+    @classmethod
+    def _settlement_html(
+        cls,
+        sections: Dict[str, List[Dict[str, Any]]],
+        *,
+        title: str,
+        subtitle: str,
+        note: str = "",
+    ) -> str:
+        blocks = []
+        for platform, rows in sections.items():
+            start, end = PLATFORM_COLORS.get(platform, ("#df6c9e", "#f4a7c6"))
+            text_accent = PLATFORM_TEXT_COLORS.get(platform, "#8b4d8d")
+            rendered = []
+            for index, row in enumerate(rows, start=1):
+                rank = row.get("rank")
+                rank_text = f"#{rank}" if rank else "—"
+                solved = row.get("solved")
+                total = row.get("total_problems")
+                if solved is None:
+                    solved_text = "—"
+                elif total:
+                    solved_text = f"{solved}/{total} 题"
+                else:
+                    solved_text = f"{solved} 题"
+                if row.get("ak"):
+                    solved_text += " · AK"
+                user_count = row.get("user_count")
+                count_text = f"{user_count} 人" if user_count else "—"
+                rendered.append(
+                    f"""
+                    <div class="mini-row mini-row-settle">
+                      <span class="mini-no mini-no-settle">{_escape(rank_text)}</span>
+                      <span class="mini-user"><b>{_escape(row.get("display_name") or row.get("handle") or "未知用户")}</b><small>{_escape(row.get("handle") or "")}</small></span>
+                      <strong class="mini-value">{_escape(solved_text)}</strong>
+                      <span class="mini-delta">{_escape(count_text)}</span>
+                    </div>
+                    """
+                )
+            if not rendered:
+                rendered.append('<div class="mini-empty">暂无数据</div>')
+            blocks.append(
+                f"""
+                <section class="mini-section" style="--accent:{_escape(start)};--accent2:{_escape(end)};--accent-text:{_escape(text_accent)}">
+                  <h2>{_escape(platform_label(platform))}</h2>
+                  <div class="mini-header mini-header-settle">
+                    <span>名次</span>
+                    <span>成员</span>
+                    <span>通过</span>
+                    <span>参赛人数</span>
+                  </div>
+                  {''.join(rendered)}
+                </section>
+                """
+            )
+        settle_body = "".join(blocks) or (
+            '<div class="empty-card">本场暂无本群成员成绩</div>'
+        )
+        body = f'<div class="overview-grid">{settle_body}</div>'
+        if note:
+            body += f'<div class="rank-note">{_escape(note)}</div>'
+        body += (
+            '<div class="card-footer">只展示本群已绑定成员 · 名次与通过题数以平台公示为准 · '
+            f"生成时间：{_escape(_updated_text())}</div>"
+        )
+        return cls._document(
+            title=title,
+            subtitle=subtitle,
+            body=body,
+            page_class="settlement",
+        )
+
+    @classmethod
+    def _settlement_height(
+        cls,
+        sections: Dict[str, List[Dict[str, Any]]],
+        *,
+        note: str = "",
+    ) -> int:
+        """赛果卡高度估算：每平台一节（2 列栅格），行高固定。"""
+        section_heights = []
+        for rows in sections.values():
+            count = min(SETTLE_CARD_MAX_ROWS, len(rows))
+            section_heights.append(
+                OVERVIEW_EMPTY_SECTION_HEIGHT
+                if count == 0
+                else (
+                    SETTLE_CARD_SECTION_BASE
+                    + OVERVIEW_HEADER_HEIGHT
+                    + count * SETTLE_CARD_ROW_STEP
+                )
+            )
+        if not section_heights:
+            grid_height = OVERVIEW_EMPTY_SECTION_HEIGHT
+        else:
+            grid_height = 0
+            for offset in range(0, len(section_heights), 2):
+                grid_height += max(section_heights[offset : offset + 2])
+            grid_height += max(0, (len(section_heights) + 1) // 2 - 1) * OVERVIEW_GRID_GAP
+        note_height = 0
+        if note:
+            note_width = cls._ranking_text_width(note)
+            note_lines = max(1, (note_width + 127) // 128)
+            note_height = (
+                RANKING_NOTE_MARGIN
+                + RANKING_NOTE_PADDING
+                + note_lines * RANKING_NOTE_LINE_HEIGHT
+            )
+        height = (
+            OVERVIEW_PAGE_START
+            + grid_height
+            + note_height
+            + RANKING_FOOTER_OVERHEAD
+            + RANKING_PAGE_BOTTOM
+            + OVERVIEW_HEIGHT_SAFETY
+        )
+        return max(OVERVIEW_MIN_RENDER_HEIGHT, min(MAX_CARD_HEIGHT, height))
+
     def _render(
         self,
         body: str,
@@ -1026,6 +1208,11 @@ class AccountCardRenderer:
         if source.get("kind") == "ranking":
             return AccountCardRenderer._ranking_height(
                 source.get("rows") or [],
+                note=str(source.get("note") or ""),
+            )
+        if source.get("kind") == "settlement":
+            return AccountCardRenderer._settlement_height(
+                source.get("sections") or {},
                 note=str(source.get("note") or ""),
             )
         if source.get("kind") == "overview":
@@ -2183,6 +2370,8 @@ class AccountCardRenderer:
     .mini-row {{ display:grid; grid-template-columns:50px minmax(0,1fr) 155px 110px; align-items:center; gap:10px; min-height:74px; border-bottom:1px solid rgba(184,113,157,.22); }}
     .mini-row:last-child {{ border-bottom:0; }}
     .mini-no {{ color:#d34f93; font-size:20px; line-height:1.1; font-weight:800; }}
+    .page.settlement .mini-header-settle, .page.settlement .mini-row-settle {{ grid-template-columns:92px minmax(0,1fr) 150px 108px; }}
+    .page.settlement .mini-no-settle {{ font-size:19px; font-weight:900; white-space:nowrap; }}
     .mini-user {{ min-width:0; }}
     .mini-user b {{ display:block; color:#4b2b5c; font-size:17px; line-height:1.35; font-weight:800; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
     .mini-user small {{ display:block; color:#6f4b69; margin-top:4px; font-size:13px; line-height:1.3; letter-spacing:.25px; overflow-wrap:anywhere; word-break:break-word; }}
@@ -3594,6 +3783,141 @@ class AccountCardRenderer:
         return image_path.is_file() and image_path.stat().st_size > 0
 
     @classmethod
+    def _pillow_settlement(
+        cls,
+        sections: Dict[str, List[Dict[str, Any]]],
+        title: str,
+        subtitle: str,
+        note: str,
+        image_path: Path,
+    ) -> bool:
+        """无 Chromium 时的赛果卡回退：每平台一节，行内为「名次 成员 通过」。
+
+        与 HTML 路径保持同一信息结构（名次/成员/通过/参赛人数），
+        但不追求像素级一致——Pillow 路径只保证信息完整、不越界。
+        """
+        try:
+            from PIL import Image as PILImage
+            from PIL import ImageDraw
+        except ImportError:
+            return False
+        title_font = cls._find_font(40, bold=True)
+        subtitle_font = cls._find_font(20)
+        body_font = cls._find_font(20)
+        head_font = cls._find_font(24, bold=True)
+        if not all((title_font, subtitle_font, body_font, head_font)):
+            return False
+
+        items = list(sections.items())
+        section_heights = [
+            (
+                SETTLE_CARD_SECTION_BASE
+                + max(1, min(SETTLE_CARD_MAX_ROWS, len(rows))) * SETTLE_CARD_ROW_STEP
+                if rows
+                else OVERVIEW_EMPTY_SECTION_HEIGHT
+            )
+            for _, rows in items
+        ]
+        columns = 2
+        section_w = (CARD_WIDTH - 140 - 24) // columns
+        row_tops: List[int] = []
+        cursor = OVERVIEW_PAGE_START
+        for offset in range(0, max(1, len(items)), columns):
+            row_tops.append(cursor)
+            chunk = section_heights[offset : offset + columns] or [
+                OVERVIEW_EMPTY_SECTION_HEIGHT
+            ]
+            cursor += max(chunk) + OVERVIEW_GRID_GAP
+        layout_height = (
+            (cursor - OVERVIEW_GRID_GAP if items else cursor)
+            + RANKING_FOOTER_OVERHEAD
+            + RANKING_PAGE_BOTTOM
+        )
+        height = max(
+            OVERVIEW_MIN_RENDER_HEIGHT,
+            min(MAX_CARD_HEIGHT, layout_height),
+        )
+        image = PILImage.new("RGB", (CARD_WIDTH, height), "#2a193b")
+        draw = ImageDraw.Draw(image)
+        draw.ellipse(
+            (CARD_WIDTH - 260, -90, CARD_WIDTH + 20, 190),
+            outline="#f3a9cb",
+            width=2,
+        )
+        draw.ellipse(
+            (CARD_WIDTH - 232, -62, CARD_WIDTH - 8, 162),
+            outline="#b6e7f0",
+            width=2,
+        )
+        draw.text(
+            (70, 54), "ELYSIAN // PINK PEARL ARCHIVE", font=body_font, fill="#ffe7f2"
+        )
+        draw.text((70, 88), title, font=title_font, fill="#fff7fb")
+        draw.text((70, 140), subtitle, font=subtitle_font, fill="#ffe7f2")
+
+        for index, (platform, rows) in enumerate(items):
+            col = index % columns
+            row_index = index // columns
+            x = 70 + col * (section_w + 24)
+            y = row_tops[row_index] if row_index < len(row_tops) else OVERVIEW_PAGE_START
+            accent = PLATFORM_COLORS.get(platform, ("#df6c9e", "#f4a7c6"))[0]
+            draw.rounded_rectangle(
+                (x, y, x + section_w, y + section_heights[index]),
+                radius=16,
+                fill="#fff5fb",
+                outline=accent,
+                width=2,
+            )
+            draw.text(
+                (x + 20, y + 12),
+                platform_label(platform),
+                font=head_font,
+                fill=accent,
+            )
+            line_y = y + SETTLE_CARD_SECTION_BASE
+            for row in rows[:SETTLE_CARD_MAX_ROWS]:
+                rank = row.get("rank")
+                rank_text = f"#{rank}" if rank else "—"
+                solved = row.get("solved")
+                total = row.get("total_problems")
+                if solved is None:
+                    solved_text = "—"
+                elif total:
+                    solved_text = f"{solved}/{total} 题"
+                else:
+                    solved_text = f"{solved} 题"
+                if row.get("ak"):
+                    solved_text += " AK"
+                user_count = row.get("user_count")
+                tail = f"  {user_count} 人" if user_count else ""
+                name = str(row.get("display_name") or row.get("handle") or "未知用户")
+                text = cls._fit_pillow_text(
+                    draw,
+                    f"{rank_text}  {name}  {solved_text}{tail}",
+                    body_font,
+                    section_w - 40,
+                )
+                draw.text((x + 20, line_y), text, font=body_font, fill="#4b2b5c")
+                line_y += SETTLE_CARD_ROW_STEP
+        if note:
+            draw.text(
+                (70, max(205, image.height - 112)),
+                cls._fit_pillow_text(draw, note, subtitle_font, CARD_WIDTH - 150),
+                font=subtitle_font,
+                fill="#f0c8df",
+            )
+        draw.text(
+            (70, image.height - 42),
+            f"生成时间：{_updated_text()} · 赛后赛果",
+            font=subtitle_font,
+            fill="#f7dceb",
+        )
+        try:
+            image.save(image_path, format="PNG")
+        except OSError:
+            return False
+        return image_path.is_file() and image_path.stat().st_size > 0
+
     def _pillow_overview(
         cls,
         sections: Dict[str, List[Dict[str, Any]]],
