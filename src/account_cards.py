@@ -28,7 +28,7 @@ from .output_renderer import (
     prune_cache_dir,
 )
 
-CARD_FORMAT_VERSION = 18
+CARD_FORMAT_VERSION = 19
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
