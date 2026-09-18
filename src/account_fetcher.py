@@ -844,14 +844,12 @@ class AccountFetcher:
         positions = self._cf_rank_positions
         total = len(ratings)
         for profile in profiles.values():
-            if getattr(profile, "rating_rank", None) is not None:
-                continue
             handle = str(getattr(profile, "handle", "") or "").casefold()
             rank = positions.get(handle)
-            if rank is None:
-                continue
+            # **必须覆盖**：资料缓存里可能存着旧算法算错的名次（例如"多个第 1"），
+            # 只有每次都按榜单位次重写，缓存里的脏值才会被纠正。
             profile.rating_rank = rank
-            profile.rating_rank_total = total or None
+            profile.rating_rank_total = (total or None) if rank else None
 
     async def _cf_bulk_fetch(
         self,
