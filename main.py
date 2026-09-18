@@ -473,6 +473,16 @@ class AcmerGroupBot(Star):
 
     async def initialize(self) -> None:
         await self.fetcher.initialize()
+        # 重载/升级后作废旧排行快照：快照新鲜期 1 小时，不作废的话
+        # 升级后最长要等一小时才能看到新的排行数据。
+        try:
+            store = getattr(self.account_registry, "store", None)
+            marker = getattr(store, "mark_all_rank_dirty", None)
+            if callable(marker):
+                count = await marker()
+                logger.info("启动时已作废旧排行快照：%d 条", count)
+        except Exception as exc:  # noqa: BLE001 - 作废失败不影响启动
+            logger.warning("作废旧排行快照失败：%s", exc)
         # 赛程接口只返回"未开始"的比赛，结束后会从列表消失；重启后要能继续
         # 结算"结束前已见过"的比赛，因此把最近记录从磁盘恢复。
         try:

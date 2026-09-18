@@ -1142,6 +1142,25 @@ class AccountStore:
     # ------------------------------------------------------------------
     # rank_snapshot / rank_meta（群排行物化读模型）
     # ------------------------------------------------------------------
+    async def mark_all_rank_dirty(self) -> int:
+        """把全部排行快照标脏：插件重载/升级后强制重算一次。
+
+        快照新鲜期是 1 小时，若不在启动时作废，升级后最长要等一小时
+        才能在群里看到新的排行数据（线上真实踩坑）。
+        """
+        def _update() -> int:
+            conn = self._connect()
+            try:
+                with conn:
+                    cursor = conn.execute(
+                        "UPDATE rank_meta SET dirty_at = ?", (_now(),)
+                    )
+                    return int(cursor.rowcount or 0)
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_update)
+
     async def replace_rank_snapshot(
         self,
         group_id: str,
