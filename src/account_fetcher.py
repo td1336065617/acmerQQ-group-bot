@@ -1178,8 +1178,9 @@ class AccountFetcher:
         user = rows[0]
         canonical = str(user.get("handle") or handle)
         profile = self._profile_from_codeforces_user(user)
-        if detail:
-            # 平台内排名：按全站已评级用户的 rating 分布算名次
+        # 平台内排名：**轻量资料也要算**——群排行走 detail=False，
+        # 之前只写在 detail 分支里，导致群排行/快照永远拿不到 CF 名次。
+        if profile.rating is not None:
             try:
                 profile.rating_rank = await self.codeforces_global_rank(
                     profile.rating
@@ -1188,6 +1189,7 @@ class AccountFetcher:
                 profile.rating_rank_total = len(ratings) or None
             except Exception as exc:  # noqa: BLE001 - 排名是附加信息
                 logger.warning("计算 CF 全站排名失败：%s", exc)
+        if detail:
             rating_data = await self._cf_json(
                 "user.rating", {"handle": canonical}
             )
