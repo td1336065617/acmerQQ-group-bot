@@ -331,6 +331,11 @@ def _platform_rank_text(profile: object) -> str:
     if rank is None:
         return ""
     text = f"#{_format_number(rank)}"
+    # CF 的名次来自官方全站榜单的**周期快照**（榜单里的 rating 会滞后于实时，
+    # 实测 BenQ 实时 3857 / 榜单 3650），因此标注来源，避免与官网对不上时被当成 bug。
+    # 标注紧跟名次，这样窄列丢弃百分位时标注仍然保留。
+    if str(_profile_field(profile, "platform", "") or "").casefold() == "codeforces":
+        text += "（榜单快照）"
     note = str(_profile_field(profile, "rating_rank_note", "") or "").strip()
     if note:
         return f"{text} · {note}"
