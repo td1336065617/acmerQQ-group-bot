@@ -815,7 +815,32 @@ class AccountFetcher:
             else:
                 missing.append(identifier)
 
-        return await self._cf_bulk_fetch(missing, result, force)
+        profiles = await self._cf_bulk_fetch(missing, result, force)
+        await self._fill_codeforces_ranks(profiles)
+        return profiles
+
+    async def _fill_codeforces_ranks(self, profiles) -> None:
+        """给一批 CF 资料补平台内排名。
+
+        群排行走的是 **批量 user.info 路径**（一次请求取全群），它直接构造
+        profile、不经过单账号路径，因此必须在这里单独补一次——否则 CF 在群排行里
+        永远没有排名（线上实测：53 行只有 1 行有值）。
+        """
+        try:
+            ratings = await self._codeforces_rated_ratings()
+        except Exception as exc:  # noqa: BLE001 - 排名是附加信息
+            logger.warning("读取 CF 全站 rating 榜失败：%s", exc)
+            return
+        if not ratings:
+            return
+        total = len(ratings)
+        negative = [-value for value in ratings]
+        for profile in profiles.values():
+            rating = getattr(profile, "rating", None)
+            if rating is None or getattr(profile, "rating_rank", None) is not None:
+                continue
+            profile.rating_rank = bisect.bisect_left(negative, -int(rating)) + 1
+            profile.rating_rank_total = total or None
 
     async def _cf_bulk_fetch(
         self,
@@ -1180,15 +1205,7 @@ class AccountFetcher:
         profile = self._profile_from_codeforces_user(user)
         # 平台内排名：**轻量资料也要算**——群排行走 detail=False，
         # 之前只写在 detail 分支里，导致群排行/快照永远拿不到 CF 名次。
-        if profile.rating is not None:
-            try:
-                profile.rating_rank = await self.codeforces_global_rank(
-                    profile.rating
-                )
-                ratings = await self._codeforces_rated_ratings()
-                profile.rating_rank_total = len(ratings) or None
-            except Exception as exc:  # noqa: BLE001 - 排名是附加信息
-                logger.warning("计算 CF 全站排名失败：%s", exc)
+        await self._fill_codeforces_ranks({canonical.casefold(): profile})
         if detail:
             rating_data = await self._cf_json(
                 "user.rating", {"handle": canonical}
