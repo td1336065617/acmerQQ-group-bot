@@ -479,6 +479,15 @@ class AcmerGroupBot(Star):
 
     async def initialize(self) -> None:
         await self.fetcher.initialize()
+        # 后台预热 CF 全站榜单：全量榜单约 115 秒，不能放在用户查询路径里等。
+        async def _warm_cf_rank_list() -> None:
+            try:
+                ratings = await self.account_fetcher._codeforces_rated_ratings()
+                logger.info("CF 全站榜单预热完成：%d 人", len(ratings))
+            except Exception as exc:  # noqa: BLE001 - 预热失败不影响启动
+                logger.warning("预热 CF 全站榜单失败：%s", exc)
+
+        self._cf_warm_task = asyncio.create_task(_warm_cf_rank_list())
         # 重载/升级后作废旧排行快照：快照新鲜期 1 小时，不作废的话
         # 升级后最长要等一小时才能看到新的排行数据。
         try:

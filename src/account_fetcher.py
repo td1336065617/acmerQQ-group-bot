@@ -107,7 +107,8 @@ NOWCODER_PROBLEM_INDEX_VERSION = 2
 #: CF 全站 rating 榜（user.ratedList）：实测 3.8 万人 / 13.5MB / 约 20 秒，
 #: 只落盘排序后的 rating 数组（约 150KB），24 小时有效。
 CF_RATED_LIST_TTL = 24 * 3600
-CF_RATED_LIST_TIMEOUT = 90.0
+#: 全量榜单实测 13.7 万人 / 约 115 秒（90 秒会超时，线上踩过）
+CF_RATED_LIST_TIMEOUT = 240.0
 #: 榜单来源标记：full = 不带 activeOnly 的全量榜单（含不活跃的顶尖选手）
 CF_RATED_LIST_SOURCE = "full"
 # 整库约 1.4 万题；条目数明显偏少说明抓取残缺，直接丢弃重建。
