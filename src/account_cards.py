@@ -341,7 +341,13 @@ def _platform_rank_text(profile: object) -> str:
         total_value = 0
     if total_value > 0:
         percent = float(rank) / total_value * 100
-        shown = f"{percent:.2f}%" if percent < 1 else f"{percent:.1f}%"
+        if percent < 0.01:
+            # 1/137134 ≈ 0.0007%，四舍五入会显示成 0.00% 很怪
+            shown = "<0.01%"
+        elif percent < 1:
+            shown = f"{percent:.2f}%"
+        else:
+            shown = f"{percent:.1f}%"
         return f"{text} · Top {shown}"
     return text
 

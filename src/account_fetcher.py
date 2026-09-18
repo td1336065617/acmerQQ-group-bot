@@ -107,7 +107,9 @@ NOWCODER_PROBLEM_INDEX_VERSION = 2
 #: CF 全站 rating 榜（user.ratedList）：实测 3.8 万人 / 13.5MB / 约 20 秒，
 #: 只落盘排序后的 rating 数组（约 150KB），24 小时有效。
 CF_RATED_LIST_TTL = 24 * 3600
-CF_RATED_LIST_TIMEOUT = 60.0
+CF_RATED_LIST_TIMEOUT = 90.0
+#: 榜单来源标记：full = 不带 activeOnly 的全量榜单（含不活跃的顶尖选手）
+CF_RATED_LIST_SOURCE = "full"
 # 整库约 1.4 万题；条目数明显偏少说明抓取残缺，直接丢弃重建。
 NOWCODER_PROBLEM_INDEX_MIN_ENTRIES = 5000
 NOWCODER_PROBLEM_INDEX_FILENAME = "nowcoder_problem_index.json"
@@ -356,6 +358,8 @@ class AccountFetcher:
         # 整库抓取一次（约 1.4 万题）后本地查表，覆盖全部通过题。
         self._nowcoder_problem_index: Dict[str, Dict[str, Any]] = {}
         self._cf_rated_ratings: Optional[Tuple[float, List[int]]] = None
+        #: {handle: 榜单位次}，榜单本身即排名（位次 = 名次）
+        self._cf_rank_positions: Dict[str, int] = {}
         self._nowcoder_problem_index_loaded_at = 0.0
         self._nowcoder_problem_index_dirty = False
         self._nowcoder_problem_index_lock = asyncio.Lock()
@@ -833,13 +837,16 @@ class AccountFetcher:
             return
         if not ratings:
             return
+        positions = self._cf_rank_positions
         total = len(ratings)
-        negative = [-value for value in ratings]
         for profile in profiles.values():
-            rating = getattr(profile, "rating", None)
-            if rating is None or getattr(profile, "rating_rank", None) is not None:
+            if getattr(profile, "rating_rank", None) is not None:
                 continue
-            profile.rating_rank = bisect.bisect_left(negative, -int(rating)) + 1
+            handle = str(getattr(profile, "handle", "") or "").casefold()
+            rank = positions.get(handle)
+            if rank is None:
+                continue
+            profile.rating_rank = rank
             profile.rating_rank_total = total or None
 
     async def _cf_bulk_fetch(
@@ -1104,30 +1111,55 @@ class AccountFetcher:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 fetched_at = float(payload.get("fetched_at") or 0)
                 ratings = [int(item) for item in (payload.get("ratings") or [])]
+                # source=full 之前的缓存来自 activeOnly 请求，榜单不完整，直接丢弃
+                if payload.get("source") != CF_RATED_LIST_SOURCE:
+                    ratings = []
+                handles = [str(item).casefold() for item in (payload.get("handles") or [])]
+                if handles:
+                    self._cf_rank_positions = {
+                        handle: index + 1 for index, handle in enumerate(handles)
+                    }
                 if ratings and time.time() - fetched_at < CF_RATED_LIST_TTL:
                     self._cf_rated_ratings = (fetched_at, ratings)
                     return ratings
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning("读取 CF 全站 rating 缓存失败：%s", exc)
+        # 注意：**不能**带 activeOnly=true —— 那会漏掉 jiangly 这类"不活跃"的顶尖选手，
+        # 他们的 rating 高于榜单最高分，名次会被算成 1（线上真实故障）。
         payload = await self._cf_json(
-            "user.ratedList", {"activeOnly": "true"}, timeout=CF_RATED_LIST_TIMEOUT
+            "user.ratedList", {}, timeout=CF_RATED_LIST_TIMEOUT
         )
         if not isinstance(payload, dict) or payload.get("status") != "OK":
             return []
         rows = payload.get("result") or []
+        # 榜单本身就是排名：按返回顺序取 handle（CF 已按 rating 降序返回），
+        # 位次即名次。**不能**用"实时 rating 去榜单里二分"——ratedList 里的
+        # rating 是过期快照（实测 BenQ user.info=3857 / ratedList=3650），
+        # 会导致名次算错（线上真实故障：jiangly 与 BenQ 都显示第 1）。
+        ordered = [
+            str(row.get("handle") or "").casefold()
+            for row in rows
+            if isinstance(row, dict) and row.get("handle")
+        ]
+        self._cf_rank_positions = {handle: index + 1 for index, handle in enumerate(ordered)}
         ratings = sorted(
             (int(row.get("rating") or 0) for row in rows if isinstance(row, dict)),
             reverse=True,
         )
         ratings = [value for value in ratings if value > 0]
-        if not ratings:
+        if not ordered:
             return []
         self._cf_rated_ratings = (time.time(), ratings)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 json.dumps(
-                    {"fetched_at": time.time(), "ratings": ratings},
+                    {
+                        "source": CF_RATED_LIST_SOURCE,
+                        "fetched_at": time.time(),
+                        "ratings": ratings,
+                        "handles": ordered,
+                    },
                     separators=(",", ":"),
                 ),
                 encoding="utf-8",
