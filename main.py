@@ -3588,9 +3588,20 @@ class AcmerGroupBot(Star):
                     self.settlement.remember_contests(platform, contests)
                 if err and not contests:
                     continue
-                for contest in self.settlement.settlement_candidates(
+                candidates = self.settlement.settlement_candidates(
                     platform, moment, delay_minutes
-                ):
+                )
+                if candidates:
+                    logger.info(
+                        "赛后赛果巡检：%s 有 %d 场刚结束待结算（%s）",
+                        platform,
+                        len(candidates),
+                        "、".join(
+                            f"{item.contest_id} {item.name[:24]}"
+                            for item in candidates
+                        ),
+                    )
+                for contest in candidates:
                     key = f"settle_{group.group_id}_{platform}_{contest.contest_id}"
                     if await self.get_kv_data(key, False):
                         continue
@@ -3632,9 +3643,32 @@ class AcmerGroupBot(Star):
         """处理单场赛果：采集 → 渲染 → 推送 → 写幂等键；返回 1/0。"""
         members = await self._settlement_members(group.group_id, platform)
         if len(members) < max(1, min_participants):
+            logger.info(
+                "群 %s 跳过 %s %s 赛果：本群绑定该平台的成员 %d 人，低于阈值 %d",
+                group.group_id,
+                platform,
+                contest.contest_id,
+                len(members),
+                max(1, min_participants),
+            )
             return 0
         result = await self.settlement.collect(platform, contest, members)
-        if result is None or not result.has_content():
+        if result is None:
+            logger.info(
+                "群 %s 跳过 %s %s 赛果：赛果采集失败（接口异常或平台未公开）",
+                group.group_id,
+                platform,
+                contest.contest_id,
+            )
+            return 0
+        if not result.has_content():
+            logger.info(
+                "群 %s 跳过 %s %s 赛果：本群 %d 名绑定成员均未参加该场比赛",
+                group.group_id,
+                platform,
+                contest.contest_id,
+                len(members),
+            )
             return 0
         sections = {platform: [row.to_card_row() for row in result.rows]}
         if show_unsolved:

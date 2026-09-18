@@ -147,3 +147,70 @@ def test_settlement_pillow_with_no_rows(tmp_path, monkeypatch):
         tmp_path / "empty.png",
     )
     assert ok is True
+
+
+# ----------------------------------------------------------------------
+# 卡片文本清洗（Pillow 无 emoji 字形 → 方块）与 Pillow 表头
+# ----------------------------------------------------------------------
+
+
+def test_strip_emoji_removes_emoji_keeps_text():
+    from src.account_cards import strip_emoji
+
+    assert strip_emoji("🏁 牛客练习赛157 赛果") == "牛客练习赛157 赛果"
+    assert strip_emoji("X_moink 🎯") == "X_moink"
+    assert strip_emoji("本群 1 人参赛 · 赛后 12 分钟") == "本群 1 人参赛 · 赛后 12 分钟"
+    assert strip_emoji("🏆🥇") == ""
+    assert strip_emoji(None) == ""
+
+
+def test_render_settlement_sanitizes_emoji_before_drawing(monkeypatch):
+    """卡片渲染前必须清洗 emoji（服务器走 Pillow，emoji 会变方块）。"""
+    from src.account_cards import AccountCardRenderer
+
+    captured = {}
+
+    def fake_render(self, body, source, pillow, sections, title, subtitle, note):
+        captured.update({"body": body, "title": title, "subtitle": subtitle, "note": note})
+        return None
+
+    monkeypatch.setattr(AccountCardRenderer, "_render", fake_render)
+    renderer = AccountCardRenderer.__new__(AccountCardRenderer)
+    sections = {"nowcoder": [
+        {"rank": 1, "user_count": 10, "display_name": "X_moink 🎯", "handle": "X 🎯",
+         "solved": 2, "total_problems": 6, "ak": False}
+    ]}
+    renderer.render_settlement(sections, title="🏁 某比赛 赛果", subtitle="本群 1 人参赛", note="🏆 以平台为准")
+    assert captured["title"] == "某比赛 赛果"
+    assert captured["note"] == "以平台为准"
+    assert "🎯" not in captured["body"]
+    assert "X_moink" in captured["body"]
+
+
+def test_pillow_settlement_draws_column_headers(monkeypatch, tmp_path):
+    """Pillow 路径必须画表头（HTML 路径有 mini-header，Pillow 原先漏了）。"""
+    from PIL import ImageDraw
+
+    from src.account_cards import AccountCardRenderer
+
+    drawn: list = []
+    original = ImageDraw.ImageDraw.text
+
+    def spy(self, xy, text, *args, **kwargs):
+        drawn.append(str(text))
+        return original(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
+    sections = {"nowcoder": [
+        {"rank": 230, "user_count": 1273, "display_name": "X_moink", "handle": "X_moink",
+         "solved": 2, "total_problems": 6, "ak": False}
+    ]}
+    out = tmp_path / "settle.png"
+    ok = AccountCardRenderer._pillow_settlement(
+        sections, "某比赛 赛果", "本群 1 人参赛", "以平台为准", out
+    )
+    assert ok and out.is_file()
+    for label in ("名次", "成员", "通过", "参赛人数"):
+        assert label in drawn, label
+    assert "#230" in drawn and "2/6 题" in drawn and "1273 人" in drawn
+

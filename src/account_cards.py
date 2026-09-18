@@ -1,6 +1,8 @@
 """账号战绩卡与群排行卡：樱粉珍珠、冰蓝花瓣主题的 HTML/PNG 渲染。"""
 from __future__ import annotations
 
+import re
+
 import hashlib
 import html
 import io
@@ -52,6 +54,9 @@ RANKING_MIN_RENDER_HEIGHT = 520
 SETTLE_CARD_MAX_ROWS = 10
 SETTLE_CARD_ROW_STEP = 62
 SETTLE_CARD_SECTION_BASE = 66
+#: Pillow 路径的表头位置与行高（HTML 路径有 mini-header，Pillow 需要自己留位）
+SETTLE_CARD_HEADER_TOP = 44
+SETTLE_CARD_HEADER_STEP = 28
 OVERVIEW_PAGE_START = 215
 OVERVIEW_SECTION_BASE = 74
 OVERVIEW_HEADER_HEIGHT = 36
@@ -81,6 +86,35 @@ PLATFORM_TEXT_COLORS = {
     "luogu": "#8b4d8d",
     "atcoder": "#1f806d",
 }
+
+
+#: emoji / 变体选择符 / 零宽连接符等"当前渲染器画不出"的字符
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"   # 各类 emoji 区块
+    "\U00002600-\U000027BF"   # 杂项符号与装饰符
+    "\U0001F1E6-\U0001F1FF"   # 区域指示符（国旗）
+    "\U0000FE00-\U0000FE0F"   # 变体选择符
+    "\U00002190-\U000021FF"   # 箭头
+    "\U00002B00-\U00002BFF"   # 杂项符号与箭头
+    "\U0000200D"                # 零宽连接符
+    "\U0000203C\U00002049"
+    "]+"
+)
+
+
+def strip_emoji(value: object) -> str:
+    """去掉卡片文本里的 emoji。
+
+    卡片在服务器上常走 Pillow 兜底渲染，用的是 CJK 字体、没有 emoji 字形，
+    直接画会变成方块 X（线上真实故障）。QQ 消息文本仍可保留 emoji——
+    那里由客户端渲染，不受影响。
+    """
+    text = str(value if value is not None else "")
+    if not text:
+        return ""
+    cleaned = _EMOJI_RE.sub("", text)
+    return " ".join(cleaned.split()).strip()
 
 
 def _escape(value: object) -> str:
@@ -978,6 +1012,21 @@ class AccountCardRenderer:
             "subtitle": subtitle,
             "note": note,
             "sections": ordered,
+        }
+        # 统一清洗 emoji：卡片渲染器（尤其 Pillow）画不出 emoji，会显示方块。
+        title = strip_emoji(title) or "赛后赛果"
+        subtitle = strip_emoji(subtitle)
+        note = strip_emoji(note)
+        ordered = {
+            platform: [
+                {
+                    **row,
+                    "display_name": strip_emoji(row.get("display_name")),
+                    "handle": strip_emoji(row.get("handle")),
+                }
+                for row in rows
+            ]
+            for platform, rows in ordered.items()
         }
         body = self._settlement_html(
             ordered, title=title, subtitle=subtitle, note=note
@@ -3811,7 +3860,8 @@ class AccountCardRenderer:
         items = list(sections.items())
         section_heights = [
             (
-                SETTLE_CARD_SECTION_BASE
+                SETTLE_CARD_HEADER_TOP
+                + SETTLE_CARD_HEADER_STEP
                 + max(1, min(SETTLE_CARD_MAX_ROWS, len(rows))) * SETTLE_CARD_ROW_STEP
                 if rows
                 else OVERVIEW_EMPTY_SECTION_HEIGHT
@@ -3874,7 +3924,27 @@ class AccountCardRenderer:
                 font=head_font,
                 fill=accent,
             )
-            line_y = y + SETTLE_CARD_SECTION_BASE
+            # 列位置：名次 / 成员 / 通过 / 参赛人数，与表头共用同一套坐标
+            rank_x = x + 20
+            name_x = x + 104
+            solved_right = x + section_w - 132
+            count_right = x + section_w - 20
+            header_font = cls._find_font(15, bold=True) or body_font
+            header_y = y + SETTLE_CARD_HEADER_TOP
+            for label, anchor_x, anchor in (
+                ("名次", rank_x, "la"),
+                ("成员", name_x, "la"),
+                ("通过", solved_right, "ra"),
+                ("参赛人数", count_right, "ra"),
+            ):
+                draw.text(
+                    (anchor_x, header_y),
+                    label,
+                    font=header_font,
+                    fill="#8b6a86",
+                    anchor=anchor,
+                )
+            line_y = header_y + SETTLE_CARD_HEADER_STEP
             for row in rows[:SETTLE_CARD_MAX_ROWS]:
                 rank = row.get("rank")
                 rank_text = f"#{rank}" if rank else "—"
@@ -3889,15 +3959,33 @@ class AccountCardRenderer:
                 if row.get("ak"):
                     solved_text += " AK"
                 user_count = row.get("user_count")
-                tail = f"  {user_count} 人" if user_count else ""
+                count_text = f"{user_count} 人" if user_count else "—"
                 name = str(row.get("display_name") or row.get("handle") or "未知用户")
-                text = cls._fit_pillow_text(
-                    draw,
-                    f"{rank_text}  {name}  {solved_text}{tail}",
-                    body_font,
-                    section_w - 40,
+                draw.text(
+                    (rank_x, line_y), rank_text, font=body_font, fill="#4b2b5c"
                 )
-                draw.text((x + 20, line_y), text, font=body_font, fill="#4b2b5c")
+                draw.text(
+                    (name_x, line_y),
+                    cls._fit_pillow_text(
+                        draw, name, body_font, solved_right - name_x - 16
+                    ),
+                    font=body_font,
+                    fill="#4b2b5c",
+                )
+                draw.text(
+                    (solved_right, line_y),
+                    solved_text,
+                    font=body_font,
+                    fill="#4b2b5c",
+                    anchor="ra",
+                )
+                draw.text(
+                    (count_right, line_y),
+                    count_text,
+                    font=body_font,
+                    fill="#6e4a67",
+                    anchor="ra",
+                )
                 line_y += SETTLE_CARD_ROW_STEP
         if note:
             draw.text(

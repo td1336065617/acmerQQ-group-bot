@@ -511,3 +511,54 @@ def test_nowcoder_row_pick_accepts_single_id_string():
     assert SettlementService._pick_nowcoder_row(history, {"9", "42"})["rank"] == 1
     assert SettlementService._pick_nowcoder_row(history, {"9"}) is None
     assert SettlementService._pick_nowcoder_row(history, set()) is None
+
+
+# ----------------------------------------------------------------------
+# 跨群缓存隔离（线上真实故障：5 个群推了同一个人的赛果）
+# ----------------------------------------------------------------------
+
+
+def test_settlement_result_cache_is_scoped_per_member_set():
+    """结果缓存必须带成员指纹：A 群算出的赛果不能被 B 群复用。"""
+
+    async def scenario():
+        joined = {
+            "data": {
+                "dataList": [
+                    {
+                        "contestId": 42,
+                        "contestName": "某场比赛",
+                        "rank": 7,
+                        "userCount": 500,
+                        "acceptedCount": 3,
+                        "problemCount": 6,
+                    }
+                ]
+            }
+        }
+        missing = {"data": {"dataList": []}}
+        fetcher = FakeFetcher(nowcoder={"111": joined, "222": missing})
+        service = SettlementService(fetcher)
+        contest = _contest("nowcoder", "900", "某场比赛", hours_ago=3)
+        contest.url = "https://ac.nowcoder.com/acm/contest/42"
+
+        first = await service.collect("nowcoder", contest, [("u1", "甲", "111")])
+        assert first is not None and len(first.rows) == 1
+        # 另一个群（成员不同）必须重新判定，不能复用上一组的结果
+        second = await service.collect("nowcoder", contest, [("u2", "乙", "222")])
+        assert second is None or not second.has_content()
+        # 同一组成员再查应命中缓存（同一个对象）
+        again = await service.collect("nowcoder", contest, [("u1", "甲", "111")])
+        assert again is first
+
+    asyncio.run(scenario())
+
+
+def test_member_fingerprint_is_order_and_duplicate_insensitive():
+    a = SettlementService._member_fingerprint([("u1", "甲", "AAA"), ("u2", "乙", "bbb")])
+    b = SettlementService._member_fingerprint([("u2", "乙", "BBB"), ("u1", "甲", "aaa")])
+    assert a == b
+    c = SettlementService._member_fingerprint([("u1", "甲", "AAA")])
+    assert a != c
+    assert SettlementService._member_fingerprint([]) == SettlementService._member_fingerprint([])
+

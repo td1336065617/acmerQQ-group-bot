@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -132,7 +133,11 @@ class SettlementService:
 
     def __init__(self, account_fetcher) -> None:
         self.fetcher = account_fetcher
-        self._result_cache: Dict[Tuple[str, str], Tuple[float, SettleResult]] = {}
+        #: 结果缓存：键含"成员指纹"，否则 A 群算出的结果会被 B 群复用
+        #: （线上真实故障：5 个群都推了主群那一个人的赛果）。
+        self._result_cache: Dict[Tuple[str, str, str], Tuple[float, SettleResult]] = {}
+        #: 原始数据缓存（榜单等与"哪些群"无关的数据，跨群共享，避免每个群重复拉取）
+        self._raw_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
         self._nowcoder_history: Dict[str, Tuple[float, List[dict]]] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
         #: {(platform, contest_id): {...}}：赛程接口只给未开始的比赛，
@@ -322,7 +327,7 @@ class SettlementService:
         if not contest_id:
             return None
 
-        cache_key = (platform, contest_id)
+        cache_key = (platform, contest_id, self._member_fingerprint(members))
         cached = self._result_cache.get(cache_key)
         if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
             return cached[1]
@@ -371,23 +376,37 @@ class SettlementService:
     # ------------------------------------------------------------------
     # Codeforces
     # ------------------------------------------------------------------
-    async def _collect_codeforces(
-        self, contest, members: Sequence[Tuple[str, str, str]]
-    ) -> Optional[SettleResult]:
-        contest_id = str(contest.contest_id)
+    async def _cf_standings(self, contest_id: str) -> Tuple[list, list]:
+        """CF 榜单原始数据（跨群共享缓存，避免每个群都拉一次 248KB）。"""
+        key = ("codeforces", str(contest_id))
+        cached = self._raw_cache.get(key)
+        if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
+            return cached[1]
         # 注意：CF 对非管理员只允许"匿名 GET 且不带任何额外参数"，
         # 传 from/count/showUnofficial 会直接报错。
         payload = await self.fetcher._cf_json(
             CF_API_METHOD,
-            {"contestId": contest_id},
+            {"contestId": str(contest_id)},
             timeout=CF_STANDINGS_TIMEOUT,
         )
         if not isinstance(payload, dict) or payload.get("status") != "OK":
             comment = payload.get("comment") if isinstance(payload, dict) else payload
             raise ValueError(f"CF standings 返回异常：{comment}")
         result = payload.get("result") or {}
-        raw_rows = result.get("rows") or []
-        problems = result.get("problems") or []
+        data = (result.get("rows") or [], result.get("problems") or [])
+        self._raw_cache[key] = (time.time(), data)
+        if len(self._raw_cache) > CACHE_MAX_ENTRIES:
+            newest = sorted(self._raw_cache.items(), key=lambda pair: pair[1][0], reverse=True)[
+                : CACHE_MAX_ENTRIES // 2
+            ]
+            self._raw_cache = dict(newest)
+        return data
+
+    async def _collect_codeforces(
+        self, contest, members: Sequence[Tuple[str, str, str]]
+    ) -> Optional[SettleResult]:
+        contest_id = str(contest.contest_id)
+        raw_rows, problems = await self._cf_standings(contest_id)
         if not raw_rows:
             return None
 
@@ -472,20 +491,9 @@ class SettlementService:
         slug = str(getattr(contest, "contest_id", "") or "").strip()
         if not slug:
             return None
-        payload = await self.fetcher._fetch_json(
-            ATCODER_RESULTS_URL.format(slug=slug),
-            timeout=ATCODER_RESULTS_TIMEOUT,
-        )
-        if not isinstance(payload, list) or not payload:
+        index, total_rows = await self._atcoder_results_index(slug)
+        if not index:
             return None
-        index: Dict[str, dict] = {}
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            for key in ("UserName", "UserScreenName"):
-                name = str(item.get(key) or "").strip()
-                if name:
-                    index.setdefault(name.casefold(), item)
 
         rows: List[SettleRow] = []
         for user_id, display, handle in members:
@@ -499,7 +507,7 @@ class SettlementService:
                     display_name=str(display or handle),
                     handle=str(handle),
                     rank=_as_int(item.get("Place")),
-                    user_count=len(payload),
+                    user_count=total_rows or len(index),
                     solved=None,
                     total_problems=None,
                     source="atcoder-results",
@@ -519,6 +527,18 @@ class SettlementService:
     # ------------------------------------------------------------------
     # 牛客
     # ------------------------------------------------------------------
+    @staticmethod
+    def _member_fingerprint(members: Sequence[Tuple[str, str, str]]) -> str:
+        """成员集合指纹：参与结果缓存键，避免跨群复用别群的赛果。"""
+        keys = sorted(
+            {
+                str(handle).strip().casefold()
+                for _user_id, _display, handle in members
+                if handle
+            }
+        )
+        return hashlib.sha1("|".join(keys).encode("utf-8")).hexdigest()[:16]
+
     @staticmethod
     def _nowcoder_contest_ids(contest) -> set:
         """牛客比赛的候选 ID 集合：日历行 ID + 链接里的真实比赛 ID。
@@ -667,6 +687,31 @@ class SettlementService:
     # ------------------------------------------------------------------
     # 洛谷
     # ------------------------------------------------------------------
+    async def _atcoder_results_index(self, slug: str) -> Tuple[Dict[str, dict], int]:
+        """AtCoder 官方 results 的"用户名 → 行"索引（跨群共享缓存）。"""
+        key = ("atcoder", str(slug))
+        cached = self._raw_cache.get(key)
+        if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
+            return cached[1]
+        payload = await self.fetcher._fetch_json(
+            ATCODER_RESULTS_URL.format(slug=str(slug)),
+            timeout=ATCODER_RESULTS_TIMEOUT,
+        )
+        index: Dict[str, dict] = {}
+        total_rows = 0
+        if isinstance(payload, list):
+            total_rows = len(payload)
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                for name_key in ("UserName", "UserScreenName"):
+                    name = str(item.get(name_key) or "").strip()
+                    if name:
+                        index.setdefault(name.casefold(), item)
+        if index:
+            self._raw_cache[key] = (time.time(), (index, total_rows))
+        return index, total_rows
+
     async def _collect_luogu(
         self, contest, members: Sequence[Tuple[str, str, str]]
     ) -> Optional[SettleResult]:
