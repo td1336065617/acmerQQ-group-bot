@@ -107,8 +107,11 @@ NOWCODER_PROBLEM_INDEX_VERSION = 2
 #: CF 全站 rating 榜（user.ratedList）：实测 3.8 万人 / 13.5MB / 约 20 秒，
 #: 只落盘排序后的 rating 数组（约 150KB），24 小时有效。
 CF_RATED_LIST_TTL = 24 * 3600
-#: 全量榜单实测 13.7 万人 / 约 115 秒（90 秒会超时，线上踩过）
-CF_RATED_LIST_TIMEOUT = 240.0
+#: 全量榜单实测 13.7 万人 / 约 115 秒；绑定人数会持续增长，且 CF 会限速，
+#: 这里给足 10 分钟（它是启动后台预热 + 24 小时缓存，慢一点不影响用户查询）。
+CF_RATED_LIST_TIMEOUT = 600.0
+#: 榜单拉取失败后的重试次数（CF 偶发超时/502）
+CF_RATED_LIST_ATTEMPTS = 3
 #: 榜单来源标记：full = 不带 activeOnly 的全量榜单（含不活跃的顶尖选手）
 CF_RATED_LIST_SOURCE = "full"
 # 整库约 1.4 万题；条目数明显偏少说明抓取残缺，直接丢弃重建。
@@ -1127,11 +1130,37 @@ class AccountFetcher:
             logger.warning("读取 CF 全站 rating 缓存失败：%s", exc)
         # 注意：**不能**带 activeOnly=true —— 那会漏掉 jiangly 这类"不活跃"的顶尖选手，
         # 他们的 rating 高于榜单最高分，名次会被算成 1（线上真实故障）。
-        payload = await self._cf_json(
-            "user.ratedList", {}, timeout=CF_RATED_LIST_TIMEOUT
-        )
-        if not isinstance(payload, dict) or payload.get("status") != "OK":
-            return []
+        payload = None
+        last_error: Optional[Exception] = None
+        for attempt in range(1, CF_RATED_LIST_ATTEMPTS + 1):
+            try:
+                payload = await self._cf_json(
+                    "user.ratedList", {}, timeout=CF_RATED_LIST_TIMEOUT
+                )
+                if isinstance(payload, dict) and payload.get("status") == "OK":
+                    break
+                last_error = ValueError(
+                    f"CF ratedList 返回异常：{payload.get('comment') if isinstance(payload, dict) else payload}"
+                )
+            except Exception as exc:  # noqa: BLE001 - 失败要重试，不要直接清空名次
+                last_error = exc
+            payload = None
+            logger.warning(
+                "CF 全站榜单第 %d/%d 次拉取失败：%s",
+                attempt,
+                CF_RATED_LIST_ATTEMPTS,
+                last_error,
+            )
+            # 立即重试（不 sleep）：CF 偶发 502/超时，重试能救回来，
+            # 且避免测试/启动路径因为退避等待而变慢。
+            if attempt < CF_RATED_LIST_ATTEMPTS:
+                await asyncio.sleep(0)
+        if payload is None:
+            # 拉不到就用磁盘上的旧榜单兜底：名次会略旧，但比"全空"好得多
+            stale = self._load_stale_cf_rank_cache(path)
+            if stale:
+                logger.warning("CF 全站榜单拉取失败，回退到旧榜单（%d 人）", len(stale))
+            return stale
         rows = payload.get("result") or []
         # 榜单本身就是排名：按返回顺序取 handle（CF 已按 rating 降序返回），
         # 位次即名次。**不能**用"实时 rating 去榜单里二分"——ratedList 里的
@@ -1168,6 +1197,23 @@ class AccountFetcher:
         except OSError as exc:
             logger.warning("写入 CF 全站 rating 缓存失败：%s", exc)
         logger.info("CF 全站 rating 榜已更新：%d 人", len(ratings))
+        return ratings
+
+    def _load_stale_cf_rank_cache(self, path: Path) -> List[int]:
+        """读取磁盘上的旧榜单（忽略 TTL / source），仅用于拉取失败时兜底。"""
+        try:
+            if not path.is_file():
+                return []
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning("读取旧 CF 榜单失败：%s", exc)
+            return []
+        ratings = [int(item) for item in (payload.get("ratings") or [])]
+        handles = [str(item).casefold() for item in (payload.get("handles") or [])]
+        if handles:
+            self._cf_rank_positions = {
+                handle: index + 1 for index, handle in enumerate(handles)
+            }
         return ratings
 
     async def _cf_json(
