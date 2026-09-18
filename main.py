@@ -27,7 +27,12 @@ from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
-from .src.contest_fetcher import ContestFetcher
+from .src.contest_fetcher import (
+    NOWCODER_SCOPE_ALL,
+    NOWCODER_SCOPE_SERIES_ONLY,
+    NOWCODER_SCOPES,
+    ContestFetcher,
+)
 from .src.rank_service import RankService
 from .src.account_cards import (
     AccountCardRenderer,
@@ -85,6 +90,14 @@ MAX_MAX_PLAIN_TEXT_LINES = 200
 DEFAULT_RECENT_CONTEST_DAYS = 7
 MIN_RECENT_CONTEST_DAYS = 1
 MAX_RECENT_CONTEST_DAYS = 30
+# 牛客赛事口径：all = 日历里全部牛客赛事（含高校校赛/新生赛同步赛/自主创建赛）；
+# series_only = 仅比赛名含“牛客”的系列赛（旧口径）。抓取始终取全量，
+# 只在返回时按口径过滤，因此切换后立即生效。
+DEFAULT_NOWCODER_SCOPE = NOWCODER_SCOPE_ALL
+NOWCODER_SCOPE_LABELS = {
+    NOWCODER_SCOPE_ALL: "全部牛客赛事",
+    NOWCODER_SCOPE_SERIES_ONLY: "仅牛客系列赛",
+}
 # @全体成员 尝试失败后，对该群暂缓重试的时间（秒）
 AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 比赛列表最多展示的条数（防止消息过长）
@@ -576,11 +589,35 @@ class AcmerGroupBot(Star):
                 MIN_RECENT_CONTEST_DAYS,
                 MAX_RECENT_CONTEST_DAYS,
             ),
+            "nowcoder_scope": self._read_nowcoder_scope(
+                raw.get("nowcoder_scope")
+            ),
         }
         self._settings_cache = (time.monotonic(), settings)
         # 每次刷新配置时同步一次，兼容管理员从其他入口修改 KV 或热更新配置。
         self._configure_output_renderer(settings)
+        self._configure_contest_fetcher(settings)
         return self._copy_settings(settings)
+
+    @staticmethod
+    def _read_nowcoder_scope(value: object) -> str:
+        """校验牛客赛事口径，非法值回退到默认（全部牛客赛事）。"""
+        scope = str(value or "").strip().lower()
+        return scope if scope in NOWCODER_SCOPES else DEFAULT_NOWCODER_SCOPE
+
+    def _configure_contest_fetcher(self, settings: dict) -> None:
+        """把抓取相关设置同步给 ContestFetcher（牛客口径切换立即生效）。"""
+        fetcher = getattr(self, "fetcher", None)
+        if fetcher is None:
+            return
+        scope = self._read_nowcoder_scope(settings.get("nowcoder_scope"))
+        if getattr(fetcher, "nowcoder_scope", None) != scope:
+            fetcher.nowcoder_scope = scope
+            logger.info(
+                "牛客赛事口径切换为：%s（%s）",
+                scope,
+                NOWCODER_SCOPE_LABELS.get(scope, scope),
+            )
 
     @staticmethod
     def _copy_settings(settings: dict) -> dict:
@@ -3727,6 +3764,9 @@ class AcmerGroupBot(Star):
                     MIN_RECENT_CONTEST_DAYS,
                     MAX_RECENT_CONTEST_DAYS,
                 )
+                nowcoder_scope = self._read_nowcoder_scope(
+                    settings.get("nowcoder_scope", current["nowcoder_scope"])
+                )
                 await self.put_kv_data(
                     "settings",
                     {
@@ -3745,6 +3785,7 @@ class AcmerGroupBot(Star):
                         "max_plain_text_chars": max_plain_text_chars,
                         "max_plain_text_lines": max_plain_text_lines,
                         "recent_contest_days": recent_contest_days,
+                        "nowcoder_scope": nowcoder_scope,
                     },
                 )
                 # 保存成功后立即更新当前实例，无需等待下一次消息或重启插件。
@@ -3754,6 +3795,9 @@ class AcmerGroupBot(Star):
                         "max_plain_text_chars": max_plain_text_chars,
                         "max_plain_text_lines": max_plain_text_lines,
                     }
+                )
+                self._configure_contest_fetcher(
+                    {"nowcoder_scope": nowcoder_scope}
                 )
             if "groups" in payload:
                 groups = payload["groups"]

@@ -71,6 +71,24 @@ NC_CALENDAR_URL = "https://ac.nowcoder.com/acm/calendar/contest"
 NC_REFERER = "https://ac.nowcoder.com/acm/contest/calendar"
 LUOGU_CONTEST_URL = "https://www.luogu.com.cn/contest/list"
 ATCODER_CONTESTS_URL = "https://atcoder.jp/contests/"
+# 牛客日历按自然月返回，且只收录"已排期"的比赛；多取几个月可以在牛客提前
+# 排期时（暑期多校、国庆/寒假集训营等成系列赛事）更早看到完整赛程。
+# 0 = 只抓当前月（旧行为）。
+NC_MONTH_LOOKAHEAD = 3
+# 当前月与下月属于"必须拿到"：失败即抛错，由 fetch_platform 回退到旧缓存，
+# 与历史语义保持一致；更远的月份属于尽力而为，单个空月份抖动不应该让
+# 整个牛客刷新失败。
+NC_REQUIRED_MONTHS = 2
+# 牛客赛事口径：all = 日历里全部 NowCoder 赛事（含高校校赛/同步赛/自主创建赛）；
+# series_only = 仅比赛名含"牛客"的系列赛（1.11.0 之前的旧口径）。
+NOWCODER_SCOPE_ALL = "all"
+NOWCODER_SCOPE_SERIES_ONLY = "series_only"
+NOWCODER_SCOPES = (NOWCODER_SCOPE_ALL, NOWCODER_SCOPE_SERIES_ONLY)
+NC_SERIES_KEYWORD = "牛客"
+# 洛谷比赛列表按开始时间倒序、每页 20 条，未开始的比赛都在第 1 页；
+# 只有第 1 页被填满且最后一条仍未开始时才继续翻页（隐含页上限的保险）。
+LUOGU_CONTEST_PAGE_SIZE = 20
+LUOGU_CONTEST_MAX_PAGES = 3
 XCPC_DOMAINS = (
     "https://www.xcpc.link/",
     "https://www.xcpc.ink/",
@@ -111,6 +129,9 @@ class ContestFetcher:
     ) -> None:
         self.cache_ttl = max(0, int(cache_ttl))
         self.offline_cache_ttl = max(0, int(offline_cache_ttl))
+        # 牛客赛事展示口径（由插件设置同步）：缓存里始终保存全量，
+        # 只在返回给调用方时过滤，因此切换口径无需重新抓取。
+        self.nowcoder_scope = NOWCODER_SCOPE_ALL
         self._cache: Dict[str, Tuple[float, list]] = {}
         self._source_urls: Dict[str, str] = {}
         self._fetch_locks: Dict[str, asyncio.Lock] = {}
@@ -142,6 +163,7 @@ class ContestFetcher:
 
         普通查询优先命中缓存；过期后同一平台只允许一个协程实际抓取，
         其他并发查询会复用这次结果。网络失败时保留旧缓存作为兜底。
+        牛客赛事会按 ``nowcoder_scope`` 过滤后再返回（缓存内始终是全量）。
         """
         self._load_persistent_cache()
         request_started = time.time()
@@ -149,7 +171,7 @@ class ContestFetcher:
             cached = self._cache.get(platform)
             if cached and self._is_cache_fresh(platform, cached, request_started):
                 self._log_cache_hit(platform, cached[0])
-                return cached[1], None
+                return self._apply_scope(platform, cached[1]), None
 
         lock = self._fetch_locks.get(platform)
         if lock is None:
@@ -166,7 +188,7 @@ class ContestFetcher:
                 or cached[0] >= request_started
             ):
                 self._log_cache_hit(platform, cached[0], joined=True)
-                return cached[1], None
+                return self._apply_scope(platform, cached[1]), None
 
             label = PLATFORM_LABELS.get(platform, platform)
             logger.info("开始抓取比赛数据：%s（缓存已过期或不存在）", label)
@@ -203,13 +225,28 @@ class ContestFetcher:
             fetched_at = time.time()
             self._cache[platform] = (fetched_at, contests)
             self._save_persistent_cache()
+            scoped = self._apply_scope(platform, contests)
             logger.info(
                 "比赛数据抓取完成：%s，共 %d 场；缓存有效期 %d 秒",
                 label,
-                len(contests),
+                len(scoped),
                 self._cache_ttl(platform),
             )
-            return contests, None
+            return scoped, None
+
+    def _apply_scope(self, platform: str, contests: list) -> list:
+        """按当前牛客口径过滤赛事；其他平台/口径原样返回。
+
+        缓存里始终保存全量牛客赛事，只有这里做展示口径过滤，
+        因此管理员切换 ``nowcoder_scope`` 后立即生效、无需重新抓取。
+        """
+        if platform != "nowcoder" or self.nowcoder_scope != NOWCODER_SCOPE_SERIES_ONLY:
+            return contests
+        return [
+            contest
+            for contest in contests
+            if NC_SERIES_KEYWORD in str(getattr(contest, "name", "") or "")
+        ]
 
     def _cache_ttl(self, platform: str) -> int:
         return self.offline_cache_ttl if platform == OFFLINE_PLATFORM else self.cache_ttl
@@ -331,7 +368,7 @@ class ContestFetcher:
             age,
             error,
         )
-        return cached[1], None
+        return self._apply_scope(platform, cached[1]), None
 
     def _load_persistent_cache(self) -> None:
         """从插件 data 目录加载上次成功抓取的结果。"""
@@ -490,27 +527,143 @@ class ContestFetcher:
         contests.sort(key=lambda c: c.start_time)
         return contests
 
+    @staticmethod
+    def _nc_months(
+        now: Optional[datetime] = None,
+        lookahead: int = NC_MONTH_LOOKAHEAD,
+    ) -> List[str]:
+        """返回 ``[当前月, 当前月 + lookahead]`` 的月份串（自动跨年）。
+
+        日历接口按自然月返回整月比赛，因此窗口越大、能提前看到的赛程越远。
+        """
+        current = now or datetime.now(timezone.utc)
+        months: List[str] = []
+        for offset in range(max(0, int(lookahead)) + 1):
+            index = current.month - 1 + offset
+            months.append(f"{current.year + index // 12}-{index % 12 + 1}")
+        return months
+
+    @staticmethod
+    def _nc_platform_of_item(item: dict) -> Optional[str]:
+        """按 OJ 归属判定一条牛客日历条目的平台。
+
+        牛客日历同时收录 NowCoder / AtCoder / CodeForces 的比赛，
+        ``ojName`` 的真实取值是英文 ``NowCoder``（不是中文"牛客"），
+        因此必须按 OJ 身份判定；``ojName`` 缺失或改版时回退比赛名。
+        """
+        oj_name = str(item.get("ojName") or "").strip().lower()
+        name = str(item.get("contestName") or "")
+        if "nowcoder" in oj_name or "牛客" in oj_name:
+            return "nowcoder"
+        if "atcoder" in oj_name:
+            return "atcoder"
+        if "codeforces" in oj_name:
+            return None
+        if NC_SERIES_KEYWORD in name:
+            return "nowcoder"
+        if "atcoder" in name.lower():
+            return "atcoder"
+        return None
+
+    @staticmethod
+    def _nc_item_to_contest(platform: str, item: dict) -> Optional[Contest]:
+        """把一条日历条目转成 Contest；时间字段异常时返回 None。"""
+        try:
+            start = datetime.fromtimestamp(
+                int(item["startTime"]) / 1000, tz=timezone.utc
+            )
+            end_ts = item.get("endTime")
+            end = (
+                datetime.fromtimestamp(int(end_ts) / 1000, tz=timezone.utc)
+                if end_ts
+                else None
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        duration = int((end - start).total_seconds() // 60) if end else 0
+        return Contest(
+            platform=platform,
+            name=str(item.get("contestName") or ""),
+            start_time=start,
+            end_time=end,
+            duration_minutes=duration,
+            url=str(item.get("link") or ""),
+            contest_id=str(item.get("contestId") or ""),
+        )
+
     async def _fetch_nowcoder_calendar(self, platform: str) -> List[Contest]:
-        """牛客比赛日历：同时包含牛客与 AtCoder 比赛，按 ojName/名称过滤。"""
-        now = datetime.now(timezone.utc)
-        # 抓取当前月与下个月，避免月末时下月比赛被漏掉
-        months: List[str] = [f"{now.year}-{now.month}"]
-        if now.month == 12:
-            months.append(f"{now.year + 1}-1")
-        else:
-            months.append(f"{now.year}-{now.month + 1}")
+        """牛客比赛日历：滚动取多个自然月，再按 OJ 归属筛出目标平台赛事。
+
+        日历里混排了牛客 / AtCoder / CodeForces 的比赛，必须按 ``ojName``
+        判定归属：AtCoder 与 CodeForces 由各自官方源提供（更全、更新更快），
+        这里只保留目标平台的比赛。
+        """
+        months = self._nc_months()
+        required = max(1, min(NC_REQUIRED_MONTHS, len(months)))
+        results = await asyncio.gather(
+            *(self._fetch_nc_month(month) for month in months),
+            return_exceptions=True,
+        )
+
         merged: List[Contest] = []
         seen: set = set()
-        for month in months:
-            for contest in await self._fetch_nc_month(platform, month):
+        raw_total = 0
+        unknown = 0
+        by_platform: Dict[str, int] = {}
+        for index, (month, result) in enumerate(zip(months, results)):
+            if isinstance(result, BaseException):
+                if index < required:
+                    # 必需月失败：保持历史语义——整体失败，由调用方回退旧缓存。
+                    raise result
+                logger.warning(
+                    "牛客日历 %s 抓取失败（非必需月，忽略该月）：%s",
+                    month,
+                    result,
+                )
+                continue
+            raw_total += len(result)
+            for item in result:
+                item_platform = self._nc_platform_of_item(item)
+                if item_platform is None:
+                    unknown += 1
+                    continue
+                by_platform[item_platform] = by_platform.get(item_platform, 0) + 1
+                if item_platform != platform:
+                    continue
+                contest = self._nc_item_to_contest(platform, item)
+                if contest is None:
+                    continue
                 key = (contest.platform, contest.contest_id)
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(contest)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(contest)
         merged.sort(key=lambda c: c.start_time)
+        label = PLATFORM_LABELS.get(platform, platform)
+        others = "、".join(
+            f"{PLATFORM_LABELS.get(name, name)} {count}"
+            for name, count in sorted(by_platform.items())
+            if name != platform
+        )
+        logger.info(
+            "牛客日历 %s ~ %s：原始 %d 场，保留 %s %d 场%s%s",
+            months[0],
+            months[-1],
+            raw_total,
+            label,
+            len(merged),
+            f"（其他 OJ：{others}）" if others else "",
+            f"（未识别 OJ {unknown} 场）" if unknown else "",
+        )
         return merged
 
-    async def _fetch_nc_month(self, platform: str, month: str) -> List[Contest]:
+    async def _fetch_nc_month(self, month: str) -> List[dict]:
+        """取某个月的牛客日历原始条目（不做平台筛选）。
+
+        日历接口同时返回牛客 / AtCoder / CodeForces 的比赛，归属判定由
+        ``_nc_platform_of_item`` 完成；AtCoder 自 1.1.1 起改用官网赛程表，
+        本函数实际只服务于牛客。
+        """
         if self.session is None:
             raise RuntimeError("session 未初始化")
         params = {
@@ -528,41 +681,8 @@ class ContestFetcher:
         data = json.loads(text)
         if str(data.get("code")) not in ("0", "None"):
             raise ValueError(f"牛客接口错误: {data.get('msg')}")
-        contests: List[Contest] = []
-        for item in data.get("data") or []:
-            oj_name = str(item.get("ojName") or "")
-            name = str(item.get("contestName") or "")
-            if platform == "atcoder":
-                if "atcoder" not in oj_name.lower() and "AtCoder" not in name:
-                    continue
-            elif platform == "nowcoder":
-                if "牛客" not in oj_name and "牛客" not in name:
-                    continue
-            try:
-                start = datetime.fromtimestamp(
-                    int(item["startTime"]) / 1000, tz=timezone.utc
-                )
-                end_ts = item.get("endTime")
-                end = (
-                    datetime.fromtimestamp(int(end_ts) / 1000, tz=timezone.utc)
-                    if end_ts
-                    else None
-                )
-            except (KeyError, TypeError, ValueError):
-                continue
-            duration = int((end - start).total_seconds() // 60) if end else 0
-            contests.append(
-                Contest(
-                    platform=platform,
-                    name=name,
-                    start_time=start,
-                    end_time=end,
-                    duration_minutes=duration,
-                    url=str(item.get("link") or ""),
-                    contest_id=str(item.get("contestId") or ""),
-                )
-            )
-        return contests
+        items = data.get("data") or []
+        return [item for item in items if isinstance(item, dict)]
 
     async def _fetch_atcoder(self) -> List[Contest]:
         """直接解析 AtCoder 官网赛程表（Upcoming Contests）。
@@ -618,16 +738,45 @@ class ContestFetcher:
         return contests
 
     async def _fetch_luogu(self) -> List[Contest]:
-        """洛谷比赛列表：页面公开可访问，无需登录 Cookie。"""
+        """洛谷比赛列表：页面公开可访问，无需登录 Cookie。
+
+        列表按开始时间倒序，未开始的比赛必然落在第 1 页；只有第 1 页被
+        填满（= ``perPage`` 条）且最后一条仍未开始时，才继续翻页，
+        用于兜住"未来赛事超过一页"的隐含上限。
+        """
         if self.session is None:
             raise RuntimeError("session 未初始化")
-        text = await fetch_text_with_retry(self.session, LUOGU_CONTEST_URL)
-        match = LENTILLE_RE.search(text)
-        if not match:
-            raise ValueError("未找到 lentille-context 数据")
-        payload = json.loads(match.group(1))
-        rows = payload["data"]["contests"]["result"]
         now_ts = int(time.time())
+        rows: List[dict] = []
+        seen_ids: set = set()
+        for page in range(1, LUOGU_CONTEST_MAX_PAGES + 1):
+            url = (
+                LUOGU_CONTEST_URL
+                if page == 1
+                else f"{LUOGU_CONTEST_URL}?page={page}"
+            )
+            text = await fetch_text_with_retry(self.session, url)
+            match = LENTILLE_RE.search(text)
+            if not match:
+                raise ValueError("未找到 lentille-context 数据")
+            payload = json.loads(match.group(1))
+            listing = payload["data"]["contests"]
+            page_rows = listing.get("result") or []
+            per_page = int(listing.get("perPage") or LUOGU_CONTEST_PAGE_SIZE)
+            for item in page_rows:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("id") or "")
+                if key and key in seen_ids:
+                    continue
+                if key:
+                    seen_ids.add(key)
+                rows.append(item)
+            if len(page_rows) < max(1, per_page):
+                break
+            last_start = int(page_rows[-1].get("startTime") or 0) if page_rows else 0
+            if last_start <= now_ts:
+                break
         contests: List[Contest] = []
         for item in rows:
             start_ts = int(item.get("startTime") or 0)

@@ -758,3 +758,35 @@ def test_profile_card_render_failure_is_safe():
     )
 
     assert result is None
+
+
+def test_nowcoder_scope_setting_is_read_and_applied_to_fetcher():
+    """WebUI「牛客赛事范围」读写链路：非法值回退默认，且即时同步到抓取器。"""
+    main_module = _load_main_module()
+    bot = main_module.AcmerGroupBot.__new__(main_module.AcmerGroupBot)
+    bot._settings_cache = None
+    bot.output_renderer = None
+
+    class FakeContestFetcher:
+        nowcoder_scope = "all"
+
+    bot.fetcher = FakeContestFetcher()
+
+    async def kv_with_scope(key, default=None):
+        return {"nowcoder_scope": "series_only"}
+
+    bot.get_kv_data = kv_with_scope
+    settings = asyncio.run(bot.get_settings())
+    assert settings["nowcoder_scope"] == "series_only"
+    assert bot.fetcher.nowcoder_scope == "series_only"
+
+    # 非法值 → 回退默认（全部牛客赛事）
+    bot._settings_cache = None
+
+    async def kv_with_bad_scope(key, default=None):
+        return {"nowcoder_scope": "unknown"}
+
+    bot.get_kv_data = kv_with_bad_scope
+    settings = asyncio.run(bot.get_settings())
+    assert settings["nowcoder_scope"] == "all"
+    assert bot.fetcher.nowcoder_scope == "all"

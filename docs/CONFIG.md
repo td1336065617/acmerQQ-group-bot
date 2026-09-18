@@ -31,6 +31,7 @@
 | 赛前提醒 `settings.reminder_enabled` | 开 | 开始前 15 分钟提醒 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知带 `<@everyone>`，失败自动降级 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛`查看未来几天，范围 1～30 |
+| 牛客赛事范围 `settings.nowcoder_scope` | `all` | `all`＝全部牛客赛事（含高校校赛、新生赛、集训营、自主创建赛）；`series_only`＝仅比赛名含“牛客”的系列赛。抓取始终取全量，切换后立即生效 |
 | 文字转图片最大字符数 `settings.max_plain_text_chars` | `1800` | 文字超过此字符数时转图，范围 200～10000 |
 | 文字转图片最大行数 `settings.max_plain_text_lines` | `36` | 文字超过此行数时转图，范围 10～200 |
 | 群启用 `groups[].enabled` | 开 | 是否向该群推送 |
@@ -138,7 +139,7 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 | 平台 | 来源 | 说明 |
 | :--- | :--- | :--- |
 | Codeforces | `codeforces.com/api/contest.list` | 官方 API，`phase=BEFORE` |
-| 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历，抓当前月+下月 |
+| 牛客 | `ac.nowcoder.com/acm/calendar/contest` | 牛客比赛日历，抓当前月及后续 3 个月；按 `ojName` 判定 OJ 归属（`NowCoder`），除系列赛外还收录高校校赛/新生赛同步赛/集训营等 |
 | AtCoder | `atcoder.jp/contests/` | 官网 Upcoming Contests 赛程表 |
 | 洛谷 | `luogu.com.cn/contest/list` | 页面内 `#lentille-context` JSON，无需登录 |
 
@@ -147,7 +148,7 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
 | 平台 | 来源 | 分析内容 |
 | :--- | :--- | :--- |
 | Codeforces | 官方 `user.status` API | 通过题难度、提交通过率、语言、活跃度 |
-| 牛客 | 公开练习页、牛客题库列表 | 题目难度、知识点、提交通过率、语言、活跃度 |
+| 牛客 | 公开练习页（最多 200 条/页 × 100 页 ＝ 20000 条）+ 牛客题库索引 | 题目难度、知识点、提交通过率、语言、活跃度；题库索引整库抓取（约 1.4 万题，每周更新并落盘 `nowcoder_problem_index.json`），覆盖全部通过题 |
 | 洛谷 | 公开个人页/练习页 `#lentille-context` | 原生难度分组、题库类型、活动日历、资料分项评分、Elo 历史 |
 | AtCoder | AtCoder Problems 公开资源 | 提交记录、估计难度、题目系列、语言、活跃度 |
 | 线下赛 | `xcpc.link`（备用 `xcpc.ink`） | 首页脚本中的线下赛程数据 |

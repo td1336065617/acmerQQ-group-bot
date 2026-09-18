@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -67,20 +68,52 @@ RESOURCE_CACHE_TTL = 24 * 60 * 60
 FETCH_FAILURE_PERMANENT_TTL = 5 * 60
 FETCH_FAILURE_TEMP_TTL = 2 * 60
 CF_MIN_REQUEST_INTERVAL = 2.1
-RATING_HISTORY_LIMIT = 200
+# 各平台 Rating 历史上限：历史本来就在同一次请求里返回（CF user.rating、
+# AtCoder history/json、牛客 rating-history、洛谷 elo），截断只发生在解析阶段，
+# 因此放宽窗口是零网络成本的。1000 场足以覆盖任何活跃账号的完整生涯。
+RATING_HISTORY_LIMIT = 1000
 # 提交扫描上限：LGM/重度选手的提交数可超过 2 万，1 万会造成通过题数/提交次数
 # 明显低估（实测 maspy 共 21459 条）。CF 单次请求文档上限为 1 万条，
 # 因此按 CF_SUBMISSION_PAGE_SIZE 翻页到该上限；只有超大账号才会翻多页。
 CF_SUBMISSION_SCAN_LIMIT = 50000
 CF_SUBMISSION_PAGE_SIZE = 10000
 # 分析缓存版本：扫描上限/分析口径变化时 +1，旧的持久化分析缓存会被自动忽略，
-# 无需等待 12 小时 TTL 或手动清库。（v2 = CF 5万/AtCoder 2万 上限口径）
-ANALYSIS_CACHE_VERSION = 3
+# 无需等待 12 小时 TTL 或手动清库。
+# （v2 = CF 5万/AtCoder 2万 上限口径；v3 = 热力图；v4 = 牛客 2 万条 + 题库索引）
+ANALYSIS_CACHE_VERSION = 4
 # 打卡热力图窗口：近 12 个月。
 ACTIVITY_HEATMAP_DAYS = 365
-NOWCODER_ANALYSIS_PAGE_SIZE = 100
-NOWCODER_ANALYSIS_MAX_PAGES = 20
-NOWCODER_PROBLEM_META_LIMIT = 300
+# 牛客练习页：pageSize 服务端上限为 200（201 起返回 “pageSize is too big”），
+# 按 200 条/页翻页到 2 万条（与 AtCoder 的提交扫描上限对齐）。
+NOWCODER_ANALYSIS_PAGE_SIZE = 200
+NOWCODER_ANALYSIS_SCAN_LIMIT = 20000
+NOWCODER_ANALYSIS_MAX_PAGES = NOWCODER_ANALYSIS_SCAN_LIMIT // NOWCODER_ANALYSIS_PAGE_SIZE
+# 并发抓分页时每批之间的间隔（秒），避免把公共页面打得太急。
+NOWCODER_ANALYSIS_PAGE_INTERVAL = 0.15
+NOWCODER_ANALYSIS_CONCURRENCY = 6
+# pageSize 被对端收紧时的降级值（首页 0 行且无状态数据时自动重试一次）。
+NOWCODER_ANALYSIS_FALLBACK_PAGE_SIZE = 100
+# 牛客题库索引：难度与知识点从题库列表 JSON 接口整库抓取一次，
+# 之后按题目 ID 本地查表，从而覆盖全部通过题（原先是按需逐题抓，截断到 300 题）。
+NOWCODER_PROBLEM_LIST_JSON_URL = "https://ac.nowcoder.com/acm/problem/list/json"
+NOWCODER_PROBLEM_INDEX_PAGE_SIZE = 50
+NOWCODER_PROBLEM_INDEX_CONCURRENCY = 6
+NOWCODER_PROBLEM_INDEX_TTL = 7 * 24 * 3600
+NOWCODER_PROBLEM_INDEX_VERSION = 1
+# 整库约 1.4 万题；条目数明显偏少说明抓取残缺，直接丢弃重建。
+NOWCODER_PROBLEM_INDEX_MIN_ENTRIES = 5000
+NOWCODER_PROBLEM_INDEX_FILENAME = "nowcoder_problem_index.json"
+# 索引不可用（首次部署尚未构建/构建失败）时的降级上限：沿用旧行为逐题抓。
+NOWCODER_PROBLEM_META_FALLBACK_LIMIT = 300
+# 索引可用时，对"索引里没有的题目"最多单题补查多少次（新题为主；
+# 不在题库列表里的比赛题/定制自测题牛客未公开难度，查也查不到）。
+NOWCODER_PROBLEM_META_LOOKUP_LIMIT = 100
+# 负缓存容量：记录"确认不在题库列表里"的题目，避免每次分析重复补查。
+NOWCODER_PROBLEM_ABSENT_MAX = 20000
+# 题库 JSON 的 difficulty 用 1~5 / -1 表示“未评定”（同一题在题库列表页里
+# 难度单元格为空），真实难度从 400 起；低于该值一律按未标难度处理。
+NOWCODER_DIFFICULTY_MIN_VALID = 400
+NOWCODER_PROBLEM_META_LIMIT = NOWCODER_PROBLEM_META_FALLBACK_LIMIT
 NOWCODER_PROBLEM_META_CONCURRENCY = 6
 NOWCODER_DIFFICULTY_BUCKETS = (
     ("≤599", None, 599),
@@ -295,6 +328,7 @@ class AccountFetcher:
         self,
         session: Optional[aiohttp.ClientSession] = None,
         cache_ttl: int = PROFILE_CACHE_TTL,
+        problem_index_path: Optional[str | Path] = None,
     ) -> None:
         self.session = session
         self._owns_session = False
@@ -310,9 +344,20 @@ class AccountFetcher:
         self._resource_cache: Dict[str, Tuple[float, object]] = {}
         self._resource_locks: Dict[str, asyncio.Lock] = {}
         self._analysis_semaphore = asyncio.Semaphore(2)
-        self._nowcoder_problem_cache: Dict[
-            str, Tuple[float, Dict[str, Any]]
-        ] = {}
+        # 牛客题库索引：{problem_id: {"d": difficulty|None, "t": [知识点]}}。
+        # 整库抓取一次（约 1.4 万题）后本地查表，覆盖全部通过题。
+        self._nowcoder_problem_index: Dict[str, Dict[str, Any]] = {}
+        self._nowcoder_problem_index_loaded_at = 0.0
+        self._nowcoder_problem_index_dirty = False
+        self._nowcoder_problem_index_lock = asyncio.Lock()
+        # 确认不在题库列表里的题目（牛客未公开难度）：随索引一起落盘。
+        self._nowcoder_problem_absent: set = set()
+        # 构建失败退避：{下次允许构建时间: float}
+        self._nowcoder_problem_index_backoff_until = 0.0
+        self._nowcoder_problem_index_consecutive_failures = 0
+        self._problem_index_path = (
+            Path(problem_index_path) if problem_index_path else None
+        )
         self._cf_lock = asyncio.Lock()
         self._cf_last_request = 0.0
         self._cf_bulk_lock = asyncio.Lock()
@@ -339,6 +384,8 @@ class AccountFetcher:
         if cache_store is not None:
             self.cache_store = cache_store
             await self._load_persistent_caches()
+        # 牛客题库索引：命中磁盘快照就不必重新整库抓取。
+        self.load_nowcoder_problem_index()
 
     async def _load_persistent_caches(self) -> None:
         """启动时把 SQLite 中的资料/负缓存恢复到内存，避免重启后全部重爬。"""
@@ -620,15 +667,14 @@ class AccountFetcher:
             if key in self._resource_cache or lock.locked()
         }
 
-        # 牛客题目元数据缓存。
-        self._nowcoder_problem_cache = {
-            key: value
-            for key, value in self._nowcoder_problem_cache.items()
-            if value[0] + RESOURCE_CACHE_TTL > now
-        }
+        # 牛客题库索引：条目本身不过期（难度/知识点几乎不变），
+        # 整体新鲜度由 NOWCODER_PROBLEM_INDEX_TTL 控制，这里不清理。
 
     async def flush_persistent_cache(self) -> None:
         """把标脏的 profile/failure 缓存批量写回 SQLite（失败保留脏标记重试）。"""
+        if self._nowcoder_problem_index_dirty:
+            # 索引与 SQLite 后端无关，独立落盘（单题兜底补充的新题在这里持久化）。
+            self.save_nowcoder_problem_index()
         if self.cache_store is None:
             return
         if not self._profile_cache_dirty and not self._failure_cache_dirty:
@@ -1793,56 +1839,492 @@ class AccountFetcher:
             "tags": [tag for tag in tags if tag],
         }
 
+    # ------------------------------------------------------------------
+    # 牛客题库索引：整库抓一次，之后按题目 ID 本地查表
+    # ------------------------------------------------------------------
+    def index_path(self) -> Path:
+        """题库索引落盘位置：默认与 SQLite 同目录，可注入覆盖。"""
+        if self._problem_index_path is not None:
+            return self._problem_index_path
+        try:
+            from .account_store import default_store_path
+
+            base = default_store_path().parent
+        except Exception:  # noqa: BLE001 - 未运行在 AstrBot 中时回退
+            base = Path("data")
+        return base / NOWCODER_PROBLEM_INDEX_FILENAME
+
+    @staticmethod
+    def _normalize_difficulty(value: object) -> Optional[int]:
+        """题库 JSON 里 1~5 / -1 是“未评定”哨兵值，统一按未标难度处理。"""
+        difficulty = _parse_int(value)
+        if difficulty is None or difficulty < NOWCODER_DIFFICULTY_MIN_VALID:
+            return None
+        return difficulty
+
+    @classmethod
+    def _parse_nowcoder_problem_index_page(
+        cls,
+        payload: object,
+    ) -> Tuple[Dict[str, Dict[str, Any]], Optional[int]]:
+        """解析题库 JSON 页 → ({problem_id: {"d": …, "t": […]}}, problemCount)。"""
+        if not isinstance(payload, dict):
+            raise AccountFetchError("牛客题库接口返回格式异常")
+        if str(payload.get("code")) not in ("0", "None"):
+            raise AccountFetchError(
+                f"牛客题库接口错误: {payload.get('msg')}"
+            )
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise AccountFetchError("牛客题库接口缺少 data")
+        problems: Dict[str, Dict[str, Any]] = {}
+        for item in data.get("problemSets") or []:
+            if not isinstance(item, dict):
+                continue
+            problem_id = str(item.get("problemId") or "").strip()
+            if not problem_id:
+                continue
+            tags: List[str] = []
+            for tag in item.get("tagList") or []:
+                if not isinstance(tag, dict):
+                    continue
+                name = _clean_text(tag.get("name"))
+                if name and name not in tags:
+                    tags.append(name)
+            problems[problem_id] = {
+                "d": cls._normalize_difficulty(item.get("difficulty")),
+                "t": tags,
+            }
+        count = _parse_int(data.get("problemCount"))
+        return problems, count
+
+    @staticmethod
+    def _meta_from_index(
+        problem_id: str, entry: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """把索引条目转换成分析层使用的元数据结构。"""
+        return {
+            "problem_id": problem_id,
+            "title": "",
+            "difficulty": entry.get("d"),
+            "tags": list(entry.get("t") or []),
+        }
+
+    def load_nowcoder_problem_index(self, *, force: bool = False) -> int:
+        """从磁盘加载题库索引；过期/损坏/版本不符时忽略。"""
+        now = time.time()
+        if (
+            not force
+            and self._nowcoder_problem_index
+            and now - self._nowcoder_problem_index_loaded_at
+            < NOWCODER_PROBLEM_INDEX_TTL
+        ):
+            return len(self._nowcoder_problem_index)
+        path = self.index_path()
+        try:
+            if not path.is_file():
+                return len(self._nowcoder_problem_index)
+            with path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("读取牛客题库索引失败，将重建：%s", exc)
+            return len(self._nowcoder_problem_index)
+        if not isinstance(payload, dict):
+            return len(self._nowcoder_problem_index)
+        if payload.get("version") != NOWCODER_PROBLEM_INDEX_VERSION:
+            logger.info("牛客题库索引版本不匹配，忽略旧索引：%s", path)
+            return len(self._nowcoder_problem_index)
+        problems = payload.get("problems")
+        if not isinstance(problems, dict):
+            return len(self._nowcoder_problem_index)
+        if len(problems) < NOWCODER_PROBLEM_INDEX_MIN_ENTRIES:
+            logger.warning(
+                "牛客题库索引条目过少（%d），忽略并重建：%s",
+                len(problems),
+                path,
+            )
+            return len(self._nowcoder_problem_index)
+        fetched_at = payload.get("fetched_at")
+        try:
+            fetched_at = float(fetched_at)
+        except (TypeError, ValueError):
+            fetched_at = 0.0
+        if fetched_at and time.time() - fetched_at > NOWCODER_PROBLEM_INDEX_TTL:
+            logger.info(
+                "牛客题库索引已过期（%.1f 天），等待后台重建",
+                (time.time() - fetched_at) / 86400,
+            )
+            return len(self._nowcoder_problem_index)
+        self._nowcoder_problem_index = {
+            str(key): value
+            for key, value in problems.items()
+            if isinstance(value, dict)
+        }
+        absent = payload.get("absent")
+        if isinstance(absent, list):
+            self._nowcoder_problem_absent = {
+                str(item) for item in absent if str(item)
+            }
+        self._nowcoder_problem_index_loaded_at = fetched_at or now
+        logger.info(
+            "已加载牛客题库索引：%d 题，缓存年龄 %.1f 小时",
+            len(self._nowcoder_problem_index),
+            max(0.0, now - (fetched_at or now)) / 3600,
+        )
+        return len(self._nowcoder_problem_index)
+
+    def save_nowcoder_problem_index(self) -> None:
+        """原子写入题库索引（失败保留脏标记，下次再写）。"""
+        if not self._nowcoder_problem_index:
+            self._nowcoder_problem_index_dirty = False
+            return
+        path = self.index_path()
+        payload = {
+            "version": NOWCODER_PROBLEM_INDEX_VERSION,
+            "fetched_at": self._nowcoder_problem_index_loaded_at or time.time(),
+            "problems": self._nowcoder_problem_index,
+            "absent": sorted(self._nowcoder_problem_absent)[
+                :NOWCODER_PROBLEM_ABSENT_MAX
+            ],
+        }
+        temp_path = path.with_name(f".{path.name}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with temp_path.open("w", encoding="utf-8") as file:
+                json.dump(
+                    payload,
+                    file,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            os.replace(temp_path, path)
+            self._nowcoder_problem_index_dirty = False
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("写入牛客题库索引失败：%s", exc)
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+    def nowcoder_problem_index_ready(self) -> bool:
+        """索引是否可用于本地查表（不触发构建）。"""
+        if not self._nowcoder_problem_index:
+            self.load_nowcoder_problem_index()
+        return bool(self._nowcoder_problem_index)
+
+    async def _fetch_nowcoder_problem_index_page(
+        self, page: int
+    ) -> Tuple[Dict[str, Dict[str, Any]], Optional[int]]:
+        """抓取题库 JSON 的第 page 页，返回 (题目字典, problemCount)。"""
+        params = urlencode(
+            {
+                "keyword": "",
+                "pageSize": str(NOWCODER_PROBLEM_INDEX_PAGE_SIZE),
+                "page": str(page),
+            }
+        )
+        text = await self._fetch_text(
+            f"{NOWCODER_PROBLEM_LIST_JSON_URL}?{params}",
+            timeout=20.0,
+        )
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise AccountFetchError("牛客题库接口返回的不是 JSON") from exc
+        return self._parse_nowcoder_problem_index_page(payload)
+
+    async def build_nowcoder_problem_index(self) -> Dict[str, Dict[str, Any]]:
+        """整库抓取题库索引（约 290 次请求 / 2.5MB 传输），失败抛 AccountFetchError。
+
+        返回 ``{problem_id: {"d": …, "t": […]}}``，由调用方决定是否替换内存索引。
+        """
+        first, count = await self._fetch_nowcoder_problem_index_page(1)
+        if not first:
+            raise AccountFetchError("牛客题库首页为空，构建索引失败")
+        # 用首页的 problemCount 推算总页数；接口没返回时只保留首页。
+        pages = (
+            max(
+                1,
+                (count + NOWCODER_PROBLEM_INDEX_PAGE_SIZE - 1)
+                // NOWCODER_PROBLEM_INDEX_PAGE_SIZE,
+            )
+            if count
+            else 1
+        )
+        problems: Dict[str, Dict[str, Any]] = dict(first)
+        failed = 0
+        semaphore = asyncio.Semaphore(NOWCODER_PROBLEM_INDEX_CONCURRENCY)
+
+        async def fetch_page(page: int):
+            async with semaphore:
+                try:
+                    page_problems, _ = await self._fetch_nowcoder_problem_index_page(
+                        page
+                    )
+                    return page_problems
+                except (AccountFetchError, ValueError) as exc:
+                    logger.warning("牛客题库第 %d 页抓取失败：%s", page, exc)
+                    return None
+
+        remaining = list(range(2, pages + 1))
+        for start in range(0, len(remaining), NOWCODER_PROBLEM_INDEX_CONCURRENCY):
+            batch = remaining[start : start + NOWCODER_PROBLEM_INDEX_CONCURRENCY]
+            results = await asyncio.gather(*(fetch_page(page) for page in batch))
+            for result in results:
+                if result is None:
+                    failed += 1
+                    continue
+                problems.update(result)
+            if start + NOWCODER_PROBLEM_INDEX_CONCURRENCY < len(remaining):
+                await asyncio.sleep(NOWCODER_ANALYSIS_PAGE_INTERVAL)
+        if failed / max(1, pages) > 0.1:
+            raise AccountFetchError(
+                f"牛客题库索引构建失败：{failed}/{pages} 页抓取失败"
+            )
+        if len(problems) < NOWCODER_PROBLEM_INDEX_MIN_ENTRIES:
+            raise AccountFetchError(
+                f"牛客题库索引条目过少（{len(problems)}），放弃本次结果"
+            )
+        return problems
+
+    async def warm_nowcoder_problem_index(self, *, force: bool = False) -> bool:
+        """后台巡检：索引缺失或过期时整库重建；失败按指数退避。
+
+        由 scheduler 周期调用，**不在用户请求路径上同步构建**。
+        """
+        now = time.time()
+        if not force:
+            if self.nowcoder_problem_index_ready() and (
+                now - self._nowcoder_problem_index_loaded_at
+                < NOWCODER_PROBLEM_INDEX_TTL
+            ):
+                return False
+            if now < self._nowcoder_problem_index_backoff_until:
+                return False
+        async with self._nowcoder_problem_index_lock:
+            # 二次检查：等锁期间可能已被其他巡检构建完成。
+            if not force and (
+                self._nowcoder_problem_index
+                and now - self._nowcoder_problem_index_loaded_at
+                < NOWCODER_PROBLEM_INDEX_TTL
+            ):
+                return False
+            try:
+                problems = await self.build_nowcoder_problem_index()
+            except Exception as exc:  # noqa: BLE001 - 巡检失败不影响用户请求
+                self._nowcoder_problem_index_consecutive_failures += 1
+                failures = min(
+                    self._nowcoder_problem_index_consecutive_failures, 6
+                )
+                delay = min(300 * (2 ** (failures - 1)), 3600)
+                self._nowcoder_problem_index_backoff_until = time.time() + delay
+                logger.warning(
+                    "牛客题库索引构建失败（第 %d 次，%.0f 秒后重试）：%s",
+                    failures,
+                    delay,
+                    exc,
+                )
+                return False
+            self._nowcoder_problem_index = problems
+            self._nowcoder_problem_index_loaded_at = time.time()
+            self._nowcoder_problem_index_consecutive_failures = 0
+            self._nowcoder_problem_index_backoff_until = 0.0
+            self._nowcoder_problem_index_dirty = True
+            self.save_nowcoder_problem_index()
+            logger.info("牛客题库索引已更新：%d 题", len(problems))
+            return True
+
+    async def _fetch_nowcoder_problem_meta_one(
+        self, problem_id: str
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """按题目 ID 单题查询（索引未命中时的兜底）。
+
+        返回 ``(metadata, status)``：
+        - ``("ok", {...})``：拿到难度/知识点；
+        - ``("absent", None)``：题库列表确认没有这道题（多为比赛题/定制自测题，
+          牛客未公开难度），调用方应记入负缓存、不必再回退 HTML；
+        - ``("error", None)``：接口异常/改版，调用方可以回退 HTML 再试。
+        """
+        params = urlencode(
+            {"keyword": problem_id, "pageSize": "1", "page": "1"}
+        )
+        try:
+            text = await self._fetch_text(
+                f"{NOWCODER_PROBLEM_LIST_JSON_URL}?{params}"
+            )
+            payload = json.loads(text)
+            problems, _ = self._parse_nowcoder_problem_index_page(payload)
+        except (AccountFetchError, json.JSONDecodeError, ValueError):
+            problems = None
+        if problems is not None:
+            entry = problems.get(str(problem_id))
+            if entry is None and len(problems) == 1:
+                # 关键词命中但返回的是另一道题：只接受 ID 完全一致的候选，
+                # 否则会张冠李戴（宁可当作缺失，也不要错误难度）。
+                only_id, only_entry = next(iter(problems.items()))
+                entry = only_entry if str(only_id) == str(problem_id) else None
+            if entry is not None:
+                return self._meta_from_index(problem_id, entry), "ok"
+            return None, "absent"
+        # 回退：题库列表页 HTML（旧实现，接口改版时仍可用）
+        try:
+            text = await self._fetch_text(
+                f"{NOWCODER_PROBLEM_LIST_URL}?{params}"
+            )
+            metadata = self._parse_nowcoder_problem_metadata(text, problem_id)
+        except AccountFetchError:
+            return None, "error"
+        if isinstance(metadata, dict):
+            return (
+                {
+                    "problem_id": problem_id,
+                    "title": metadata.get("title") or "",
+                    "difficulty": self._normalize_difficulty(
+                        metadata.get("difficulty")
+                    ),
+                    "tags": list(metadata.get("tags") or []),
+                },
+                "ok",
+            )
+        return None, "absent"
+
     async def _fetch_nowcoder_problem_metadata(
         self,
         problem_ids: List[str],
     ) -> Dict[str, Dict[str, Any]]:
+        """取题目难度/知识点：优先本地题库索引查表，缺失才单题抓取。
+
+        - 索引可用：命中即本地查表（零网络）；未命中的题目（新题/不在题库里的
+          比赛题）做**限量**单题补查，并记住"确认不在题库"的题目，避免每次分析
+          重复补查。
+        - 索引不可用（首次部署尚未构建/构建失败）：退回逐题抓取，
+          并沿用 NOWCODER_PROBLEM_META_FALLBACK_LIMIT 的降级上限。
+        """
         unique_ids = list(dict.fromkeys(str(item) for item in problem_ids))
-        unique_ids = unique_ids[:NOWCODER_PROBLEM_META_LIMIT]
-        now = time.time()
         result: Dict[str, Dict[str, Any]] = {}
-        missing = []
-        for problem_id in unique_ids:
-            cached = self._nowcoder_problem_cache.get(problem_id)
-            if cached and now - cached[0] < RESOURCE_CACHE_TTL:
-                result[problem_id] = cached[1]
-            else:
-                missing.append(problem_id)
+        if self.nowcoder_problem_index_ready():
+            missing: List[str] = []
+            for problem_id in unique_ids:
+                entry = self._nowcoder_problem_index.get(problem_id)
+                if entry is None:
+                    missing.append(problem_id)
+                else:
+                    result[problem_id] = self._meta_from_index(problem_id, entry)
+            if missing:
+                # 先过滤掉已确认不在题库里的题目（多为比赛题/定制自测题），
+                # 再按上限限量补查，避免每次分析都为同一批查不到的题白等。
+                lookup = [
+                    problem_id
+                    for problem_id in missing
+                    if problem_id not in self._nowcoder_problem_absent
+                ][:NOWCODER_PROBLEM_META_LOOKUP_LIMIT]
+                if len(missing) > len(lookup):
+                    logger.info(
+                        "牛客题库索引未覆盖 %d 道题，本次补查 %d 道",
+                        len(missing),
+                        len(lookup),
+                    )
+                freshly = await self._fetch_nowcoder_problem_meta_many(lookup)
+                for problem_id, metadata in freshly.items():
+                    entry = {
+                        "d": metadata.get("difficulty"),
+                        "t": list(metadata.get("tags") or []),
+                    }
+                    self._nowcoder_problem_index[problem_id] = entry
+                    self._nowcoder_problem_index_dirty = True
+                    result[problem_id] = self._meta_from_index(problem_id, entry)
+            return result
+
+        limited = unique_ids[:NOWCODER_PROBLEM_META_FALLBACK_LIMIT]
+        if len(unique_ids) > len(limited):
+            logger.info(
+                "牛客题库索引不可用，本次仅抓取前 %d/%d 道题的难度与知识点",
+                len(limited),
+                len(unique_ids),
+            )
+        return await self._fetch_nowcoder_problem_meta_many(limited)
+
+    async def _fetch_nowcoder_problem_meta_many(
+        self, problem_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """并发单题抓取（索引未命中/索引不可用时的实际网络路径）。
+
+        "确认不在题库里"的题目会记入负缓存（随索引落盘），后续分析不再补查。
+        """
+        if not problem_ids:
+            return {}
         semaphore = asyncio.Semaphore(NOWCODER_PROBLEM_META_CONCURRENCY)
 
         async def fetch_one(problem_id: str):
-            params = urlencode(
-                {
-                    "keyword": problem_id,
-                    "pageSize": "1",
-                    "page": "1",
-                }
-            )
-            url = f"{NOWCODER_PROBLEM_LIST_URL}?{params}"
             async with semaphore:
-                try:
-                    text = await self._fetch_text(url)
-                    metadata = self._parse_nowcoder_problem_metadata(
-                        text,
-                        problem_id,
-                    )
-                except AccountFetchError:
-                    metadata = None
-                return problem_id, metadata
-
-        if missing:
-            fetched = await asyncio.gather(
-                *(fetch_one(problem_id) for problem_id in missing)
-            )
-            for problem_id, metadata in fetched:
-                if not isinstance(metadata, dict):
-                    continue
-                self._nowcoder_problem_cache[problem_id] = (
-                    time.time(),
-                    metadata,
+                metadata, status = await self._fetch_nowcoder_problem_meta_one(
+                    problem_id
                 )
+                return problem_id, metadata, status
+
+        fetched = await asyncio.gather(
+            *(fetch_one(problem_id) for problem_id in problem_ids)
+        )
+        result: Dict[str, Dict[str, Any]] = {}
+        absent_before = len(self._nowcoder_problem_absent)
+        for problem_id, metadata, status in fetched:
+            if status == "absent":
+                self._nowcoder_problem_absent.add(problem_id)
+                continue
+            if isinstance(metadata, dict):
                 result[problem_id] = metadata
+        if (
+            len(self._nowcoder_problem_absent) != absent_before
+            and len(self._nowcoder_problem_absent) <= NOWCODER_PROBLEM_ABSENT_MAX
+        ):
+            self._nowcoder_problem_index_dirty = True
         return result
+
+    @staticmethod
+    def _nowcoder_practice_pages(
+        submission_count: Optional[int],
+        data_total: Optional[int],
+        page_size: int = NOWCODER_ANALYSIS_PAGE_SIZE,
+        max_pages: int = NOWCODER_ANALYSIS_MAX_PAGES,
+    ) -> int:
+        """按提交数与分页总数决定要翻多少页（纯函数，便于单测）。
+
+        提交数来自首页状态「次提交」，是权威口径；缺失时退回 ``data-total``
+        （注意它是**当前 pageSize 下的页数**）。
+        """
+        size = max(1, int(page_size))
+        limit = max(1, int(max_pages))
+        if submission_count is not None and int(submission_count) > 0:
+            needed = (int(submission_count) + size - 1) // size
+        elif data_total:
+            needed = int(data_total)
+        else:
+            needed = 1
+        return max(1, min(needed, limit))
+
+    @staticmethod
+    async def _fetch_nowcoder_practice_page_safe(
+        fetch_page, page: int, page_size: int
+    ):
+        """抓取单页；失败返回 None（由调用方标记 pages_missing）。"""
+        try:
+            return await fetch_page(page, page_size)
+        except AccountFetchError:
+            return None
+
+    @staticmethod
+    def _dedupe_nowcoder_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按 submission_id 去重（无 ID 的行原样保留，保持抓取顺序）。"""
+        seen: set = set()
+        unique: List[Dict[str, Any]] = []
+        for row in rows:
+            submission_id = str(row.get("submission_id") or "").strip()
+            if submission_id:
+                if submission_id in seen:
+                    continue
+                seen.add(submission_id)
+            unique.append(row)
+        return unique
 
     async def _fetch_nowcoder_analysis(
         self,
@@ -1856,8 +2338,9 @@ class AccountFetcher:
             "orderType": "DESC",
         }
 
-        async def fetch_page(page: int) -> str:
+        async def fetch_page(page: int, page_size: int) -> str:
             params = dict(base_params)
+            params["pageSize"] = str(page_size)
             params["page"] = str(page)
             return await self._fetch_text(
                 f"{NOWCODER_PRACTICE_URL.format(uid=uid)}?"
@@ -1865,40 +2348,78 @@ class AccountFetcher:
                 headers={"Accept-Language": "zh-CN,zh;q=0.9"},
             )
 
-        first_text = await fetch_page(1)
+        first_text = await fetch_page(1, NOWCODER_ANALYSIS_PAGE_SIZE)
         stats, first_rows, page_total = (
             self._parse_nowcoder_practice_page(first_text)
         )
-        pages_to_fetch = min(
-            max(1, page_total),
-            NOWCODER_ANALYSIS_MAX_PAGES,
+        if not first_rows and not stats:
+            # 对端可能收紧了 pageSize 上限：降级到 100 再试一次。
+            logger.warning(
+                "牛客练习页首页无数据（pageSize=%d），降级到 %d 重试",
+                NOWCODER_ANALYSIS_PAGE_SIZE,
+                NOWCODER_ANALYSIS_FALLBACK_PAGE_SIZE,
+            )
+            first_text = await fetch_page(
+                1, NOWCODER_ANALYSIS_FALLBACK_PAGE_SIZE
+            )
+            stats, first_rows, page_total = (
+                self._parse_nowcoder_practice_page(first_text)
+            )
+            base_params["pageSize"] = str(
+                NOWCODER_ANALYSIS_FALLBACK_PAGE_SIZE
+            )
+        page_size = int(base_params["pageSize"])
+        submission_count = stats.get("submission_count")
+        pages_to_fetch = self._nowcoder_practice_pages(
+            submission_count, page_total, page_size
         )
         rows = list(first_rows)
         pages_missing = False
-        if pages_to_fetch > 1:
-            page_semaphore = asyncio.Semaphore(6)
-
-            async def fetch_rest_page(page: int):
-                async with page_semaphore:
-                    try:
-                        return await fetch_page(page)
-                    except AccountFetchError:
-                        return None
-
-            rest = await asyncio.gather(
-                *(
-                    fetch_rest_page(page)
-                    for page in range(2, pages_to_fetch + 1)
+        # 分批并发翻页：每批结束后检查是否出现空页（提交数被清空/隐私账号），
+        # 出现即停止，避免无谓地打满 100 页。
+        for start in range(2, pages_to_fetch + 1, NOWCODER_ANALYSIS_CONCURRENCY):
+            batch = list(
+                range(
+                    start,
+                    min(
+                        start + NOWCODER_ANALYSIS_CONCURRENCY,
+                        pages_to_fetch + 1,
+                    ),
                 )
             )
-            for text in rest:
+            results = await asyncio.gather(
+                *(
+                    self._fetch_nowcoder_practice_page_safe(
+                        fetch_page, page, page_size
+                    )
+                    for page in batch
+                )
+            )
+            empty_page = False
+            for text in results:
                 if not text:
                     pages_missing = True
                     continue
                 _, page_rows, _ = self._parse_nowcoder_practice_page(text)
+                if not page_rows:
+                    empty_page = True
+                    continue
                 rows.extend(page_rows)
+            if empty_page:
+                break
+            if batch[-1] < pages_to_fetch:
+                await asyncio.sleep(NOWCODER_ANALYSIS_PAGE_INTERVAL)
 
-        submission_count = stats.get("submission_count", len(rows))
+        # 跨页按 submission_id 去重：分页边界在抓取期间发生偏移时会出现重复行，
+        # 重复会让 AC 率与语言分布失真。
+        rows = self._dedupe_nowcoder_rows(rows)
+        total_submissions = (
+            submission_count if submission_count is not None else len(rows)
+        )
+        truncated = (
+            submission_count is not None
+            and submission_count > NOWCODER_ANALYSIS_SCAN_LIMIT
+        )
         solved_count = stats.get("solved_count")
         challenged_count = stats.get("challenged_count")
         accepted_rows = [
@@ -1965,9 +2486,11 @@ class AccountFetcher:
                 difficulty_counts.get(difficulty_label, 0) + 1
             )
 
+        expected_rows = min(total_submissions, NOWCODER_ANALYSIS_SCAN_LIMIT)
         complete = (
-            page_total <= NOWCODER_ANALYSIS_MAX_PAGES
-            and not pages_missing
+            not pages_missing
+            and not truncated
+            and len(rows) >= expected_rows
         )
         acceptance_rate = (
             round(len(accepted_rows) / max(1, len(rows)) * 100, 1)
@@ -1980,21 +2503,24 @@ class AccountFetcher:
             and challenged_count > 0
             else None
         )
+        index_ready = self.nowcoder_problem_index_ready()
         coverage = (
-            f"练习页读取 {len(rows)}/{submission_count} 条提交；"
+            f"练习页读取 {len(rows)}/{total_submissions} 条提交；"
             f"题目元数据 {len(metadata)}/{len(unique_solved)}"
         )
-        if not complete:
-            if page_total > NOWCODER_ANALYSIS_MAX_PAGES:
-                coverage += (
-                    f"（最多读取 {NOWCODER_ANALYSIS_MAX_PAGES} 页）"
-                )
-            elif pages_missing:
-                coverage += "（部分分页读取失败）"
+        if truncated:
+            coverage += (
+                f"（最多读取 {NOWCODER_ANALYSIS_SCAN_LIMIT} 条 / "
+                f"{NOWCODER_ANALYSIS_MAX_PAGES} 页）"
+            )
+        elif pages_missing:
+            coverage += "（部分分页读取失败）"
+        if not index_ready:
+            coverage += "（题目索引构建中）"
         return {
             "source": "牛客公开练习页 + 牛客题库列表",
             "coverage": coverage,
-            "submission_count": submission_count,
+            "submission_count": total_submissions,
             "accepted_submission_count": (
                 len(accepted_rows) if complete else None
             ),
@@ -2040,7 +2566,7 @@ class AccountFetcher:
                         if challenged_count is not None
                         else None
                     ),
-                    {"label": "提交", "value": submission_count},
+                    {"label": "提交", "value": total_submissions},
                     (
                         {
                             "label": "AC率",

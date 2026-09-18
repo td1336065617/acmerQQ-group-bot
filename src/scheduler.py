@@ -78,6 +78,18 @@ class PushScheduler:
                 )
         except Exception:  # noqa: BLE001 - 预热失败不影响推送
             logger.warning("比赛数据后台预热失败", exc_info=True)
+        # 牛客题库索引巡检：缺失/过期时整库重建（约 290 次请求），
+        # 由本方法内部按 7 天 TTL 与失败退避控制，不在用户请求路径上同步构建。
+        try:
+            index_warmer = getattr(
+                self.plugin.account_fetcher,
+                "warm_nowcoder_problem_index",
+                None,
+            )
+            if callable(index_warmer):
+                await index_warmer()
+        except Exception:  # noqa: BLE001 - 索引巡检失败不影响推送
+            logger.warning("牛客题库索引巡检失败", exc_info=True)
         # 约每 5 分钟（10 个 tick）淘汰一次账号抓取器的进程内缓存，
         # 并把标脏的资料/负缓存批量落库（重启不冷）。
         self._prune_counter += 1

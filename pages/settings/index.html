@@ -144,6 +144,14 @@
     <span class="muted">默认 7 天，范围 1～30 天；包含正在进行的比赛</span>
   </div>
   <div class="row" style="margin-bottom:10px">
+    <label for="nowcoderScopeInput">牛客赛事范围</label>
+    <select id="nowcoderScopeInput">
+      <option value="all">全部牛客赛事（含高校校赛、新生赛、集训营、自主创建赛）</option>
+      <option value="series_only">仅牛客系列赛（比赛名含“牛客”）</option>
+    </select>
+    <span class="muted">默认全部；口径只影响展示与推送，抓取始终取全量，保存后立即生效</span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
     <label for="maxCharsInput">文字转图片最大字符数</label>
     <input type="number" id="maxCharsInput" min="200" max="10000" step="1" inputmode="numeric">
     <span class="muted">默认 1800，范围 200～10000</span>
@@ -188,6 +196,7 @@
     reminder_enabled: true,
     at_all_enabled: false,
     recent_contest_days: 7,
+    nowcoder_scope: 'all',
     max_plain_text_chars: 1800,
     max_plain_text_lines: 36
   };
@@ -236,6 +245,7 @@
     document.getElementById('reminderInput').checked = !!settings.reminder_enabled;
     document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
     document.getElementById('recentDaysInput').value = settings.recent_contest_days || 7;
+    document.getElementById('nowcoderScopeInput').value = settings.nowcoder_scope === 'series_only' ? 'series_only' : 'all';
     document.getElementById('maxCharsInput').value = settings.max_plain_text_chars || 1800;
     document.getElementById('maxLinesInput').value = settings.max_plain_text_lines || 36;
   }
@@ -349,6 +359,7 @@
       reminder_enabled: document.getElementById('reminderInput').checked,
       at_all_enabled: document.getElementById('atAllInput').checked,
       recent_contest_days: recentDays,
+      nowcoder_scope: document.getElementById('nowcoderScopeInput').value === 'series_only' ? 'series_only' : 'all',
       max_plain_text_chars: maxChars,
       max_plain_text_lines: maxLines
     };

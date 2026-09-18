@@ -224,7 +224,7 @@ def test_nowcoder_practice_and_problem_metadata_parsers():
     }
 
 
-def test_nowcoder_analysis_uses_practice_and_problem_metadata(monkeypatch):
+def test_nowcoder_analysis_uses_practice_and_problem_metadata(monkeypatch, tmp_path):
     async def scenario():
         fetcher = AccountFetcher()
         practice_html = """
@@ -262,24 +262,27 @@ def test_nowcoder_analysis_uses_practice_and_problem_metadata(monkeypatch):
               <a class="tag-label">图论</a>
               <a class="tag-label">搜索</a>
             </td>
-            <td>3</td><td>100</td>
+            <td>800</td><td>100</td>
           </tr>
         </tbody></table>
         """
 
+        # 索引不可用（未构建）时走单题兜底抓取：JSON 接口返回 HTML 即解析失败，
+        # 自动回退到题库列表页解析，行为与索引化之前一致。
         async def fake_fetch_text(url, *, headers=None, retries=2):
             if "practice-coding" in url:
                 return practice_html
             return problem_html
 
         monkeypatch.setattr(fetcher, "_fetch_text", fake_fetch_text)
+        monkeypatch.setattr(fetcher, "index_path", lambda: tmp_path / "missing.json")
         analysis = await fetcher._fetch_nowcoder_analysis("123")
 
         assert analysis["solved_count"] == 1
         assert analysis["submission_count"] == 2
         assert analysis["acceptance_rate"] == 50.0
         assert analysis["difficulty_distribution"] == [
-            {"label": "≤599", "count": 1}
+            {"label": "600–999", "count": 1}
         ]
         assert analysis["category_distribution"] == [
             {"label": "图论", "count": 1},
@@ -289,6 +292,7 @@ def test_nowcoder_analysis_uses_practice_and_problem_metadata(monkeypatch):
             {"label": "C++", "count": 1},
             {"label": "Python", "count": 1},
         ]
+        assert "题目索引构建中" in analysis["coverage"]
 
     asyncio.run(scenario())
 
