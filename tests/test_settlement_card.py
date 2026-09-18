@@ -250,3 +250,29 @@ def test_nowcoder_truncated_page_rank_is_ignored():
         rank = int(re.search(r"(\d+)", page_numbers[1]).group(1))
     assert rank is None
     assert int(re.search(r"(\d+)", page_numbers[1]).group(1)) == 9999  # 页面原值确实是截断的
+
+
+def test_atcoder_color_maps_to_chinese_rank_label():
+    from src.account_cards import _abbreviate_rank_text
+
+    assert _abbreviate_rank_text("atcoder", "red") == "红"
+    assert _abbreviate_rank_text("atcoder", "blue") == "蓝"
+    assert _abbreviate_rank_text("atcoder", "unknown-color") == "unknown-color"
+    assert _abbreviate_rank_text("codeforces", "candidate master") == "CM"
+
+
+def test_long_rank_value_falls_back_to_rank_only_in_narrow_cell():
+    """窄列里「#1200 · Top 3.2%」放不下时应退回「#1200」，而不是截成「…」。"""
+    from src.account_cards import AccountCardRenderer
+
+    font = AccountCardRenderer._find_font(17)
+    if font is None:
+        return
+    narrow = 120.0
+    full = "#1200 · Top 3.2%"
+    fitted = AccountCardRenderer._fit_rank_pillow_text(full, font, narrow)
+    assert "…" in fitted          # 直接画会截断
+    short = AccountCardRenderer._fit_rank_pillow_text(
+        full.split(" · ")[0], font, narrow
+    )
+    assert "…" not in short       # 退回名次后完整

@@ -124,6 +124,8 @@ CREATE TABLE IF NOT EXISTS rank_snapshot (
     current_display_value TEXT NOT NULL DEFAULT '',
     rating        INTEGER,
     rating_rank   INTEGER,
+    rating_rank_total INTEGER,
+    rating_rank_note  TEXT,
     updated_at    REAL NOT NULL,
     PRIMARY KEY (group_id, platform, user_id)
 );
@@ -156,6 +158,8 @@ CREATE TABLE IF NOT EXISTS progress_snapshot (
     current_display_value TEXT NOT NULL DEFAULT '',
     rating        INTEGER,
     rating_rank   INTEGER,
+    rating_rank_total INTEGER,
+    rating_rank_note  TEXT,
     updated_at    REAL NOT NULL,
     PRIMARY KEY (group_id, platform, user_id)
 );
@@ -193,7 +197,11 @@ def _now() -> float:
 #: 用 PRAGMA table_info 判定缺列后 ALTER；失败只记 warning，不阻塞启动。
 _RANK_SNAPSHOT_NEW_COLUMNS: Tuple[Tuple[str, str, str], ...] = (
     ("rank_snapshot", "rating_rank", "INTEGER"),
+    ("rank_snapshot", "rating_rank_total", "INTEGER"),
+    ("rank_snapshot", "rating_rank_note", "TEXT"),
     ("progress_snapshot", "rating_rank", "INTEGER"),
+    ("progress_snapshot", "rating_rank_total", "INTEGER"),
+    ("progress_snapshot", "rating_rank_note", "TEXT"),
 )
 
 
@@ -1161,8 +1169,8 @@ class AccountStore:
                                 group_id, platform, user_id, handle, display_name,
                                 metric_label, display_value, sort_value, delta,
                                 current_metric_label, current_display_value, rating,
-                                rating_rank, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                rating_rank, rating_rank_total, rating_rank_note, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 str(group_id),
@@ -1190,6 +1198,12 @@ class AccountStore:
                                     if row.get("rating_rank") is not None
                                     else None
                                 ),
+                                (
+                                    int(row["rating_rank_total"])
+                                    if row.get("rating_rank_total") is not None
+                                    else None
+                                ),
+                                str(row.get("rating_rank_note") or ""),
                                 float(row.get("updated_at") or now),
                             ),
                         )
@@ -1233,6 +1247,8 @@ class AccountStore:
                     "current_display_value": row.get("current_display_value") or "",
                     "rating": row.get("rating"),
                     "rating_rank": row.get("rating_rank"),
+                    "rating_rank_total": row.get("rating_rank_total"),
+                    "rating_rank_note": row.get("rating_rank_note"),
                 }
             )
         return normalized

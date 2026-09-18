@@ -166,6 +166,17 @@ def _format_signed_number(value: object) -> str:
         return str(value)
 
 
+def _rank_fallback_row(index: int, row: dict, metric_header: str) -> str:
+    """排行文字兜底的单行内容：账号 +（有数据时）平台排名 + 指标 + 变化。"""
+    parts = [f"账号：{row['handle']}"]
+    rank_text = _platform_rank_text(row)
+    if rank_text:
+        parts.append(f"平台排名 {rank_text}")
+    parts.append(f"{metric_header}：{row.get('display_value', row['value'])}")
+    parts.append(f"近7日变化：{_format_signed_number(row.get('delta'))}")
+    return f"{index}. {row['display_name']}\n    " + " · ".join(parts)
+
+
 def _solved_count_label(profile: object) -> str:
     extra = getattr(profile, "extra", {}) or {}
     if not isinstance(extra, dict):
@@ -2530,6 +2541,8 @@ class AcmerGroupBot(Star):
                     "delta": delta,
                     "rating": result.rating,
                     "rating_rank": getattr(result, "rating_rank", None),
+                    "rating_rank_total": getattr(result, "rating_rank_total", None),
+                    "rating_rank_note": getattr(result, "rating_rank_note", "") or "",
                     "current_display_value": metric["display_value"],
                 }
             )
@@ -2791,14 +2804,7 @@ class AcmerGroupBot(Star):
                     title,
                     f"当前显示 {start + 1}-{end} / {total} 名成员",
                     *(
-                        (
-                            f"{i}. {row['display_name']}\n"
-                            f"   账号：{row['handle']} · "
-                            f"{metric_header}："
-                            f"{row.get('display_value', row['value'])} · "
-                            f"近7日变化："
-                            f"{_format_signed_number(row.get('delta'))}"
-                        )
+                        _rank_fallback_row(i, row, metric_header)
                         for i, row in enumerate(page_rows, start + 1)
                     ),
                     f"提示：{note}",
@@ -2879,9 +2885,13 @@ class AcmerGroupBot(Star):
                             f"{section_metric_header}：{value} · "
                             f"近7日变化：{_format_signed_number(row.get('delta'))}"
                         )
+                    account_parts = [f"账号：{row['handle']}"]
+                    rank_text = _platform_rank_text(row)
+                    if rank_text:
+                        account_parts.append(f"平台排名 {rank_text}")
                     fallback_lines.append(
                         f"{i}. {row['display_name']}\n"
-                        f"   账号：{row['handle']} · {value_text}"
+                        f"   {' · '.join(account_parts)} · {value_text}"
                     )
             fallback_lines.append(f"提示：{note}")
             fallback = "\n".join(fallback_lines)

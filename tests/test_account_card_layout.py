@@ -39,8 +39,9 @@ def test_cf_rank_abbreviations():
     assert _abbreviate_rank_text("codeforces", "grandmaster") == "GM"
     # 自定义头衔（CF 允许把任意文本作为称号，实测有用户直接填用户名）
     assert _abbreviate_rank_text("codeforces", "jiangly") == "jiangly"
-    # 其它平台不做改动
-    assert _abbreviate_rank_text("atcoder", "red") == "red"
+    # AtCoder 的颜色类映射成中文段位（避免把 CSS 类名展示给用户）
+    assert _abbreviate_rank_text("atcoder", "red") == "红"
+    assert _abbreviate_rank_text("atcoder", "unknown") == "unknown"
     assert _abbreviate_rank_text("luogu", "") == ""
     assert set(CF_RANK_ABBREVIATIONS) >= {"grandmaster", "international master"}
 
@@ -59,7 +60,7 @@ def test_rank_display_text_marks_current_rank():
     assert stats["最高段位"] == "LGM"
 
     atcoder = AccountProfile(platform="atcoder", handle="tourist", color="red")
-    assert _rank_display_text(atcoder) == "当前段位：red"
+    assert _rank_display_text(atcoder) == "当前段位：红"
 
     blank = AccountProfile(platform="luogu", handle="123456")
     assert _rank_display_text(blank) == "当前段位：未评级"

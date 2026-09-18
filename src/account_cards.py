@@ -137,31 +137,13 @@ def _format_delta(value: object) -> str:
     return f"{number:+d}"
 
 
-def platform_rank_text(row: object) -> str:
-    """返回排行行携带的「平台排名 #N」；缺失或非法值返回空串。
-
-    与资料卡的「只展示有数据的项」风格一致：调用方据此决定是否追加，
-    避免出现「#None」「—」之类的占位符。
-    """
-    value = row.get("rating_rank") if isinstance(row, dict) else None
-    if value is None:
-        return ""
-    try:
-        rank = int(value)
-    except (TypeError, ValueError):
-        return ""
-    if rank <= 0:
-        return ""
-    return f"平台排名 #{rank}"
-
-
 def _member_account_line(row: object, *, fallback: str = "未绑定") -> str:
-    """成员名下方小字行：账号 +（有数据时）平台排名。"""
+    """成员名下方小字行：账号 +（有数据时）平台排名，复用资料卡文案。"""
     handle = str(row.get("handle") or fallback) if isinstance(row, dict) else ""
-    suffix = platform_rank_text(row)
+    suffix = _platform_rank_text(row)
     if not suffix:
         return handle
-    return f"{handle} · {suffix}" if handle else suffix
+    return f"{handle} · 平台排名 {suffix}" if handle else f"平台排名 {suffix}"
 
 
 def current_metric_header(metric_label: object) -> str:
@@ -295,12 +277,29 @@ CF_RANK_ABBREVIATIONS = {
 }
 
 
+#: AtCoder 用户页用颜色类表示段位（gray/brown/…/red），映射成中文展示
+ATCODER_COLOR_LABELS = {
+    "gray": "灰",
+    "brown": "棕",
+    "green": "绿",
+    "cyan": "青",
+    "blue": "蓝",
+    "yellow": "黄",
+    "orange": "橙",
+    "red": "红",
+}
+
+
 def _abbreviate_rank_text(platform: object, value: object) -> str:
     """把 Codeforces 标准段位名缩写为通用简称（其它平台/自定义头衔原样返回）。"""
     text = str(value or "").strip()
     if not text:
         return ""
-    if str(platform or "").casefold() != "codeforces":
+    name = str(platform or "").casefold()
+    if name == "atcoder":
+        # 避免把 CSS 类名（red/blue…）直接展示给用户
+        return ATCODER_COLOR_LABELS.get(text.casefold(), text)
+    if name != "codeforces":
         return text
     return CF_RANK_ABBREVIATIONS.get(text.casefold(), text)
 
@@ -2381,7 +2380,9 @@ class AccountCardRenderer:
     .rank {{ color:#5e3b5d; font-size:18px; font-weight:700; }}
     .stats {{ display:grid; grid-template-columns:1fr 1fr; gap:10px 18px; }}
     .stat {{ display:flex; justify-content:space-between; gap:10px; color:#6e4a67; font-size:15px; font-weight:600; border-bottom:1px dashed rgba(180,113,157,.3); padding-bottom:7px; }}
-    .stat b {{ color:#452852; font-size:17px; font-weight:800; text-align:right; }}
+    .stat b {{ color:#452852; font-size:17px; font-weight:800; text-align:right;
+      white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }}
+    .stat > span {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
     .trend {{ margin-top:16px; color:#6b4564; font-size:17px; font-weight:600; }}
     .trend.positive, .rank-delta.positive {{ color:#16835f; }}
     .trend.negative, .rank-delta.negative {{ color:#c03d66; }}
@@ -3579,6 +3580,14 @@ class AccountCardRenderer:
                 fitted = cls._fit_rank_pillow_text(
                     value, body_font, detail_width - cell_padding
                 )
+                # 「平台排名：#48 · Top 0.04%」这类组合值在窄列里放不下时，
+                # 优先保留名次（可读），而不是截成「#48 · Top 0…」
+                if "…" in fitted and " · " in value:
+                    shorter = cls._fit_rank_pillow_text(
+                        value.split(" · ")[0], body_font, detail_width - cell_padding
+                    )
+                    if "…" not in shorter:
+                        fitted = shorter
                 draw.text(
                     (
                         int(content_x + detail_col * detail_width),
@@ -4213,11 +4222,11 @@ class AccountCardRenderer:
                 if account_line:
                     account_font = cls._find_font(15) or subtitle_font
                     draw.text(
-                        (x + 75, row_y + 24),
+                        (x + 75, row_y + 30),
                         cls._fit_rank_pillow_text(
                             account_line,
                             account_font,
-                            user_max_width,
+                            max(100, section_w - 97),
                         ),
                         font=account_font,
                         fill="#6e4a67",

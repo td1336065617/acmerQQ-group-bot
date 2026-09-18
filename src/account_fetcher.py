@@ -3345,7 +3345,9 @@ class AccountFetcher:
             rating=rating,
             rating_rank=rating_rank,
             rating_rank_note=rating_rank_note,
-            rank_text=_clean_text(rank_cell),
+            # 用户页的「Rank」行是"全站名次（百分位）"，不是段位；
+            # 段位用颜色类（gray/brown/…/red），否则会和平台排名重复且被截断。
+            rank_text="",
             max_rating=max_rating,
             contest_count=_parse_int(rated_cell),
             color=color,
