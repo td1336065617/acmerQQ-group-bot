@@ -7,7 +7,7 @@ desc: |
   按用户名/UID 查询未绑定用户战绩卡、
   每日早报、赛前 15 分钟提醒、赛后赛果、群训练周报、牛客报名截止提醒与 WebUI 配置。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
-version: 1.14.12
+version: 1.14.13
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot/tree/master
 astrbot_version: ">=4.13.0,<5"

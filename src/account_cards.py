@@ -959,12 +959,16 @@ class AccountCardRenderer:
         *,
         title: str,
         subtitle: str,
+        platform: str = "",
         metric_label: str = "Rating",
         note: str = "",
         value_header: Optional[str] = None,
         secondary_label: str = "近7日变化",
         secondary_value_key: str = "delta",
     ) -> Optional[Path]:
+        if platform:
+            rows = [dict(row, platform=platform) for row in rows]
+
         source = {
             "kind": "ranking",
             "title": title,
@@ -1020,6 +1024,11 @@ class AccountCardRenderer:
         secondary_label: str = "近7日变化",
         secondary_value_key: str = "delta",
     ) -> Optional[Path]:
+        sections = {
+            key: [dict(row, platform=key) for row in value]
+            for key, value in sections.items()
+        }
+
         source = {
             "kind": "overview",
             "title": title,

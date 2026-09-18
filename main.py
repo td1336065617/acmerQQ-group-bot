@@ -1228,6 +1228,7 @@ class AcmerGroupBot(Star):
         subtitle: str,
         metric_label: str,
         note: str,
+        platform: str = "",
     ):
         """渲染平台排行卡；失败时交给调用方发送文字。"""
         try:
@@ -1238,6 +1239,7 @@ class AcmerGroupBot(Star):
                 subtitle=subtitle,
                 metric_label=metric_label,
                 note=note,
+                platform=platform,
             )
         except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断排行查询
             logger.error("平台排行卡渲染失败，改用文字：%s", exc, exc_info=True)
@@ -2823,6 +2825,7 @@ class AcmerGroupBot(Star):
                 subtitle=f"当前显示 {start + 1}-{end} / {total} 名成员 · 公开资料排行",
                 metric_label=metric,
                 note=note,
+                platform=mode,
             )
             fallback = "\n".join(
                 [
