@@ -257,12 +257,19 @@ MY_ACCOUNT_COMMANDS = {
     normalize_command("我的战绩"),
     normalize_command("刷新我的战绩"),
 }
+#: @某人 时可用于"查这个人的资料卡"的说法。
+#: 注意**不能**包含"我的战绩/我的账号"：这两个词永远指自己，而 QQ 群里几乎每条
+#: 指令都会 @ 机器人，若把它们算作"查他人"，@机器人 发"我的战绩"就会被当成
+#: 查询机器人自己的资料卡（线上真实故障：回"该成员还没有绑定竞赛平台账号"）。
 MENTION_PROFILE_COMMANDS = {
     normalize_command("战绩"),
     normalize_command("查询战绩"),
     normalize_command("战绩卡"),
     normalize_command("资料卡"),
     normalize_command("账号"),
+}
+#: 永远指"自己"的说法：即使 @ 了别人也只查自己的卡
+SELF_ONLY_PROFILE_COMMANDS = {
     normalize_command("我的战绩"),
     normalize_command("我的账号"),
 }
@@ -815,18 +822,14 @@ class AcmerGroupBot(Star):
 
         targets = []
         seen_ids = set()
-        self_id = str(getattr(event, "get_self_id", lambda: "")() or "").strip()
+        self_ids = cls._self_id_candidates(event, message_obj, raw)
         for mention in mentions:
             if bool(getattr(mention, "is_you", False)):
                 continue
             user_id = cls._mention_user_id(mention)
             if not user_id or user_id in seen_ids:
                 continue
-            if (
-                self_id
-                and self_id.casefold() not in {"qq_official", "unknown_selfid"}
-                and user_id.casefold() == self_id.casefold()
-            ):
+            if user_id.casefold() in self_ids:
                 continue
             seen_ids.add(user_id)
             targets.append(
@@ -853,11 +856,10 @@ class AcmerGroupBot(Star):
                 user_id = cls._mention_user_id(component)
                 if not user_id or user_id in seen_ids:
                     continue
-                if (
-                    self_id
-                    and self_id.casefold() not in {"qq_official", "unknown_selfid"}
-                    and user_id.casefold() == self_id.casefold()
-                ):
+                # 消息链里的 @机器人 有时不带 is_you，需要靠自身 id 识别
+                if bool(getattr(component, "is_you", False)):
+                    continue
+                if user_id.casefold() in self_ids:
                     continue
                 seen_ids.add(user_id)
                 targets.append(
@@ -880,6 +882,8 @@ class AcmerGroupBot(Star):
                     "",
                 )
                 if not target_id or target_id in seen_ids:
+                    continue
+                if target_id.casefold() in self_ids:
                     continue
                 seen_ids.add(target_id)
                 targets.append(
@@ -914,9 +918,32 @@ class AcmerGroupBot(Star):
                 )
         remaining = re.sub(r"\[At:[^\]]+\]", " ", remaining, flags=re.I)
         remaining = re.sub(r"\s+", " ", remaining).strip()
-        if normalize_command(remaining) not in MENTION_PROFILE_COMMANDS:
+        command = normalize_command(remaining)
+        # "我的战绩/我的账号"即使 @ 了别人也只查自己，不能走"查他人"分支
+        if command in SELF_ONLY_PROFILE_COMMANDS:
+            return None
+        if command not in MENTION_PROFILE_COMMANDS:
             return None
         return targets[0]
+
+    @staticmethod
+    def _self_id_candidates(event, message_obj, raw) -> set:
+        """收集"机器人自己"的所有可能标识（小写化）。
+
+        QQ 官方适配器有时把 `get_self_id()` 报成占位符（如 `qq_official`），
+        只靠它会把"@机器人"误判成"@了某个成员"，因此多取几个来源并丢掉占位符。
+        """
+        placeholders = {"", "qq_official", "unknown_selfid", "self", "bot", "unknown"}
+        candidates = set()
+        for value in (
+            getattr(event, "get_self_id", lambda: "")(),
+            getattr(message_obj, "self_id", ""),
+            getattr(raw, "self_id", ""),
+        ):
+            text = str(value or "").strip()
+            if text and text.casefold() not in placeholders:
+                candidates.add(text.casefold())
+        return candidates
 
     @staticmethod
     def _account_platform_help() -> str:

@@ -790,3 +790,132 @@ def test_nowcoder_scope_setting_is_read_and_applied_to_fetcher():
     settings = asyncio.run(bot.get_settings())
     assert settings["nowcoder_scope"] == "all"
     assert bot.fetcher.nowcoder_scope == "all"
+
+
+def test_mention_profile_target_ignores_bot_itself():
+    """@机器人 发「我的战绩」不能被当成"查机器人的资料卡"（线上真实故障）。"""
+    main_module = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="bot-openid",
+        username="爱莉希雅",
+        is_you=True,          # QQ 官方适配器用 is_you 标记"被 @ 的是机器人自己"
+    )
+    raw = types.SimpleNamespace(mentions=[mention], content="<@bot-openid> 我的战绩")
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="<@bot-openid> 我的战绩",
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="bot-openid"),
+    )
+    assert (
+        main_module.AcmerGroupBot._mentioned_profile_target(event, event.message_str)
+        is None
+    )
+
+
+def test_mention_profile_target_ignores_bot_by_self_id_when_is_you_missing():
+    """消息链里的 @机器人 不带 is_you 时，靠自身 id 识别（含占位符场景）。"""
+    main_module = _load_main_module()
+
+    class AtComponent:
+        type = "at"
+
+        def __init__(self, qq):
+            self.qq = qq
+
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="我的战绩",
+        message_obj=types.SimpleNamespace(
+            raw_message=types.SimpleNamespace(mentions=[], content=""),
+            self_id="bot-openid",
+        ),
+    )
+    event.get_messages = lambda: [AtComponent("bot-openid")]
+    assert (
+        main_module.AcmerGroupBot._mentioned_profile_target(event, event.message_str)
+        is None
+    )
+
+
+def test_self_only_commands_never_look_up_other_members():
+    """即使 @ 了别人，「我的战绩/我的账号」也只查自己。"""
+    main_module = _load_main_module()
+    for command in ("我的战绩", "我的账号"):
+        mention = types.SimpleNamespace(
+            member_openid="other-openid",
+            username="别人",
+            is_you=False,
+        )
+        raw = types.SimpleNamespace(mentions=[mention], content=f"<@other-openid> {command}")
+        event = FakeEvent(
+            group_id="group-1",
+            message_str=f"<@other-openid> {command}",
+            message_obj=types.SimpleNamespace(raw_message=raw, self_id="bot-openid"),
+        )
+        assert (
+            main_module.AcmerGroupBot._mentioned_profile_target(event, event.message_str)
+            is None
+        ), command
+
+
+def test_mention_profile_target_still_supports_other_members():
+    """回归：@别人 说「战绩」仍然查那个人。"""
+    main_module = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="target-openid",
+        username="被查询用户",
+        is_you=False,
+    )
+    raw = types.SimpleNamespace(mentions=[mention], content="<@target-openid> 战绩")
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="<@target-openid> 战绩",
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="bot-openid"),
+    )
+    assert main_module.AcmerGroupBot._mentioned_profile_target(
+        event, event.message_str
+    ) == {"user_id": "target-openid", "display_name": "被查询用户"}
+
+
+def test_bot_mentioned_with_my_stats_dispatches_to_self_query():
+    """端到端：@机器人 发「我的战绩」必须走"查自己"，而不是查被 @ 的机器人。"""
+    main_module = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="bot-openid",
+        username="爱莉希雅",
+        is_you=True,
+    )
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="我的战绩",
+        message_obj=types.SimpleNamespace(
+            raw_message=types.SimpleNamespace(
+                mentions=[mention],
+                content="<@bot-openid> 我的战绩",
+            ),
+            self_id="bot-openid",
+        ),
+    )
+    bot = main_module.AcmerGroupBot.__new__(main_module.AcmerGroupBot)
+    bot._settings_cache = None
+    bot.output_renderer = None
+    calls = []
+
+    async def fake_reply(event, **kwargs):
+        calls.append(kwargs)
+        yield "自己的战绩卡"
+
+    bot._reply_my_account = fake_reply
+    bot.get_settings = _async_settings(main_module)
+    results = _collect(bot.on_message(event))
+
+    assert results == ["自己的战绩卡"]
+    # 必须按“自己”查询：没有 platform、也没有 target_user_id
+    assert calls == [{"force": False}]
+
+
+def _async_settings(main_module):
+    async def get_settings():
+        return {"push_platforms": ["codeforces"], "nowcoder_scope": "all"}
+
+    return get_settings
