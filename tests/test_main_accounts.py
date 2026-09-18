@@ -919,3 +919,21 @@ def _async_settings(main_module):
         return {"push_platforms": ["codeforces"], "nowcoder_scope": "all"}
 
     return get_settings
+
+
+def test_bare_confirm_and_unbind_reply_with_usage():
+    """菜单里列了「确认绑定」「解绑」，裸发这两条必须有回复（此前完全没反应）。"""
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from test_main_accounts import _load_main_module
+
+    m = _load_main_module()
+    assert m.ACCOUNT_CONFIRM_USAGE_RE.match("确认绑定")
+    assert m.ACCOUNT_UNBIND_USAGE_RE.match("解绑")
+    # 带平台的写法仍然走正式流程，不被用法提示截胡
+    assert not m.ACCOUNT_CONFIRM_USAGE_RE.match("确认绑定cf")
+    assert not m.ACCOUNT_UNBIND_USAGE_RE.match("解绑cf")
+    assert m.ACCOUNT_CONFIRM_RE.match("确认绑定cf")
+    assert m.ACCOUNT_UNBIND_RE.match("解绑cf")

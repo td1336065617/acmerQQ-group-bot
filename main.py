@@ -220,6 +220,12 @@ ACCOUNT_UNBIND_RE = re.compile(
     r"luogu|atc|atcoder)\s*$",
     re.I,
 )
+#: 只发「确认绑定」/「解绑」不带平台时的用法提示（菜单里就是这么列的，
+#: 之前这两条完全没回复，等于菜单里的死项）
+ACCOUNT_CONFIRM_USAGE_RE = re.compile(
+    r"^(?:确认绑定|confirm\s*bind)\s*$", re.I
+)
+ACCOUNT_UNBIND_USAGE_RE = re.compile(r"^(?:解绑|unbind)\s*$", re.I)
 # 未绑定用户战绩查询：查询cf <用户名/UID/主页链接>
 # 平台别名与绑定指令保持同一套；标识由 normalize_account_identifier 归一化，
 # 自动兼容用户名、数字 UID 与主页链接三种形态。
@@ -4467,6 +4473,18 @@ class AcmerGroupBot(Star):
                     f"绑定后请按提示把验证码追加到【{field}】，"
                     "再发送确认绑定指令。"
                 )
+            return
+        if ACCOUNT_CONFIRM_USAGE_RE.match(raw_message):
+            yield event.plain_result(
+                "用法：确认绑定cf/确认绑定牛客/确认绑定洛谷/确认绑定atcoder <验证码>\n"
+                "请先发送绑定指令拿到验证码，把它填进对应平台的公开资料字段后再确认。"
+            )
+            return
+        if ACCOUNT_UNBIND_USAGE_RE.match(raw_message):
+            yield event.plain_result(
+                "用法：解绑cf / 解绑牛客 / 解绑洛谷 / 解绑atcoder\n"
+                "请带上要解绑的平台名。"
+            )
             return
         confirm_match = ACCOUNT_CONFIRM_RE.match(raw_message)
         if confirm_match:
