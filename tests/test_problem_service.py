@@ -356,3 +356,33 @@ def test_atcoder_index_uses_kenkoooo_models(tmp_path):
         assert by_id["abc100_a"].url == "https://atcoder.jp/contests/abc100/tasks/abc100_a"
 
     asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------
+# 展示文案：只报题目名
+# ----------------------------------------------------------------------
+
+
+def test_display_reports_only_problem_name():
+    problem = Problem(
+        "nowcoder", "223861", "小月的筹码", 1600, ["排序", "二分", "分治"], ""
+    )
+    assert problem.display() == "小月的筹码"
+    # 没有题目名时退回题号，且仍然不带难度/知识点
+    fallback = Problem("nowcoder", "999", "", 1200, ["枚举"], "")
+    assert fallback.display() == "题目 999"
+    assert "难度" not in fallback.display() and "枚举" not in fallback.display()
+
+
+def test_nowcoder_pool_uses_problem_name_from_index():
+    service = _service({"1001": {"n": "小月的筹码", "d": 1600, "t": ["排序"]}})
+    pool = service.nowcoder_pool()
+    assert [p.title for p in pool] == ["小月的筹码"]
+    assert pool[0].display() == "小月的筹码"
+
+
+def test_nowcoder_pool_falls_back_when_name_missing():
+    """旧索引没有 n 字段时退回题号，避免展示空白。"""
+    service = _service({"1002": {"d": 1200, "t": ["枚举"]}})
+    pool = service.nowcoder_pool()
+    assert pool[0].title == "牛客题目 #1002"

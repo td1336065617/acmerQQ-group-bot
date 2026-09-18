@@ -98,12 +98,8 @@ class Problem:
     url: str = ""
 
     def display(self) -> str:
-        parts = [self.title or f"题目 {self.problem_id}"]
-        if self.difficulty:
-            parts.append(f"难度 {self.difficulty}")
-        if self.tags:
-            parts.append("、".join(self.tags[:3]))
-        return " · ".join(parts)
+        """对外展示文案：**只报题目名**（难度与知识点用于选题目，不展示）。"""
+        return str(self.title or "").strip() or f"题目 {self.problem_id}"
 
 
 def band_of_difficulty(difficulty: Optional[int]) -> Optional[int]:
@@ -152,11 +148,13 @@ class ProblemService:
         for problem_id, entry in fetcher._nowcoder_problem_index.items():
             difficulty = entry.get("d")
             raw_tags = entry.get("t") or []
+            # 索引里存了题目名（"n"）；旧索引没有该字段时退回题号
+            title = str(entry.get("n") or "").strip() or f"牛客题目 #{problem_id}"
             pool.append(
                 Problem(
                     platform="nowcoder",
                     problem_id=str(problem_id),
-                    title=f"牛客题目 #{problem_id}",
+                    title=title,
                     difficulty=difficulty if isinstance(difficulty, int) else None,
                     tags=canonical_tags("nowcoder", raw_tags),
                     url=f"https://ac.nowcoder.com/acm/problem/{problem_id}",

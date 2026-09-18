@@ -3429,9 +3429,6 @@ class AcmerGroupBot(Star):
             problem.display(),
             problem.url,
         ]
-        anchor = await self._group_rating_anchor(group_id, platform)
-        if anchor:
-            lines.append(f"📐 难度锚点：本群 {PLATFORM_LABELS.get(platform, platform)} 中位 Rating {anchor}")
         async for result in self._adaptive_results(event, "\n".join(lines)):
             yield result
 
@@ -3456,7 +3453,7 @@ class AcmerGroupBot(Star):
         )
         if not picks:
             return
-        lines = ["🎯 推荐补题（未通过 · 贴合当前难度 · 优先薄弱知识点）"]
+        lines = ["🎯 推荐补题（都是你还没通过的题）"]
         for index, problem in enumerate(picks, start=1):
             lines.append(f"{index}. {problem.display()}\n   {problem.url}")
         async for result in self._adaptive_results(event, "\n".join(lines)):

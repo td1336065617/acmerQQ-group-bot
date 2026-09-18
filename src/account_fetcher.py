@@ -102,7 +102,7 @@ NOWCODER_PROBLEM_LIST_JSON_URL = "https://ac.nowcoder.com/acm/problem/list/json"
 NOWCODER_PROBLEM_INDEX_PAGE_SIZE = 50
 NOWCODER_PROBLEM_INDEX_CONCURRENCY = 6
 NOWCODER_PROBLEM_INDEX_TTL = 7 * 24 * 3600
-NOWCODER_PROBLEM_INDEX_VERSION = 1
+NOWCODER_PROBLEM_INDEX_VERSION = 2
 # 整库约 1.4 万题；条目数明显偏少说明抓取残缺，直接丢弃重建。
 NOWCODER_PROBLEM_INDEX_MIN_ENTRIES = 5000
 NOWCODER_PROBLEM_INDEX_FILENAME = "nowcoder_problem_index.json"
@@ -1937,6 +1937,8 @@ class AccountFetcher:
                 if name and name not in tags:
                     tags.append(name)
             problems[problem_id] = {
+                # n = 题目名（每日一题/推荐补题直接展示它）
+                "n": _clean_text(item.get("name")),
                 "d": cls._normalize_difficulty(item.get("difficulty")),
                 "t": tags,
             }
@@ -1950,7 +1952,7 @@ class AccountFetcher:
         """把索引条目转换成分析层使用的元数据结构。"""
         return {
             "problem_id": problem_id,
-            "title": "",
+            "title": str(entry.get("n") or ""),
             "difficulty": entry.get("d"),
             "tags": list(entry.get("t") or []),
         }

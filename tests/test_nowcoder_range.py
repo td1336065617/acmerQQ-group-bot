@@ -254,9 +254,12 @@ def _index_page_payload(items: list[dict], count: int = 14446) -> dict:
     }
 
 
-def _problem_entry(problem_id: int, difficulty, tags: list[str]) -> dict:
+def _problem_entry(
+    problem_id: int, difficulty, tags: list[str], name: str = ""
+) -> dict:
     return {
         "problemId": problem_id,
+        "name": name or f"题目{problem_id}",
         "difficulty": difficulty,
         "tagList": [{"name": tag} for tag in tags],
     }
@@ -274,10 +277,24 @@ def test_parse_index_page_normalizes_sentinel_difficulty():
         )
     )
     assert count == 14446
-    assert problems["1"] == {"d": 1500, "t": ["图论"]}
-    assert problems["2"] == {"d": None, "t": ["暴力"]}
-    assert problems["3"] == {"d": None, "t": []}
-    assert problems["4"] == {"d": None, "t": []}
+    # n = 题目名（每日一题/推荐补题直接展示），d = 难度，t = 知识点
+    assert problems["1"] == {"n": "题目1", "d": 1500, "t": ["图论"]}
+    assert problems["2"] == {"n": "题目2", "d": None, "t": ["暴力"]}
+    assert problems["3"] == {"n": "题目3", "d": None, "t": []}
+    assert problems["4"] == {"n": "题目4", "d": None, "t": []}
+
+
+def test_index_version_bumped_for_problem_names():
+    """索引新增题目名字段 → 版本号必须提升，否则旧索引（无题目名）会被继续使用。"""
+    from src.account_fetcher import NOWCODER_PROBLEM_INDEX_VERSION
+
+    assert NOWCODER_PROBLEM_INDEX_VERSION >= 2
+
+
+def test_index_meta_carries_problem_name():
+    meta = AccountFetcher._meta_from_index("100", {"n": "小月的筹码", "d": 1500, "t": ["图论"]})
+    assert meta["title"] == "小月的筹码"
+    assert meta["difficulty"] == 1500
 
 
 def test_build_index_uses_problem_count_to_page(monkeypatch, tmp_path):

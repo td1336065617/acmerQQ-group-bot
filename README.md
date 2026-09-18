@@ -156,7 +156,7 @@ XCPC Link（线下赛）
 | 赛前提醒 `settings.reminder_enabled` | 开 | 比赛开始前 15 分钟提醒 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知尝试带 `<@everyone>`，失败自动降级为普通通知 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛` 查看未来几天，范围 1～30 |
-| 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附一道题（`每日一题` 指令同源） |
+| 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附一道题（`每日一题` 指令同源，只展示题目名与链接） |
 | 每日一题平台 `settings.daily_problem_platform` | `nowcoder` | 牛客（本地索引）/ Codeforces / AtCoder / 洛谷 |
 | 推荐补题 `settings.recommend_enabled` | 开 | 详细资料卡之后推荐 3 道未通过题 |
 | 赛后赛果推送 `settings.settle_push_enabled` | 开 | 比赛结束后推送名次卡（名次/通过题数/参赛人数） |

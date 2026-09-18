@@ -34,7 +34,7 @@
 | 赛前提醒 `settings.reminder_enabled` | 开 | 开始前 15 分钟提醒 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知带 `<@everyone>`，失败自动降级 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛`查看未来几天，范围 1～30 |
-| 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附"今日一题"，与 `每日一题` 指令同源同一题 |
+| 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附"今日一题"，与 `每日一题` 指令同源同一题；消息里只显示题目名与链接 |
 | 每日一题平台 `settings.daily_problem_platform` | `nowcoder` | 题目来源：牛客（复用本地题库索引，零新增抓取）/ Codeforces / AtCoder / 洛谷（首次使用构建索引，7 天有效） |
 | 推荐补题 `settings.recommend_enabled` | 开 | 单平台详细资料卡之后追加 3 道推荐题（未通过 + 贴合难度 + 优先薄弱知识点） |
 | 赛后赛果推送 `settings.settle_push_enabled` | 开 | 比赛结束后推一张名次卡：名次 / 通过题数 / 参赛人数（**不含 Rating 变化**——CF 要等系统重测、牛客固定次日 00:00 才更新评分） |
