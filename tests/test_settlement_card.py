@@ -227,7 +227,12 @@ def test_platform_rank_text_with_note_total_and_bare():
 
     with_total = AccountProfile(platform="codeforces", handle="b", rating_rank=5,
                                 rating_rank_total=37992)
-    assert _platform_rank_text(with_total) == "#5 · Top <0.01%"
+    assert _platform_rank_text(with_total) == "#5 · Top 0.01%"
+
+    # 极小百分位不要显示成 0.00%
+    tiny = AccountProfile(platform="codeforces", handle="top", rating_rank=1,
+                          rating_rank_total=137134)
+    assert _platform_rank_text(tiny) == "#1 · Top <0.01%"
 
     coarse = AccountProfile(platform="codeforces", handle="c", rating_rank=1200,
                             rating_rank_total=37992)
