@@ -26,9 +26,21 @@ def _load_main_module():
 
     event_module = types.ModuleType("astrbot.api.event")
 
+    class _AdapterFlag:
+        def __init__(self, name):
+            self.name = name
+
+        def __or__(self, other):
+            return self
+
+        def __ror__(self, other):
+            return self
+
     class DummyFilter:
         class PlatformAdapterType:
-            QQOFFICIAL = "qq_official"
+            QQOFFICIAL = _AdapterFlag("qq_official")
+            QQOFFICIAL_WEBHOOK = _AdapterFlag("qq_official_webhook")
+            AIOCQHTTP = _AdapterFlag("aiocqhttp")
 
         class EventMessageType:
             GROUP_MESSAGE = 1
@@ -59,8 +71,14 @@ def _load_main_module():
         def __init__(self, text):
             self.text = text
 
+    class DummyAt:
+        def __init__(self, qq=None, name=""):
+            self.qq = qq
+            self.name = name
+
     message_components.Image = DummyImage
     message_components.Plain = DummyPlain
+    message_components.At = DummyAt
 
     platform_module = types.ModuleType("astrbot.api.platform")
     platform_module.MessageType = types.SimpleNamespace(

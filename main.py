@@ -27,6 +27,8 @@ from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
+from . import platform_compat
+
 from .src.contest_fetcher import (
     NOWCODER_SCOPE_ALL,
     NOWCODER_SCOPE_SERIES_ONLY,
@@ -564,7 +566,13 @@ class AcmerGroupBot(Star):
         return [str(a).strip() for a in admins if str(a).strip()]
 
     async def _is_admin(self, event: AstrMessageEvent) -> bool:
-        return event.get_sender_id() in await self._get_admins()
+        admins = await self._get_admins()
+        sender_id = str(event.get_sender_id() or "")
+        platform_id = str(event.get_platform_id() or "")
+        return any(
+            platform_compat.admin_entry_matches(entry, platform_id, sender_id)
+            for entry in admins
+        )
 
     @staticmethod
     def _read_bounded_int(
@@ -2949,6 +2957,15 @@ class AcmerGroupBot(Star):
         raw = await self.get_kv_data("groups", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
+        raw, migrated = platform_compat.migrate_groups(
+            raw, self._default_platform_id()
+        )
+        if migrated:
+            await self.put_kv_data("groups", raw)
+            logger.info(
+                "acmerQQ群机器人 群配置已迁移到 platform_id 作用域（%d 条）",
+                len(raw),
+            )
         self._groups_cache = (time.monotonic(), raw)
         return self._clone_groups(raw)
 
@@ -2963,40 +2980,52 @@ class AcmerGroupBot(Star):
     async def get_groups(self) -> List[GroupConfig]:
         raw = await self._raw_groups()
         groups: List[GroupConfig] = []
-        for gid, cfg in raw.items():
+        for key, cfg in raw.items():
             if not isinstance(cfg, dict):
                 continue
+            platform_id, gid = platform_compat.split_scoped(str(key))
             try:
                 item = dict(cfg)
                 item["group_id"] = str(gid)
+                if platform_id:
+                    item["platform_id"] = platform_id
                 groups.append(GroupConfig(**item))
             except Exception:
-                logger.warning("群配置格式异常，已跳过: %s", gid)
+                logger.warning("群配置格式异常，已跳过: %s", key)
         return groups
 
-    async def remember_group(self, group_id: str, platform_id: Optional[str] = None) -> None:
+    async def remember_group(
+        self,
+        group_id: str,
+        platform_id: Optional[str] = None,
+        umo: Optional[str] = None,
+    ) -> None:
         gid = str(group_id)
+        pid = str(platform_id or "")
+        key = platform_compat.scoped_key(pid, gid)
         now = time.monotonic()
-        # 常见路径：内存缓存新鲜且已注册该群、平台未变化 → 不读 KV、不写 KV。
+        # 常见路径：内存缓存新鲜且已注册该群、会话未变化 → 不读 KV、不写 KV。
         cached = self._groups_cache
         if cached is not None and now - cached[0] < GROUPS_CACHE_TTL_SECONDS:
-            cfg = (cached[1] or {}).get(gid)
-            if isinstance(cfg, dict) and (
-                not platform_id or cfg.get("platform_id") == platform_id
-            ):
+            cfg = (cached[1] or {}).get(key)
+            if isinstance(cfg, dict) and (not umo or cfg.get("umo") == umo):
                 return
         # 未知群/平台变化：读取权威数据后决定是否写回。
         raw = await self._raw_groups(fresh=True)
-        cfg = raw.get(gid)
+        cfg = raw.get(key)
         changed = False
         if isinstance(cfg, dict):
-            if platform_id and cfg.get("platform_id") != platform_id:
-                cfg["platform_id"] = platform_id
+            if pid and cfg.get("platform_id") != pid:
+                cfg["platform_id"] = pid
+                changed = True
+            if umo and cfg.get("umo") != umo:
+                cfg["umo"] = umo
                 changed = True
         else:
-            raw[gid] = {
+            raw[key] = {
                 "group_id": gid,
-                "platform_id": platform_id or "",
+                "platform_id": pid,
+                "umo": umo or "",
                 "activated": False,
                 "enabled": True,
                 "morning_push_time": DEFAULT_MORNING_TIME,
@@ -3007,41 +3036,45 @@ class AcmerGroupBot(Star):
         if changed:
             await self.put_kv_data("groups", raw)
             self._groups_cache = (time.monotonic(), self._clone_groups(raw))
-            logger.info("acmerQQ群机器人 已自动注册群 %s", gid)
+            logger.info("acmerQQ群机器人 已自动注册群 %s（平台 %s）", gid, pid or "?")
 
     # ------------------------------------------------------------------
     # 主动推送（后台定时任务）
     # ------------------------------------------------------------------
-    def _qq_platform_id(self) -> str:
-        """获取 qq_official 平台实例的真实 ID（会话 platform_name）。"""
-        platform_manager = getattr(self.context, "platform_manager", None)
-        for inst in getattr(platform_manager, "platform_insts", []) or []:
-            try:
-                meta = inst.meta()
-            except Exception:
-                continue
-            if getattr(meta, "name", None) == "qq_official":
-                return str(getattr(meta, "id", None) or "qq_official")
-        return "qq_official"
+    def _default_platform_id(self) -> str:
+        """默认平台实例 ID：优先官方族，其次 OneBot；用于旧数据迁移。"""
+        return platform_compat.resolve_platform_id(self.context) or "legacy"
 
-    def _group_scene_ready(self, group_id: str) -> bool:
-        """QQ 主动推送是否就绪：该群在本次运行期间给机器人发过消息。"""
-        platform_manager = getattr(self.context, "platform_manager", None)
-        for inst in getattr(platform_manager, "platform_insts", []) or []:
-            try:
-                meta = inst.meta()
-            except Exception:
-                continue
-            if getattr(meta, "name", None) != "qq_official":
-                continue
-            scene = getattr(inst, "_session_scene", {}).get(str(group_id))
-            if scene == "group":
-                return True
-        return False
+    def _qq_platform_id(self) -> str:
+        """兼容旧调用：解析当前可用平台实例 ID。"""
+        return self._default_platform_id()
+
+    def _session_for(
+        self,
+        group_id: str,
+        platform_id: Optional[str] = None,
+        umo: Optional[str] = None,
+    ):
+        """构造主动发送会话：优先使用持久化的 unified_msg_origin。"""
+        if umo:
+            return str(umo)
+        return MessageSesion(
+            platform_name=platform_id or self._default_platform_id(),
+            message_type=MessageType.GROUP_MESSAGE,
+            session_id=str(group_id),
+        )
+
+    def _group_scene_ready(
+        self, group_id: str, platform_id: Optional[str] = None
+    ) -> bool:
+        """主动推送是否就绪：官方族要求该群发过消息，OneBot 直接放行。"""
+        return platform_compat.scene_ready(
+            self.context, str(group_id), str(platform_id or "")
+        )
 
     async def send_notification(self, group: GroupConfig, text: str) -> bool:
         """发送通知；返回是否发送成功。@全体成员 开启且无权限时自动降级。"""
-        if not self._group_scene_ready(group.group_id):
+        if not self._group_scene_ready(group.group_id, group.platform_id):
             logger.warning(
                 "群 %s 主动推送会话未就绪（本次运行该群还没给机器人发过消息），"
                 "跳过发送；请先让群内发一条消息",
@@ -3049,74 +3082,77 @@ class AcmerGroupBot(Star):
             )
             return False
         settings = await self.get_settings()
-        at_all = bool(settings.get("at_all_enabled", False))
-        blocked_until = await self.get_kv_data(
-            f"at_all_blocked_until_{group.group_id}", 0.0
+        channel = platform_compat.channel_of_platform_id(
+            self.context, group.platform_id
         )
+        at_all = bool(settings.get("at_all_enabled", False))
+        blocked_key = "at_all_blocked_until_" + platform_compat.scoped_key(
+            group.platform_id, group.group_id
+        )
+        blocked_until = await self.get_kv_data(blocked_key, 0.0)
         if at_all and (blocked_until or 0) < time.time():
             sent = await self._post_to_group(
                 group.group_id,
-                "<@everyone>\n" + text,
-                platform_id=group.platform_id or self._qq_platform_id(),
+                text,
+                platform_id=group.platform_id,
+                umo=group.umo,
+                prefix=platform_compat.at_all_prefix(channel),
             )
             if sent:
-                logger.info(
-                    "已向群 %s 提交 @全体成员 标记（QQ 官方群聊实际不生效，"
-                    "仅兼容尝试）",
-                    group.group_id,
-                )
+                logger.info("已向群 %s 提交 @全体成员 标记", group.group_id)
                 return True
             logger.warning(
                 "群 %s 发送 @全体成员 失败，自动降级为普通通知", group.group_id
             )
             await self.put_kv_data(
-                f"at_all_blocked_until_{group.group_id}",
+                blocked_key,
                 time.time() + AT_ALL_BLOCK_SECONDS,
             )
         sent = await self._post_to_group(
-            group.group_id, text, platform_id=group.platform_id or self._qq_platform_id()
+            group.group_id,
+            text,
+            platform_id=group.platform_id,
+            umo=group.umo,
         )
         if sent:
             logger.info("已向群 %s 发送普通通知", group.group_id)
         return sent
 
     async def _post_to_group(
-        self, group_id: str, text: str, platform_id: Optional[str] = None
+        self,
+        group_id: str,
+        text: str,
+        platform_id: Optional[str] = None,
+        umo: Optional[str] = None,
+        prefix: Optional[List[Any]] = None,
     ) -> bool:
-        session = MessageSesion(
-            platform_name=platform_id or self._qq_platform_id(),
-            message_type=MessageType.GROUP_MESSAGE,
-            session_id=str(group_id),
-        )
+        session = self._session_for(group_id, platform_id, umo)
+        prefix_components = list(prefix or [])
         try:
             value = str(text or "").strip()
             await self.get_settings()
             should_render_as_image = self.output_renderer.needs_image(value)
-            chain = MessageChain([Plain(value)])
+            chain = MessageChain(prefix_components + [Plain(value)])
             rendered_as_image = False
             if should_render_as_image:
-                # @everyone 必须保留为独立文本组件，避免被绘制进图片后失去
-                # 平台识别机会；其余长内容作为图片发送。
-                mention_prefix = "<@everyone>\n"
-                render_value = value
-                components = []
-                if value.startswith(mention_prefix):
-                    components.append(Plain(mention_prefix))
-                    render_value = value[len(mention_prefix) :].strip()
                 try:
                     image_path = await self._run_render(
-                        self.output_renderer.render, render_value
+                        self.output_renderer.render, value
                     )
                     if image_path is not None and image_path.is_file():
-                        components.append(Image.fromFileSystem(str(image_path)))
-                        chain = MessageChain(components)
+                        chain = MessageChain(
+                            prefix_components
+                            + [Image.fromFileSystem(str(image_path))]
+                        )
                         rendered_as_image = True
                 except Exception as exc:  # noqa: BLE001 - 长推送必须有文字兜底
                     logger.warning("群 %s 长通知转图片失败：%s", group_id, exc)
 
             if should_render_as_image and not rendered_as_image:
-                # 转图不可用时按安全长度拆分，避免把超长原文直接交给 QQ。
-                ok = await self._send_text_chunks(session, value)
+                # 转图不可用时按安全长度拆分，避免把超长原文直接交给平台。
+                ok = await self._send_text_chunks(
+                    session, value, prefix=prefix_components
+                )
             else:
                 try:
                     ok = await self.context.send_message(session, chain)
@@ -3132,7 +3168,9 @@ class AcmerGroupBot(Star):
                 # 个别适配器可能不接受本地图片组件；回退为原始文字，
                 # 保证主动推送仍然有可见结果。
                 logger.warning("群 %s 图片通知发送失败，回退为文字", group_id)
-                ok = await self._send_text_chunks(session, value)
+                ok = await self._send_text_chunks(
+                    session, value, prefix=prefix_components
+                )
             if not ok:
                 logger.warning("发送到群 %s 失败：未找到匹配平台", group_id)
                 return False
@@ -3141,19 +3179,23 @@ class AcmerGroupBot(Star):
             logger.error("发送到群 %s 失败: %s", group_id, exc)
             return False
 
-    async def _send_text_chunks(self, session, text: str) -> bool:
+    async def _send_text_chunks(
+        self, session, text: str, prefix: Optional[List[Any]] = None
+    ) -> bool:
         """按安全长度发送文字分片，返回是否全部分片成功。
 
         单片失败仍继续尝试剩余分片（提高送达率），并记录精确失败位置，
-        避免把原因都归到“未找到匹配平台”。
+        避免把原因都归到“未找到匹配平台”。prefix 仅加在首个分片前。
         """
+        prefix_components = list(prefix or [])
         pieces = list(text_chunks(text))
         all_ok = True
         total = len(pieces)
         for index, piece in enumerate(pieces, start=1):
+            components = list(prefix_components) if index == 1 else []
             try:
                 ok = await self.context.send_message(
-                    session, MessageChain([Plain(piece)])
+                    session, MessageChain(components + [Plain(piece)])
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -3337,18 +3379,14 @@ class AcmerGroupBot(Star):
         self, group: GroupConfig, image_path, *, caption: str = ""
     ) -> bool:
         """主动向群发送一张图片（用于周榜卡片）；失败返回 False。"""
-        if not self._group_scene_ready(group.group_id):
+        if not self._group_scene_ready(group.group_id, group.platform_id):
             logger.warning(
                 "群 %s 主动推送会话未就绪，跳过图片推送（%s）",
                 group.group_id,
                 caption,
             )
             return False
-        session = MessageSesion(
-            platform_name=group.platform_id or self._qq_platform_id(),
-            message_type=MessageType.GROUP_MESSAGE,
-            session_id=str(group.group_id),
-        )
+        session = self._session_for(group.group_id, group.platform_id, group.umo)
         chain = MessageChain([Image.fromFileSystem(str(image_path))])
         try:
             ok = await self.context.send_message(session, chain)
@@ -4439,7 +4477,11 @@ class AcmerGroupBot(Star):
         async for result in self._adaptive_results(event, "\n".join(parts)):
             yield result
 
-    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+        | filter.PlatformAdapterType.AIOCQHTTP
+    )
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE
         | filter.EventMessageType.PRIVATE_MESSAGE
@@ -4596,22 +4638,29 @@ class AcmerGroupBot(Star):
         if not group_id:
             yield event.plain_result("私聊无需激活，主动推送仅用于群聊")
             return
+        platform_id = str(event.get_platform_id() or "")
         await self.remember_group(
             str(group_id),
-            platform_id=getattr(event.session, "platform_name", None),
+            platform_id=platform_id,
+            umo=str(getattr(event, "unified_msg_origin", "") or ""),
         )
         # 已激活的群：重复发送激活命令不再回复，静默忽略
         current = next(
-            (g for g in await self.get_groups() if g.group_id == str(group_id)),
+            (
+                g
+                for g in await self.get_groups()
+                if g.group_id == str(group_id)
+                and str(g.platform_id or "") == platform_id
+            ),
             None,
         )
         if current is not None and current.activated:
             logger.info("群 %s 已处于激活状态，忽略重复激活命令", group_id)
             return
-        ready = self._group_scene_ready(str(group_id))
+        ready = self._group_scene_ready(str(group_id), platform_id)
         if ready:
-            raw = await self.get_kv_data("groups", {}) or {}
-            cfg = raw.get(str(group_id))
+            raw = await self._raw_groups()
+            cfg = raw.get(platform_compat.scoped_key(platform_id, str(group_id)))
             if isinstance(cfg, dict):
                 cfg["activated"] = True
                 await self.put_kv_data("groups", raw)
@@ -4631,20 +4680,28 @@ class AcmerGroupBot(Star):
     # ------------------------------------------------------------------
     # 群自动注册（只记录，不回复）
     # ------------------------------------------------------------------
-    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+        | filter.PlatformAdapterType.AIOCQHTTP
+    )
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         group_id = event.get_group_id()
         if group_id:
             gid = str(group_id)
-            first_this_run = gid not in self._seen_group_this_run
-            self._seen_group_this_run.add(gid)
+            platform_id = str(event.get_platform_id() or "")
+            key = platform_compat.scoped_key(platform_id, gid)
+            first_this_run = key not in self._seen_group_this_run
+            self._seen_group_this_run.add(key)
             await self.remember_group(
-                gid, platform_id=getattr(event.session, "platform_name", None)
+                gid,
+                platform_id=platform_id,
+                umo=str(getattr(event, "unified_msg_origin", "") or ""),
             )
             if first_this_run:
-                raw = await self.get_kv_data("groups", {}) or {}
-                cfg = raw.get(gid)
+                raw = await self._raw_groups()
+                cfg = raw.get(key)
                 if isinstance(cfg, dict) and cfg.get("activated"):
                     logger.info(
                         "群 %s 已自动重新激活（重启后收到首条消息）", gid
@@ -4661,7 +4718,7 @@ class AcmerGroupBot(Star):
                     "admin_users": await self._get_admins(),
                     "settings": await self.get_settings(),
                     "groups": [g.model_dump() for g in await self.get_groups()],
-                    "platform_id": self._qq_platform_id(),
+                    "platform_id": self._default_platform_id(),
                 },
             }
         )
@@ -4841,11 +4898,12 @@ class AcmerGroupBot(Star):
                     if not isinstance(item, dict) or not item.get("group_id"):
                         continue
                     gid = str(item["group_id"])
+                    pid = str(item.get("platform_id") or "")
                     try:
                         cfg = GroupConfig(group_id=gid, **item)
                     except Exception as exc:
                         raise ValueError(f"群 {gid} 配置不合法：{exc}") from exc
-                    raw[gid] = cfg.model_dump()
+                    raw[platform_compat.scoped_key(pid, gid)] = cfg.model_dump()
                 await self.put_kv_data("groups", raw)
                 self._groups_cache = None
         except ValueError as exc:
@@ -4870,7 +4928,7 @@ class AcmerGroupBot(Star):
             return error_response("该群未注册，请先让群内发一条消息")
         if not group.enabled:
             return error_response("该群已停用推送")
-        if not self._group_scene_ready(group_id):
+        if not self._group_scene_ready(group_id, group.platform_id):
             return error_response(
                 "QQ 主动推送会话未就绪：请先让该群给机器人发一条消息，再点测试推送"
             )

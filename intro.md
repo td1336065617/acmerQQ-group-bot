@@ -41,3 +41,6 @@
 ## 管理员与配置
 - update / 刷新比赛 ─ 强制刷新全部比赛数据（仅管理员）
 - WebUI 配置 ─ 早报时间、推送平台、赛前提醒、赛后赛果、每日一题、周报、牛客赛事范围、转图阈值
+## 支持平台
+- QQ 官方：qq_official / qq_official_webhook
+- QQ 非官方：aiocqhttp（OneBot v11）

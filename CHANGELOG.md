@@ -11,6 +11,23 @@
 
 ## 近期版本
 
+## [1.15.0] - 2026-09-22
+
+> QQ 双通道适配：支持 OneBot v11（aiocqhttp），官方族行为零回归。
+
+### ✨ 新增
+- 新增 platform_compat.py：平台判定、平台实例解析、主动推送就绪判定、@全体适配。
+- 群配置按 platform_id:group_id 作用域存储，并持久化 umo 用于主动推送；旧数据读取时自动迁移。
+
+### ⚙️ 变更
+- support_platforms 增加 qq_official_webhook、aiocqhttp。
+- OneBot 主动推送不受被动窗口限制；@全体使用 At(qq="all")。
+
+### 🧪 真机验证
+- 已用 NapCat（OneBot v11）验证：群配置按 platform_id:group_id 存储、umo 持久化，WebUI 测试推送经 context.send_message(umo) 成功送达。
+
+---
+
 ## [1.14.14] - 2026-09-18
 
 > 🖼️ 提升 \`CARD_FORMAT_VERSION\`（18 → 19）：改了排名文案但没提版本号，**旧卡片图片被缓存复用**，

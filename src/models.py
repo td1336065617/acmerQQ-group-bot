@@ -106,6 +106,7 @@ class GroupConfig(BaseModel):
 
     group_id: str
     platform_id: Optional[str] = None
+    umo: Optional[str] = None
     activated: bool = False
     enabled: bool = True
     morning_push_time: str = "08:00"
