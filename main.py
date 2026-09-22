@@ -212,6 +212,19 @@ ACCOUNT_BIND_USAGE_HINTS = {
     "luogu": ("绑定洛谷", "<洛谷UID>", "个人介绍"),
     "atcoder": ("绑定atcoder", "<AtCoder用户名>", "Affiliation（所属）"),
 }
+#: 绑定/查询指令示例：提示文案里给一个具体例子，降低"该怎么写"的门槛
+ACCOUNT_BIND_EXAMPLES = {
+    "codeforces": "绑定cf jiangly",
+    "nowcoder": "绑定牛客 12345678",
+    "luogu": "绑定洛谷 123456",
+    "atcoder": "绑定atcoder tourist",
+}
+ACCOUNT_LOOKUP_EXAMPLES = {
+    "codeforces": "查询cf jiangly",
+    "nowcoder": "查询牛客 12345678",
+    "luogu": "查询洛谷 123456",
+    "atcoder": "查询atcoder tourist",
+}
 ACCOUNT_CONFIRM_RE = re.compile(
     r"^(?:确认绑定|confirm\s*bind)\s*(cf|codeforces|nk|牛客|nowcoder|"
     r"lg|洛谷|luogu|atc|atcoder)(?:\s+(.+?))?\s*$",
@@ -328,7 +341,8 @@ MENU_TEXT = (
     "╭──────────────╮\n"
     "👥 所有人可用\n"
     "• acmer激活 ─ 首次激活本群主动推送（重启后群内任意消息自动恢复）\n"
-    "• 绑定cf/绑定牛客/绑定洛谷/绑定atcoder ─ 绑定个人竞赛账号\n"
+    "• 绑定cf/绑定牛客/绑定洛谷/绑定atcoder ─ 绑定个人竞赛账号"
+    "（例如：绑定cf jiangly）\n"
     "• 确认绑定/解绑 ─ 完成或解除平台账号绑定\n"
     "• 我的战绩/我的账号 ─ 查看四平台个人战绩卡（群聊显示本群排行）\n"
     "• 我的cf/我的牛客/我的洛谷/我的atcoder ─ 查看单个平台战绩卡（群聊显示本群排行）\n"
@@ -994,6 +1008,8 @@ class AcmerGroupBot(Star):
     def _account_platform_help() -> str:
         return (
             "用法：绑定cf/绑定牛客/绑定洛谷/绑定atcoder <用户名、UID或主页链接>\n"
+            "例如：绑定cf jiangly · 绑定牛客 12345678 · "
+            "绑定洛谷 123456 · 绑定atcoder tourist\n"
             "验证字段：CF 姓氏、牛客个性签名、洛谷个人介绍、"
             "AtCoder Affiliation（所属）"
         )
@@ -1753,7 +1769,12 @@ class AcmerGroupBot(Star):
         example = ACCOUNT_LOOKUP_USAGE_HINTS.get(
             platform, f"查询{platform} <账号>"
         )
-        lines = [f"用法：{example}", "请把账号写在指令后面，不能只发送指令前缀。"]
+        sample = ACCOUNT_LOOKUP_EXAMPLES.get(platform, example)
+        lines = [
+            f"用法：{example}",
+            f"例如：{sample}",
+            "请把账号写在指令后面，不能只发送指令前缀。",
+        ]
         if platform in ACCOUNT_LOOKUP_UID_ONLY:
             lines.append(
                 f"注意：{platform_label(platform)}公开接口不支持用户名查询，"
@@ -4521,8 +4542,12 @@ class AcmerGroupBot(Star):
                     platform,
                     (f"绑定{platform}", "<账号>", "对应公开资料字段"),
                 )
+                sample = ACCOUNT_BIND_EXAMPLES.get(
+                    platform, f"{command} <账号>"
+                )
                 yield event.plain_result(
                     f"用法：{command} {argument_hint}\n"
+                    f"例如：{sample}\n"
                     f"请填写账号后再发送，不能只发送“{command}”。\n"
                     f"绑定后请按提示把验证码追加到【{field}】，"
                     "再发送确认绑定指令。"
@@ -4531,12 +4556,14 @@ class AcmerGroupBot(Star):
         if ACCOUNT_CONFIRM_USAGE_RE.match(raw_message):
             yield event.plain_result(
                 "用法：确认绑定cf/确认绑定牛客/确认绑定洛谷/确认绑定atcoder <验证码>\n"
+                "例如：确认绑定cf ACM-ABCDEFGH\n"
                 "请先发送绑定指令拿到验证码，把它填进对应平台的公开资料字段后再确认。"
             )
             return
         if ACCOUNT_UNBIND_USAGE_RE.match(raw_message):
             yield event.plain_result(
                 "用法：解绑cf / 解绑牛客 / 解绑洛谷 / 解绑atcoder\n"
+                "例如：解绑cf\n"
                 "请带上要解绑的平台名。"
             )
             return
