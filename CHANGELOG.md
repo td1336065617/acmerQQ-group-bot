@@ -11,6 +11,19 @@
 
 ## 近期版本
 
+## [1.15.2] - 2026-09-23
+
+> 🐛 Windows 兼容 + 缓存目录迁出插件代码目录。
+
+### ✨ 新增
+- 浏览器 / 中文字体 / Emoji 字体候选新增 Windows 常见路径（Chrome / Edge / Firefox、msyh.ttc 等、seguiemj.ttf）。
+- 新增 src/plugin_paths.py：缓存统一落在 data/plugin_data/acmer_qq_group_bot/cache/，启动时把旧版写在插件目录 data/ 下的缓存**复制**过来（不删除原文件，可回滚）。
+
+### ⚙️ 变更
+- 缓存目录由「插件代码目录」改为「AstrBot 插件数据目录」，避免 Windows 只读安装位置写入失败、以及插件更新时缓存被清空。
+
+---
+
 ## [1.15.1] - 2026-09-22
 
 > 📝 账号绑定/查询提示补充具体示例，降低上手门槛。

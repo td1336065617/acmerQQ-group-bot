@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from astrbot.api import logger
 
+from .plugin_paths import plugin_cache_dir
+
 
 # QQ 消息不宜发送过长的纯文本；同时限制行数，避免很多短行挤成一条长消息。
 MAX_PLAIN_TEXT_CHARS = 1800
@@ -110,6 +112,56 @@ BUNDLED_EMOJI_FONT = (
     / "fonts"
     / "NotoColorEmoji.ttf"
 )
+
+# Windows 常见浏览器/字体路径。非 Windows 平台上这些路径不存在，
+# shutil.which / Path.is_file 会直接跳过，因此不影响原有行为。
+_WINDOWS_BROWSER_CANDIDATES: Tuple[str, ...] = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Mozilla Firefox\firefox.exe",
+    r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+)
+
+
+def _windows_extra_browsers() -> List[str]:
+    """Windows 下额外尝试的浏览器绝对路径（含用户级 Chrome 安装）。"""
+    items: List[str] = list(_WINDOWS_BROWSER_CANDIDATES)
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        items.insert(
+            0,
+            str(
+                Path(local_appdata)
+                / "Google"
+                / "Chrome"
+                / "Application"
+                / "chrome.exe"
+            ),
+        )
+    return items
+
+
+def _windows_fonts_dir() -> Path:
+    return Path(os.environ.get("WINDIR") or r"C:\Windows") / "Fonts"
+
+
+def _windows_cjk_fonts(bold: bool) -> List[Tuple[str, int]]:
+    """Windows 常见中文字体（路径, TTC face index）。"""
+    fonts = _windows_fonts_dir()
+    names = (
+        ("msyhbd.ttc", "msyh.ttc", "simhei.ttf")
+        if bold
+        else ("msyh.ttc", "simhei.ttf", "simsun.ttc", "Deng.ttf")
+    )
+    return [(str(fonts / name), 0) for name in names]
+
+
+def _windows_emoji_fonts() -> List[str]:
+    """Windows 自带彩色 Emoji 字体。"""
+    return [str(_windows_fonts_dir() / "seguiemj.ttf")]
+
 
 # Chromium、Firefox 与 Pillow 必须使用同一套简体中文字库。只写
 # ``Noto Sans CJK SC`` 而不指定 TTC face 时，Pillow 会默认加载第 0
@@ -221,7 +273,7 @@ class AdaptiveOutputRenderer:
         self.cache_dir = (
             Path(cache_dir)
             if cache_dir is not None
-            else Path(__file__).resolve().parent.parent / "data" / "output_cache"
+            else plugin_cache_dir("output_cache")
         ).expanduser().resolve()
         self.max_chars = 1
         self.max_lines = 1
@@ -457,6 +509,7 @@ class AdaptiveOutputRenderer:
                 "wkhtmltoimage",
             ]
         )
+        candidates.extend(_windows_extra_browsers())
         renderers: List[Tuple[str, str]] = []
         seen = set()
         for candidate in candidates:
@@ -563,6 +616,7 @@ class AdaptiveOutputRenderer:
                 ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
                 ("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", 0),
             ]
+        candidates.extend(_windows_cjk_fonts(bold))
         for path, index in candidates:
             if Path(path).is_file():
                 return path, index
@@ -645,6 +699,7 @@ class AdaptiveOutputRenderer:
             "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/opentype/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+            *_windows_emoji_fonts(),
         ):
             if Path(path).is_file():
                 return path, 0

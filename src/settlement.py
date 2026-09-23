@@ -34,6 +34,7 @@ from urllib.parse import urlencode
 from astrbot.api import logger
 
 from .models import Contest
+from .plugin_paths import plugin_cache_root
 
 SETTLE_PLATFORMS = ("codeforces", "atcoder", "nowcoder", "luogu")
 #: 卡片每平台最多展示的行数（与渲染层一致）
@@ -300,7 +301,7 @@ class SettlementService:
                 return fetcher.index_path().parent / RECENT_CONTEST_FILE
             except Exception:  # noqa: BLE001 - 回退到插件 data 目录
                 pass
-        return Path(__file__).resolve().parent.parent / "data" / RECENT_CONTEST_FILE
+        return plugin_cache_root() / RECENT_CONTEST_FILE
 
     # ------------------------------------------------------------------
     # 对外入口

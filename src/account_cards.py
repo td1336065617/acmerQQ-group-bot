@@ -25,8 +25,10 @@ from .models import CN_TZ
 from .output_renderer import (
     OUTPUT_CACHE_MAX_BYTES,
     AdaptiveOutputRenderer,
+    _windows_cjk_fonts,
     prune_cache_dir,
 )
+from .plugin_paths import plugin_cache_dir
 
 CARD_FORMAT_VERSION = 19
 CARD_WIDTH = 1200
@@ -824,9 +826,7 @@ class AccountCardRenderer:
         self.cache_dir = (
             Path(cache_dir)
             if cache_dir is not None
-            else Path(__file__).resolve().parent.parent
-            / "data"
-            / "account_cards"
+            else plugin_cache_dir("account_cards")
         ).expanduser().resolve()
         self.avatar_cache_dir = self.cache_dir / "avatars"
         self._lock = threading.Lock()
@@ -2672,6 +2672,7 @@ class AccountCardRenderer:
                     0,
                 ),
             ]
+        candidates.extend(_windows_cjk_fonts(bold))
         for path, index in candidates:
             if Path(path).is_file():
                 return path, index

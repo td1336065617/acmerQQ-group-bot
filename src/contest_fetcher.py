@@ -18,6 +18,7 @@ import aiohttp
 from astrbot.api import logger
 
 from .models import CN_TZ, Contest, DEFAULT_PLATFORMS, PLATFORM_LABELS
+from .plugin_paths import plugin_cache_root
 try:
     from .models import OfflineContest
 except ImportError:  # 兼容旧版本文件未同步完成的临时状态
@@ -148,7 +149,7 @@ class ContestFetcher:
         self._warm_backoff: Dict[str, Tuple[float, int]] = {}
         self._cache_loaded = False
         self.cache_path = Path(cache_path) if cache_path else (
-            Path(__file__).resolve().parent.parent / "data" / CACHE_FILE_NAME
+            plugin_cache_root() / CACHE_FILE_NAME
         )
         self.session: Optional[aiohttp.ClientSession] = None
 

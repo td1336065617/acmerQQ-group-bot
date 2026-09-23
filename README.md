@@ -19,7 +19,7 @@ XCPC Link（线下赛）
    自适应输出：短内容发文字，长内容转 PNG 图片
 ```
 
-- **版本**：1.15.1 ｜ **支持平台**：`qq_official` / `qq_official_webhook`（QQ 官方）+ `aiocqhttp`（OneBot v11） ｜ **AstrBot**：`>=4.13.0,<5` ｜ **许可**：MIT
+- **版本**：1.15.2 ｜ **支持平台**：`qq_official` / `qq_official_webhook`（QQ 官方）+ `aiocqhttp`（OneBot v11） ｜ **AstrBot**：`>=4.13.0,<5` ｜ **许可**：MIT
 
 ---
 
@@ -299,3 +299,21 @@ acmer_qq_group_bot/
 ## 免责声明
 
 本插件通过各平台公开接口与页面工作，赛程、Rating、排名等数据均来自第三方，可能因平台调整接口、限流或页面改版而暂时不可用或显示不完整。请遵守各平台的使用条款与所在群的管理规范；因数据误差、推送失败或平台策略变化产生的后果由使用者自行承担。本项目采用 MIT 许可，详见 [LICENSE](LICENSE)。
+
+---
+
+## Windows 支持
+
+Windows 上 Chromium / Firefox 通常不在 PATH，插件已内置常见安装路径探测
+（Chrome / Edge / Firefox），并内置 Windows 系统字体（微软雅黑 / 黑体 / 宋体 / 等线）
+与 Emoji 字体（Segoe UI Emoji）。
+
+若仍拿不到图片，可显式指定（不改代码）：
+
+```bat
+set ACMER_QQ_BOT_RENDERER=C:\Program Files\Google\Chrome\Application\chrome.exe
+set ACMER_QQ_BOT_FONT=C:\Windows\Fonts\msyh.ttc
+set ACMER_QQ_BOT_FONT_INDEX=0
+```
+
+> 缓存与数据库位置：`data/plugin_data/acmer_qq_group_bot/`（不再写入插件代码目录）。

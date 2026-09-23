@@ -35,6 +35,7 @@ from .src.contest_fetcher import (
     NOWCODER_SCOPES,
     ContestFetcher,
 )
+from .src.plugin_paths import migrate_known_caches, plugin_cache_dir
 from .src.rank_service import RankService
 from .src.settlement import SETTLE_PLATFORMS, SettlementService
 from .src.problem_service import ProblemService, weak_tags_from_analysis
@@ -446,10 +447,10 @@ class AcmerGroupBot(Star):
         self.account_fetcher = AccountFetcher()
         self.account_registry = AccountRegistry(self)
         self.account_card_renderer = AccountCardRenderer(
-            cache_dir=Path(__file__).resolve().parent / "data" / "account_cards"
+            cache_dir=plugin_cache_dir("account_cards")
         )
         self.output_renderer = AdaptiveOutputRenderer(
-            cache_dir=Path(__file__).resolve().parent / "data" / "output_cache"
+            cache_dir=plugin_cache_dir("output_cache")
         )
         self.scheduler = PushScheduler(self)
         self.rank_service = RankService(self)
@@ -494,6 +495,9 @@ class AcmerGroupBot(Star):
             logger.error("注册 Web API 失败: %s", exc)
 
     async def initialize(self) -> None:
+        migrated = migrate_known_caches()
+        if migrated:
+            logger.info("已把 %d 项旧缓存迁移到插件数据目录", migrated)
         await self.fetcher.initialize()
         # 后台预热 CF 全站榜单：全量榜单约 115 秒，不能放在用户查询路径里等。
         async def _warm_cf_rank_list() -> None:
