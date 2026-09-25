@@ -955,3 +955,535 @@ def test_bare_confirm_and_unbind_reply_with_usage():
     assert not m.ACCOUNT_UNBIND_USAGE_RE.match("解绑cf")
     assert m.ACCOUNT_CONFIRM_RE.match("确认绑定cf")
     assert m.ACCOUNT_UNBIND_RE.match("解绑cf")
+
+
+# ---------------------------------------------------------------------------
+# 管理员 @代绑定
+# ---------------------------------------------------------------------------
+def _admin_bind_mention_event(
+    message_str,
+    *,
+    mention_id="target-openid",
+    username="被绑定用户",
+    group_id="group-1",
+    self_id="",
+):
+    mention = types.SimpleNamespace(
+        member_openid=mention_id, username=username, is_you=False
+    )
+    raw = types.SimpleNamespace(
+        mentions=[mention], content=message_str, self_id=self_id
+    )
+    return FakeEvent(
+        group_id=group_id,
+        message_str=message_str,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id=self_id),
+    )
+
+
+def _admin_bind_bot(main_module, *, old_accounts=None, save=None):
+    """构造只带代绑定所需桩件的 bot。"""
+
+    class Registry:
+        async def get_user_accounts(self, user_id):
+            return dict(old_accounts or {})
+
+        async def save_binding(self, user_id, platform, profile, **kwargs):
+            if save is not None:
+                save(user_id, platform, profile, kwargs)
+
+    class Fetcher:
+        async def get_profile(self, platform, identifier, **kwargs):
+            raise AssertionError("该用例不应触发抓取")
+
+    bot = main_module.AcmerGroupBot.__new__(main_module.AcmerGroupBot)
+    bot.account_registry = Registry()
+    bot.account_fetcher = Fetcher()
+    return bot
+
+
+def _admin_bind_profile(main_module, handle="jiangly"):
+    return AccountProfile(
+        platform="codeforces",
+        handle=handle,
+        platform_user_id=handle,
+        display_name=handle,
+    )
+
+
+def test_admin_bind_parses_official_mention():
+    m = _load_main_module()
+    event = _admin_bind_mention_event("<@target-openid> 绑定cf demo")
+    bind = m.AcmerGroupBot._mentioned_admin_bind(event, event.message_str)
+    assert bind == {
+        "user_id": "target-openid",
+        "display_name": "被绑定用户",
+        "platform": "codeforces",
+        "identifier": "demo",
+    }
+
+
+def test_admin_bind_accepts_explicit_dai_prefix():
+    m = _load_main_module()
+    event = _admin_bind_mention_event("<@target-openid> 代绑定牛客 12345678")
+    bind = m.AcmerGroupBot._mentioned_admin_bind(event, event.message_str)
+    assert bind is not None
+    assert bind["platform"] == "nowcoder"
+    assert bind["identifier"] == "12345678"
+
+
+def test_admin_bind_parses_at_component_channel():
+    m = _load_main_module()
+
+    class At:
+        type = "at"
+        qq = "target-qq"
+        name = "群友"
+        is_you = False
+
+    event = FakeEvent(group_id="group-1", message_str="绑定cf demo")
+    event.get_messages = lambda: [At()]
+    event.message_obj = types.SimpleNamespace(
+        raw_message=types.SimpleNamespace(content=""), self_id=""
+    )
+    bind = m.AcmerGroupBot._mentioned_admin_bind(event, "绑定cf demo")
+    assert bind == {
+        "user_id": "target-qq",
+        "display_name": "群友",
+        "platform": "codeforces",
+        "identifier": "demo",
+    }
+
+
+def test_admin_bind_parses_cq_text_channel():
+    m = _load_main_module()
+    text = "[CQ:at,qq=998877] 代绑定洛谷 123456"
+    event = FakeEvent(group_id="group-1", message_str=text)
+    event.message_obj = types.SimpleNamespace(
+        raw_message=types.SimpleNamespace(
+            content=text, mentions=[], self_id=""
+        )
+    )
+    bind = m.AcmerGroupBot._mentioned_admin_bind(event, text)
+    assert bind == {
+        "user_id": "998877",
+        "display_name": "",
+        "platform": "luogu",
+        "identifier": "123456",
+    }
+
+
+def test_admin_bind_ignores_at_all():
+    m = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="all", username="全体成员", is_you=False
+    )
+    raw = types.SimpleNamespace(
+        mentions=[mention], content="<@all> 绑定cf demo", self_id=""
+    )
+    event = FakeEvent(
+        group_id="group-1",
+        message_str="<@all> 绑定cf demo",
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id=""),
+    )
+    assert (
+        m.AcmerGroupBot._mentioned_admin_bind(event, event.message_str) is None
+    )
+
+
+def test_admin_bind_rejects_multiple_mentions():
+    m = _load_main_module()
+    mentions = [
+        types.SimpleNamespace(member_openid="u1", username="用户1", is_you=False),
+        types.SimpleNamespace(member_openid="u2", username="用户2", is_you=False),
+    ]
+    text = "<@u1> <@u2> 绑定cf demo"
+    raw = types.SimpleNamespace(mentions=mentions, content=text, self_id="")
+    event = FakeEvent(
+        group_id="group-1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id=""),
+    )
+    assert m.AcmerGroupBot._mentioned_admin_bind(event, text) is None
+
+
+def test_admin_bind_ignores_bot_itself():
+    m = _load_main_module()
+    mention = types.SimpleNamespace(
+        member_openid="bot-openid", username="机器人", is_you=False
+    )
+    text = "<@bot-openid> 绑定cf demo"
+    raw = types.SimpleNamespace(mentions=[mention], content=text, self_id="bot-openid")
+    event = FakeEvent(
+        group_id="group-1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="bot-openid"),
+    )
+    assert m.AcmerGroupBot._mentioned_admin_bind(event, text) is None
+
+
+def test_admin_bind_usage_has_empty_identifier():
+    m = _load_main_module()
+    event = _admin_bind_mention_event("<@target-openid> 绑定cf")
+    bind = m.AcmerGroupBot._mentioned_admin_bind(event, event.message_str)
+    assert bind is not None
+    assert bind["platform"] == "codeforces"
+    assert bind["identifier"] == ""
+
+
+def test_admin_bind_does_not_steal_profile_mention():
+    m = _load_main_module()
+    event = _admin_bind_mention_event("<@target-openid> 战绩")
+    assert m.AcmerGroupBot._mentioned_admin_bind(event, event.message_str) is None
+    assert (
+        m.AcmerGroupBot._mentioned_profile_target(event, event.message_str)
+        is not None
+    )
+
+
+def test_plain_self_bind_is_not_treated_as_admin_bind():
+    m = _load_main_module()
+    event = FakeEvent(group_id="group-1", message_str="绑定cf demo")
+    event.message_obj = types.SimpleNamespace(
+        raw_message=types.SimpleNamespace(
+            content="绑定cf demo", mentions=[], self_id=""
+        )
+    )
+    assert m.AcmerGroupBot._mentioned_admin_bind(event, "绑定cf demo") is None
+    assert m.ACCOUNT_BIND_RE.match("绑定cf demo")
+
+
+def test_admin_bind_rejects_group_owner_without_backend_admin():
+    """群主/群管理员不在后台 admin_users 时，一律拒绝且不抓取、不写库。"""
+    m = _load_main_module()
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+
+    async def get_kv_data(key, default=None):
+        return []
+
+    bot.get_kv_data = get_kv_data
+    calls = []
+
+    class Fetcher:
+        async def get_profile(self, *args, **kwargs):
+            calls.append("fetch")
+            raise AssertionError("非后台管理员不得抓取")
+
+    class Registry:
+        async def save_binding(self, *args, **kwargs):
+            calls.append("save")
+
+    bot.account_fetcher = Fetcher()
+    bot.account_registry = Registry()
+
+    for role in ("owner", "admin"):
+        event = FakeEvent(group_id="group-1")
+        event.get_sender_id = lambda: "group-owner-qq"
+        event.get_platform_id = lambda: "aiocqhttp"
+        event.message_obj = types.SimpleNamespace(
+            sender=types.SimpleNamespace(role=role)
+        )
+        results = _collect(
+            bot._reply_admin_bind(
+                event,
+                {
+                    "user_id": "target",
+                    "display_name": "目标",
+                    "platform": "codeforces",
+                    "identifier": "demo",
+                },
+            )
+        )
+        assert results == ["此指令仅限管理员"]
+
+    assert calls == []
+
+
+def test_admin_bind_allows_backend_admin_entry():
+    m = _load_main_module()
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+
+    async def get_kv_data(key, default=None):
+        return ["aiocqhttp:owner-qq"]
+
+    bot.get_kv_data = get_kv_data
+    saved = []
+
+    class Registry:
+        async def get_user_accounts(self, user_id):
+            return {}
+
+        async def save_binding(self, user_id, platform, profile, **kwargs):
+            saved.append((user_id, platform, profile.handle, kwargs))
+
+    class Fetcher:
+        async def get_profile(self, platform, identifier, **kwargs):
+            return AccountProfile(
+                platform="codeforces",
+                handle="demo",
+                platform_user_id="demo",
+            )
+
+    bot.account_registry = Registry()
+    bot.account_fetcher = Fetcher()
+    bot._invalidate_all_rank_cache = lambda: None
+
+    async def record(uid, profile):
+        return None
+
+    bot._record_profile_metric = record
+
+    event = FakeEvent(group_id="group-1")
+    event.get_sender_id = lambda: "owner-qq"
+    event.get_platform_id = lambda: "aiocqhttp"
+    event.message_obj = types.SimpleNamespace(
+        sender=types.SimpleNamespace(role="owner")
+    )
+    results = _collect(
+        bot._reply_admin_bind(
+            event,
+            {
+                "user_id": "target",
+                "display_name": "目标",
+                "platform": "codeforces",
+                "identifier": "demo",
+            },
+        )
+    )
+    assert saved == [
+        (
+            "target",
+            "codeforces",
+            "demo",
+            {"group_id": "group-1", "qq_name": "目标"},
+        )
+    ]
+    assert results and "管理员代绑定" in results[0]
+
+
+def test_admin_bind_saves_target_with_target_nickname_and_group():
+    m = _load_main_module()
+    captured = {}
+
+    def save(user_id, platform, profile, kwargs):
+        captured["user_id"] = user_id
+        captured["platform"] = platform
+        captured["handle"] = profile.handle
+        captured.update(kwargs)
+
+    bot = _admin_bind_bot(m, save=save)
+    profile = _admin_bind_profile(m)
+
+    class Fetcher:
+        async def get_profile(self, platform, identifier, **kwargs):
+            captured["fetched"] = (platform, identifier)
+            return profile
+
+    bot.account_fetcher = Fetcher()
+
+    async def is_admin(event):
+        return True
+
+    bot._is_admin = is_admin
+    invalidated = []
+    bot._invalidate_all_rank_cache = lambda: invalidated.append(True)
+    recorded = {}
+
+    async def record(uid, prof):
+        recorded["uid"] = uid
+
+    bot._record_profile_metric = record
+
+    event = FakeEvent(group_id="group-1")
+    results = _collect(
+        bot._reply_admin_bind(
+            event,
+            {
+                "user_id": "target-openid",
+                "display_name": "被绑定用户",
+                "platform": "codeforces",
+                "identifier": "jiangly",
+            },
+        )
+    )
+
+    assert captured == {
+        "user_id": "target-openid",
+        "platform": "codeforces",
+        "handle": "jiangly",
+        "group_id": "group-1",
+        "qq_name": "被绑定用户",
+        "fetched": ("codeforces", "jiangly"),
+    }
+    assert invalidated == [True]
+    assert recorded["uid"] == "target-openid"
+    assert results and "被绑定用户" in results[0] and "jiangly" in results[0]
+
+
+def test_admin_bind_reports_replaced_previous_binding():
+    m = _load_main_module()
+    bot = _admin_bind_bot(
+        m,
+        old_accounts={"codeforces": {"handle": "old-cf"}},
+        save=lambda *a, **k: None,
+    )
+
+    class Fetcher:
+        async def get_profile(self, platform, identifier, **kwargs):
+            return _admin_bind_profile(m, handle="new-cf")
+
+    bot.account_fetcher = Fetcher()
+
+    async def is_admin(event):
+        return True
+
+    bot._is_admin = is_admin
+    bot._invalidate_all_rank_cache = lambda: None
+
+    async def record(uid, prof):
+        return None
+
+    bot._record_profile_metric = record
+
+    event = FakeEvent(group_id="group-1")
+    results = _collect(
+        bot._reply_admin_bind(
+            event,
+            {
+                "user_id": "target",
+                "display_name": "目标",
+                "platform": "codeforces",
+                "identifier": "new-cf",
+            },
+        )
+    )
+    assert "已替换原有绑定：old-cf" in results[0]
+
+
+def test_admin_bind_conflict_message_and_no_cache_invalidation():
+    m = _load_main_module()
+    saved = []
+
+    class Registry:
+        async def get_user_accounts(self, user_id):
+            return {}
+
+        async def save_binding(self, *args, **kwargs):
+            saved.append(True)
+            raise ValueError("这个平台账号已经绑定到其他 QQ 用户")
+
+    class Fetcher:
+        async def get_profile(self, platform, identifier, **kwargs):
+            return _admin_bind_profile(m)
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    bot.account_registry = Registry()
+    bot.account_fetcher = Fetcher()
+
+    async def is_admin(event):
+        return True
+
+    bot._is_admin = is_admin
+    invalidated = []
+    bot._invalidate_all_rank_cache = lambda: invalidated.append(True)
+
+    event = FakeEvent(group_id="group-1")
+    results = _collect(
+        bot._reply_admin_bind(
+            event,
+            {
+                "user_id": "target",
+                "display_name": "目标",
+                "platform": "codeforces",
+                "identifier": "demo",
+            },
+        )
+    )
+    assert saved == [True]
+    assert "已经绑定到其他 QQ 用户" in results[0]
+    assert invalidated == []
+
+
+def test_admin_bind_fetch_error_never_saves():
+    m = _load_main_module()
+    saved = []
+
+    class Registry:
+        async def get_user_accounts(self, user_id):
+            return {}
+
+        async def save_binding(self, *args, **kwargs):
+            saved.append(True)
+
+    class Fetcher:
+        async def get_profile(self, platform, identifier, **kwargs):
+            raise AccountFetchError(
+                "Codeforces 用户名或主页链接格式不正确", temporary=False
+            )
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    bot.account_registry = Registry()
+    bot.account_fetcher = Fetcher()
+
+    async def is_admin(event):
+        return True
+
+    bot._is_admin = is_admin
+
+    event = FakeEvent(group_id="group-1")
+    results = _collect(
+        bot._reply_admin_bind(
+            event,
+            {
+                "user_id": "target",
+                "display_name": "目标",
+                "platform": "codeforces",
+                "identifier": "not a handle",
+            },
+        )
+    )
+    assert saved == []
+    assert "格式不正确" in results[0]
+
+
+def test_admin_bind_usage_reply_has_no_write():
+    m = _load_main_module()
+    saved = []
+    bot = _admin_bind_bot(m, save=lambda *a, **k: saved.append(True))
+
+    async def is_admin(event):
+        return True
+
+    bot._is_admin = is_admin
+
+    event = FakeEvent(group_id="group-1")
+    results = _collect(
+        bot._reply_admin_bind(
+            event,
+            {
+                "user_id": "target",
+                "display_name": "目标",
+                "platform": "codeforces",
+                "identifier": "",
+            },
+        )
+    )
+    assert saved == []
+    assert results and "用法" in results[0]
+
+
+def test_on_message_routes_mention_to_admin_bind():
+    m = _load_main_module()
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_reply(event, bind):
+        calls.append(bind)
+        yield "绑定完成"
+
+    bot._reply_admin_bind = fake_reply
+    event = _admin_bind_mention_event("<@target-openid> 绑定cf demo")
+    results = _collect(bot.on_message(event))
+    assert results == ["绑定完成"]
+    assert calls and calls[0]["user_id"] == "target-openid"
+    assert calls[0]["identifier"] == "demo"

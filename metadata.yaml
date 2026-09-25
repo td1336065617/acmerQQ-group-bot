@@ -4,11 +4,11 @@ short_desc: ACM 竞赛信息查询与定时推送
 desc: |
   提供牛客、Codeforces、AtCoder、洛谷比赛查询与定时推送（牛客按 OJ 归属收录全部赛事）；
   支持 XCPC Link 线下赛查询、四平台账号绑定、个人战绩卡、群排行、
-  按用户名/UID 查询未绑定用户战绩卡、
+  管理员 @代绑定（仅后台 admin_users）、按用户名/UID 查询未绑定用户战绩卡、
   每日早报、赛前 15 分钟提醒、赛后赛果、群训练周报、牛客报名截止提醒与 WebUI 配置。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
   支持 QQ 官方机器人（qq_official / qq_official_webhook）与 OneBot v11（aiocqhttp）。
-version: 1.15.2
+version: 1.16.0
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot/tree/master
 astrbot_version: ">=4.13.0,<5"

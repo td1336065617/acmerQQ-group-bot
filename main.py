@@ -207,6 +207,19 @@ ACCOUNT_BIND_USAGE_RE = re.compile(
     r"atc|atcoder)\s*$",
     re.I,
 )
+#: 管理员 @代绑定：@ 一个成员 + 绑定指令，跳过验证码直接写入目标名下。
+#: 允许显式“代”前缀（@某人 代绑定cf xxx），也允许与自助绑定同词
+#: （@某人 绑定cf xxx）——靠“恰好一个非机器人被 @ + 发送者是后台管理员”区分。
+ADMIN_BIND_RE = re.compile(
+    r"^(?:代\s*)?(?:绑定|bind)\s*(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|luogu|"
+    r"atc|atcoder)\s+(.+?)\s*$",
+    re.I,
+)
+ADMIN_BIND_USAGE_RE = re.compile(
+    r"^(?:代\s*)?(?:绑定|bind)\s*(cf|codeforces|nk|牛客|nowcoder|lg|洛谷|luogu|"
+    r"atc|atcoder)\s*$",
+    re.I,
+)
 ACCOUNT_BIND_USAGE_HINTS = {
     "codeforces": ("绑定cf", "<Codeforces用户名>", "姓氏（Last name）"),
     "nowcoder": ("绑定牛客", "<牛客用户ID>", "个性签名"),
@@ -369,6 +382,8 @@ MENU_TEXT = (
     "╰──────────────╯\n"
     "🌙 仅管理员\n"
     "• update / 刷新比赛 ─ 强制刷新全部比赛数据\n"
+    "• @某人 绑定cf/牛客/洛谷/atcoder <账号> ─ 管理员代绑定"
+    "（跳过验证码，仅后台管理员）\n"
     "╭──────────────╮\n"
     "提示：指令为全匹配，发送完整指令才会触发；也可带 / 前缀（如 /nk比赛）\n"
     "⚙️ 推送配置（早报/提醒/@全体/长消息转图）：WebUI acmerQQ群机器人 页\n"
@@ -866,14 +881,14 @@ class AcmerGroupBot(Star):
         return ""
 
     @classmethod
-    def _mentioned_profile_target(
+    def _collect_mention_targets(
         cls,
         event: AstrMessageEvent,
-        raw_message: str,
-    ) -> Optional[dict]:
-        """识别“@某人”资料卡查询，要求只有一个非机器人的被 @ 用户。"""
+        raw_message: str = "",
+    ) -> List[dict]:
+        """收集群内被 @ 的成员（去重、排除机器人、排除 @全体）；私聊返回 []。"""
         if not str(event.get_group_id() or "").strip():
-            return None
+            return []
 
         message_obj = getattr(event, "message_obj", None)
         raw = getattr(message_obj, "raw_message", None)
@@ -883,7 +898,7 @@ class AcmerGroupBot(Star):
         elif not isinstance(mentions, (list, tuple)):
             mentions = []
 
-        targets = []
+        targets: List[dict] = []
         seen_ids = set()
         self_ids = cls._self_id_candidates(event, message_obj, raw)
         for mention in mentions:
@@ -948,17 +963,21 @@ class AcmerGroupBot(Star):
                     continue
                 if target_id.casefold() in self_ids:
                     continue
+                if target_id.casefold() in {"all", "everyone"}:
+                    continue
                 seen_ids.add(target_id)
                 targets.append(
                     {"user_id": target_id, "display_name": ""}
                 )
 
-        if len(targets) != 1:
-            return None
+        return targets
 
+    @staticmethod
+    def _strip_mention_text(raw_message: str, target: dict) -> str:
+        """剥离被 @ 目标的各通道表示，返回剩余文本（保留大小写）。"""
         remaining = str(raw_message or "")
-        for target in targets:
-            user_id = target["user_id"]
+        user_id = str(target.get("user_id") or "")
+        if user_id:
             remaining = re.sub(
                 rf"<@!?{re.escape(user_id)}>",
                 " ",
@@ -971,23 +990,73 @@ class AcmerGroupBot(Star):
                 remaining,
                 flags=re.I,
             )
-            display_name = str(target.get("display_name") or "").strip()
-            if display_name:
-                remaining = re.sub(
-                    rf"@{re.escape(display_name)}",
-                    " ",
-                    remaining,
-                    flags=re.I,
-                )
+        display_name = str(target.get("display_name") or "").strip()
+        if display_name:
+            remaining = re.sub(
+                rf"@{re.escape(display_name)}",
+                " ",
+                remaining,
+                flags=re.I,
+            )
         remaining = re.sub(r"\[At:[^\]]+\]", " ", remaining, flags=re.I)
-        remaining = re.sub(r"\s+", " ", remaining).strip()
-        command = normalize_command(remaining)
+        return re.sub(r"\s+", " ", remaining).strip()
+
+    @classmethod
+    def _mentioned_profile_target(
+        cls,
+        event: AstrMessageEvent,
+        raw_message: str,
+    ) -> Optional[dict]:
+        """识别“@某人”资料卡查询，要求只有一个非机器人的被 @ 用户。"""
+        targets = cls._collect_mention_targets(event, raw_message)
+        if len(targets) != 1:
+            return None
+        command = normalize_command(
+            cls._strip_mention_text(raw_message, targets[0])
+        )
         # "我的战绩/我的账号"即使 @ 了别人也只查自己，不能走"查他人"分支
         if command in SELF_ONLY_PROFILE_COMMANDS:
             return None
         if command not in MENTION_PROFILE_COMMANDS:
             return None
         return targets[0]
+
+    @classmethod
+    def _mentioned_admin_bind(
+        cls,
+        event: AstrMessageEvent,
+        raw_message: str,
+    ) -> Optional[dict]:
+        """识别“@某人 绑定/代绑定<平台> <账号>”；非该形态返回 None。"""
+        targets = cls._collect_mention_targets(event, raw_message)
+        if len(targets) != 1:
+            return None
+        remaining = cls._strip_mention_text(raw_message, targets[0])
+
+        match = ADMIN_BIND_RE.match(remaining)
+        if match:
+            platform = normalize_platform(match.group(1))
+            if not platform:
+                return None
+            return {
+                "user_id": targets[0]["user_id"],
+                "display_name": targets[0]["display_name"],
+                "platform": platform,
+                "identifier": match.group(2).strip(),
+            }
+
+        usage = ADMIN_BIND_USAGE_RE.match(remaining)
+        if usage:
+            platform = normalize_platform(usage.group(1))
+            if not platform:
+                return None
+            return {
+                "user_id": targets[0]["user_id"],
+                "display_name": targets[0]["display_name"],
+                "platform": platform,
+                "identifier": "",
+            }
+        return None
 
     @staticmethod
     def _self_id_candidates(event, message_obj, raw) -> set:
@@ -1572,6 +1641,138 @@ class AcmerGroupBot(Star):
             f"修改完成后发送：{confirm_command}{group_hint}\n"
             "验证码 10 分钟内有效，验证成功后可以删除。"
         )
+
+    async def _reply_admin_bind(
+        self,
+        event: AstrMessageEvent,
+        bind: dict,
+    ):
+        # 授权口径：只认后台 admin_users；QQ 群主/群管理员角色一律不认。
+        if not await self._is_admin(event):
+            yield event.plain_result("此指令仅限管理员")
+            return
+
+        target_user_id = str(bind.get("user_id") or "").strip()
+        platform = str(bind.get("platform") or "")
+        identifier = str(bind.get("identifier") or "").strip()
+        target_display_name = str(bind.get("display_name") or "").strip()
+        target_label = (
+            f"@{target_display_name}" if target_display_name else "该成员"
+        )
+        if not target_user_id:
+            yield event.plain_result("无法识别被 @ 的成员，请重新发送")
+            return
+        if platform not in ACCOUNT_PLATFORMS:
+            yield event.plain_result("不支持的平台")
+            return
+
+        if not identifier:
+            command, argument_hint, _ = ACCOUNT_BIND_USAGE_HINTS.get(
+                platform,
+                (f"绑定{platform}", "<账号>", "对应公开资料字段"),
+            )
+            sample = ACCOUNT_BIND_EXAMPLES.get(
+                platform, f"{command} <账号>"
+            )
+            yield event.plain_result(
+                f"用法：{target_label} {command} {argument_hint}\n"
+                f"例如：{target_label} {sample}"
+            )
+            return
+
+        group_id = str(event.get_group_id() or "").strip()
+
+        # 管理员代操作，跳过验证码：只抓公开资料，不读验证字段。
+        try:
+            profile = await self.account_fetcher.get_profile(
+                platform,
+                identifier,
+                detail=False,
+                force=True,
+            )
+        except AccountFetchError as exc:
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - 抓取异常不能把堆栈抛进群
+            logger.warning(
+                "管理员代绑定抓取 %s 资料失败：%s",
+                platform_label(platform),
+                exc,
+            )
+            yield event.plain_result(self._account_error_text(platform, exc))
+            return
+
+        # 仅用于“已替换”提示；不参与冲突判断（冲突交给原子写）。
+        old_handle = ""
+        try:
+            accounts = await self.account_registry.get_user_accounts(
+                target_user_id
+            )
+            record = accounts.get(platform)
+            if isinstance(record, dict):
+                old_handle = str(
+                    record.get("handle")
+                    or record.get("platform_user_id")
+                    or ""
+                )
+        except Exception as exc:  # noqa: BLE001 - 提示失败不影响绑定
+            logger.warning(
+                "读取 %s 原有绑定失败：%s", target_user_id, exc
+            )
+
+        try:
+            await self.account_registry.save_binding(
+                target_user_id,
+                platform,
+                profile,
+                group_id=group_id or None,
+                qq_name=target_display_name,
+            )
+        except ValueError:
+            unbind_command = self._account_bind_command(platform).replace(
+                "绑定", "解绑", 1
+            )
+            yield event.plain_result(
+                f"⚠️ 这个{platform_label(platform)}账号已经绑定到其他 QQ 用户，"
+                "无法代绑定。\n"
+                f"如需变更，请先让原绑定者发送：{unbind_command}"
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - 存储故障要有用户可见反馈
+            logger.error("管理员代绑定保存失败：%s", exc, exc_info=True)
+            yield event.plain_result("⚠️ 绑定保存失败，请稍后重试")
+            return
+
+        self._invalidate_all_rank_cache()
+        try:
+            await self._record_profile_metric(target_user_id, profile)
+        except Exception as exc:  # noqa: BLE001 - 快照失败不阻断绑定
+            logger.warning(
+                "代绑定记录 %s 的评分快照失败：%s", target_user_id, exc
+            )
+
+        logger.info(
+            "管理员代绑定成功 admin=%s group=%s target=%s platform=%s handle=%s",
+            str(event.get_sender_id() or ""),
+            group_id,
+            target_user_id,
+            platform,
+            profile.handle,
+        )
+
+        lines = [
+            f"✅ 已将 {target_label} 绑定 {platform_label(platform)} 账号 "
+            f"{profile.handle}（管理员代绑定）"
+        ]
+        if old_handle and old_handle.casefold() != str(
+            profile.handle or ""
+        ).casefold():
+            lines.append(f"已替换原有绑定：{old_handle}")
+        if group_id:
+            lines.append("已自动加入本群竞赛排行。")
+        else:
+            lines.append("目标在群内发送一次“我的战绩”即可加入该群排行。")
+        yield event.plain_result("\n".join(lines))
 
     async def _reply_account_confirm(
         self,
@@ -4525,6 +4726,11 @@ class AcmerGroupBot(Star):
                 target_user_id=mention_target["user_id"],
                 target_display_name=mention_target["display_name"],
             ):
+                yield result
+            return
+        admin_bind = self._mentioned_admin_bind(event, raw_message)
+        if admin_bind is not None:
+            async for result in self._reply_admin_bind(event, admin_bind):
                 yield result
             return
         if not message_str:
