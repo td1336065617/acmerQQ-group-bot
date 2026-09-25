@@ -8,7 +8,7 @@ desc: |
   每日早报、赛前 15 分钟提醒、赛后赛果、群训练周报、牛客报名截止提醒与 WebUI 配置。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
   支持 QQ 官方机器人（qq_official / qq_official_webhook）与 OneBot v11（aiocqhttp）。
-version: 1.16.0
+version: 1.16.1
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot/tree/master
 astrbot_version: ">=4.13.0,<5"

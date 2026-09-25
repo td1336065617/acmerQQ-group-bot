@@ -1487,3 +1487,61 @@ def test_on_message_routes_mention_to_admin_bind():
     assert results == ["绑定完成"]
     assert calls and calls[0]["user_id"] == "target-openid"
     assert calls[0]["identifier"] == "demo"
+
+
+def test_literal_at_admin_bind_detected_for_hint():
+    """手打 @昵称 不是真正的 @（拿不到 openid），应识别出来给提示而非静默。"""
+    m = _load_main_module()
+    text = "@jiangly 绑定cf jiangly"
+    event = FakeEvent(group_id="group-1", message_str=text)
+    event.message_obj = types.SimpleNamespace(
+        raw_message=types.SimpleNamespace(content=text, mentions=[], self_id="")
+    )
+    hint = m.AcmerGroupBot._literal_at_admin_bind(event, text)
+    assert hint is not None
+    assert hint["platform"] == "codeforces"
+    assert hint["identifier"] == "jiangly"
+
+    # 真正的 @ 仍然走正常代绑定，不落到提示分支
+    real = _admin_bind_mention_event("<@target-openid> 绑定cf jiangly")
+    assert m.AcmerGroupBot._mentioned_admin_bind(real, real.message_str) is not None
+    assert m.AcmerGroupBot._literal_at_admin_bind(real, real.message_str) is None
+
+
+def test_literal_at_bind_hint_replies_only_for_admin():
+    m = _load_main_module()
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    event = FakeEvent(group_id="group-1")
+
+    async def is_admin(e):
+        return True
+
+    bot._is_admin = is_admin
+    out = _collect(bot._reply_admin_bind_mention_hint(event))
+    assert out and "没识别到真正的 @" in out[0]
+
+    async def not_admin(e):
+        return False
+
+    bot._is_admin = not_admin
+    assert _collect(bot._reply_admin_bind_mention_hint(event)) == ["此指令仅限管理员"]
+
+
+def test_on_message_routes_literal_at_bind_to_hint():
+    m = _load_main_module()
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_hint(event):
+        calls.append(True)
+        yield "HINT"
+
+    bot._reply_admin_bind_mention_hint = fake_hint
+    text = "@jiangly 绑定cf jiangly"
+    event = FakeEvent(group_id="group-1", message_str=text)
+    event.message_obj = types.SimpleNamespace(
+        raw_message=types.SimpleNamespace(content=text, mentions=[], self_id="")
+    )
+    results = _collect(bot.on_message(event))
+    assert results == ["HINT"]
+    assert calls == [True]

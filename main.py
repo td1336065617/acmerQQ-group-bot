@@ -1058,6 +1058,40 @@ class AcmerGroupBot(Star):
             }
         return None
 
+    @classmethod
+    def _literal_at_admin_bind(
+        cls,
+        event: AstrMessageEvent,
+        raw_message: str,
+    ) -> Optional[dict]:
+        """识别“手打 @昵称 + 绑定指令”。
+
+        手打的 @ 只是普通文字，QQ 不会给出被 @ 人的 openid，因此无法确定绑定目标。
+        这里单独识别，用于**给出提示**，避免管理员以为指令没生效（此前表现为完全静默）。
+        """
+        if not str(event.get_group_id() or "").strip():
+            return None
+        text = str(raw_message or "").strip()
+        if not text.startswith("@"):
+            return None
+        # 有真正的 @ 时交给 _mentioned_admin_bind 正常处理
+        if cls._collect_mention_targets(event, raw_message):
+            return None
+        match = re.match(r"^@(\S+)\s+(.+?)\s*$", text, flags=re.S)
+        if not match:
+            return None
+        bind = ADMIN_BIND_RE.match(match.group(2).strip())
+        if not bind:
+            return None
+        platform = normalize_platform(bind.group(1))
+        if not platform:
+            return None
+        return {
+            "literal": match.group(1),
+            "platform": platform,
+            "identifier": bind.group(2).strip(),
+        }
+
     @staticmethod
     def _self_id_candidates(event, message_obj, raw) -> set:
         """收集"机器人自己"的所有可能标识（小写化）。
@@ -1773,6 +1807,17 @@ class AcmerGroupBot(Star):
         else:
             lines.append("目标在群内发送一次“我的战绩”即可加入该群排行。")
         yield event.plain_result("\n".join(lines))
+
+    async def _reply_admin_bind_mention_hint(self, event: AstrMessageEvent):
+        """手打 @昵称 时的提示：那不是真正的 @，拿不到目标 openid。"""
+        if not await self._is_admin(event):
+            yield event.plain_result("此指令仅限管理员")
+            return
+        yield event.plain_result(
+            "⚠️ 没识别到真正的 @：请用 QQ 输入框里的「@」从成员列表选择要绑定的人，"
+            "手打 @昵称 只是普通文字、拿不到对方 ID。\n"
+            "用法：@某人 绑定cf <账号>"
+        )
 
     async def _reply_account_confirm(
         self,
@@ -4731,6 +4776,10 @@ class AcmerGroupBot(Star):
         admin_bind = self._mentioned_admin_bind(event, raw_message)
         if admin_bind is not None:
             async for result in self._reply_admin_bind(event, admin_bind):
+                yield result
+            return
+        if self._literal_at_admin_bind(event, raw_message) is not None:
+            async for result in self._reply_admin_bind_mention_hint(event):
                 yield result
             return
         if not message_str:
