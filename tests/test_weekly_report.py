@@ -151,7 +151,10 @@ def test_tick_pushes_once_per_iso_week(monkeypatch):
         _patch_activity(monkeypatch, main_module, _activity_ok())
         bot = _build_bot(main_module)
         assert await bot.tick_weekly_report(MONDAY) == 1
-        assert bot._kv == {"weekly_g1_2026-W39": True}
+        assert bot._kv.get("weekly_g1_2026-W39") is True
+        # 推送结果同时写入后台「运行状态」日志
+        assert bot._kv["push_log"][-1]["kind"] == "weekly_report"
+        assert bot._kv["push_log"][-1]["ok"] is True
         assert "本周训练周报" in bot._sent[0][1]
         # 同一 ISO 周内第二次 tick 不再推送
         assert await bot.tick_weekly_report(MONDAY) == 0

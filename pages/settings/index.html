@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>acmerQQ群机器人</title>
+<title>acmerQQ群机器人 后台</title>
 <script src="/api/plugin/page/bridge-sdk.js"></script>
 <style>
   :root {
@@ -15,494 +15,1305 @@
     --ely-ice: #8edff4;
     --ely-pearl: rgba(255, 252, 255, .94);
     --ely-line: rgba(211, 128, 174, .32);
+    --fg-1: #4b2b56;
+    --fg-2: #8b527b;
+    --fg-3: #9a718c;
+    --ok: #1f8a63;
+    --warn: #b57314;
+    --err: #b0285e;
+    --info: #2f7f96;
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+    --r-sm: 8px; --r-md: 12px; --r-lg: 18px; --r-pill: 999px;
+    --sh-1: 0 10px 24px rgba(22, 8, 36, .14);
+    --sh-2: 0 16px 34px rgba(22, 8, 36, .22);
+    --t-fast: 120ms; --t-base: 200ms;
+    --nav-w: 232px;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
   body {
-    position: relative;
-    max-width: 1180px;
-    min-height: 100vh;
+    margin: 0;
     font-family: "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
-    margin: 0 auto;
-    padding: 34px 28px 48px;
-    color: var(--ely-plum);
+    color: var(--fg-1);
     background:
       radial-gradient(circle at 8% 8%, rgba(255, 183, 220, .28), transparent 25%),
       radial-gradient(circle at 94% 16%, rgba(151, 226, 247, .24), transparent 24%),
       linear-gradient(135deg, #29193a 0%, #4b274f 54%, #203b4a 100%);
+    background-attachment: fixed;
   }
-  body::before {
-    content: "";
-    position: fixed;
-    width: 360px;
-    height: 360px;
-    right: -180px;
-    top: 90px;
-    border: 1px solid rgba(255, 218, 239, .34);
-    border-radius: 50%;
-    box-shadow: 0 0 0 18px rgba(255, 218, 239, .07),
-                0 0 0 42px rgba(164, 228, 248, .05);
-    pointer-events: none;
+  .app { display: grid; grid-template-columns: var(--nav-w) 1fr; min-height: 100vh; }
+
+  /* 侧栏 */
+  .nav {
+    position: sticky; top: 0; align-self: start; height: 100vh;
+    display: flex; flex-direction: column; gap: var(--sp-1);
+    padding: var(--sp-4) var(--sp-3);
+    background: linear-gradient(180deg, rgba(42,25,59,.92), rgba(43,32,66,.86));
+    border-right: 1px solid rgba(255, 218, 239, .18);
+    backdrop-filter: blur(6px);
   }
-  body::after {
-    content: "✿";
-    position: fixed;
-    right: 62px;
-    top: 108px;
-    color: rgba(255, 229, 243, .65);
-    font-size: 54px;
-    transform: rotate(16deg);
-    pointer-events: none;
+  .brand { display: flex; align-items: center; gap: var(--sp-2); color: #fff6fb; font-weight: 800; letter-spacing: .4px; padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+  .brand-dot { width: 10px; height: 10px; border-radius: 50%; background: linear-gradient(135deg, var(--ely-pink), var(--ely-ice)); box-shadow: 0 0 12px rgba(211,79,147,.7); }
+  .nav-item {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: 10px var(--sp-3); border-radius: var(--r-md);
+    color: rgba(255, 236, 248, .82); text-decoration: none; font-size: 14px;
+    transition: background var(--t-fast), color var(--t-fast);
   }
-  h1 { position: relative; z-index: 1; font-size: 27px; letter-spacing: 1px; color: #fff8fc; margin: 0 0 20px; text-shadow: 0 3px 18px rgba(243, 132, 190, .42); }
-  h2 { font-size: 18px; letter-spacing: .4px; color: var(--ely-plum); margin: 0 0 12px; }
+  .nav-item i { font-style: normal; width: 18px; text-align: center; }
+  .nav-item:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+  .nav-item.active { background: linear-gradient(135deg, rgba(211,79,147,.85), rgba(142,223,244,.55)); color: #fff; box-shadow: var(--sh-1); }
+  .nav-foot { margin-top: auto; color: rgba(255, 226, 243, .5); font-size: 12px; padding: var(--sp-2) var(--sp-3); }
+
+  /* 主区 */
+  main { min-width: 0; padding: var(--sp-5) var(--sp-5) var(--sp-6); }
+  .topbar { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); flex-wrap: wrap; }
+  .topbar-title { color: #fff8fc; font-size: 22px; font-weight: 800; letter-spacing: .5px; text-shadow: 0 3px 18px rgba(243,132,190,.42); margin-right: auto; }
+  .pill { background: rgba(255,255,255,.14); color: #ffe9f5; border: 1px solid rgba(255,218,239,.3); padding: 5px 12px; border-radius: var(--r-pill); font-size: 13px; }
+  .pill b { color: #fff; }
+
+  /* 卡片与区块 */
   .card {
-    position: relative;
-    overflow: hidden;
+    position: relative; overflow: hidden;
     border: 1px solid rgba(255, 213, 235, .9);
-    border-radius: 18px;
-    padding: 20px 22px;
-    margin-bottom: 18px;
+    border-radius: var(--r-lg);
+    padding: var(--sp-4) var(--sp-5);
+    margin-bottom: var(--sp-4);
     background: linear-gradient(145deg, var(--ely-pearl), rgba(255, 231, 245, .91));
-    box-shadow: 0 16px 34px rgba(22, 8, 36, .24), inset 0 0 24px rgba(255, 255, 255, .65);
+    box-shadow: var(--sh-2), inset 0 0 24px rgba(255,255,255,.65);
   }
-  .card::before {
-    content: "";
-    position: absolute;
-    left: 22px;
-    right: 22px;
-    top: 0;
-    height: 3px;
-    border-radius: 99px;
-    background: linear-gradient(90deg, var(--ely-pink), var(--ely-ice), var(--ely-pink));
-    opacity: .75;
+  .card::before { content: ""; position: absolute; left: var(--sp-5); right: var(--sp-5); top: 0; height: 3px; border-radius: var(--r-pill); background: linear-gradient(90deg, var(--ely-pink), var(--ely-ice), var(--ely-pink)); opacity: .75; }
+  .card.flat { box-shadow: var(--sh-1); }
+  .card h2 { font-size: 17px; margin: 0 0 var(--sp-3); color: var(--fg-1); display: flex; align-items: center; gap: var(--sp-2); }
+  .card h2 .spacer { margin-left: auto; display: flex; gap: var(--sp-2); align-items: center; }
+  .muted { color: var(--fg-3); font-size: 13px; }
+  .hint { color: var(--fg-3); font-size: 12.5px; margin-top: var(--sp-1); }
+
+  /* 统计 */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-3); }
+  .stat { background: rgba(255,255,255,.7); border: 1px solid var(--ely-line); border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); }
+  .stat .num { font-size: 26px; font-weight: 800; color: var(--ely-pink); }
+  .stat .lbl { font-size: 12.5px; color: var(--fg-3); }
+
+  /* 表单 */
+  .field { display: grid; grid-template-columns: 190px 1fr; gap: var(--sp-3); align-items: center; padding: var(--sp-2) 0; border-bottom: 1px dashed rgba(180,113,157,.18); }
+  .field:last-child { border-bottom: 0; }
+  .field > label { color: var(--fg-2); font-size: 13.5px; }
+  .field .ctrl { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .field .desc { flex-basis: 100%; color: var(--fg-3); font-size: 12.5px; }
+  .field.invalid input, .field.invalid select { border-color: var(--err); box-shadow: 0 0 0 3px rgba(176,40,94,.12); }
+  .field .error { color: var(--err); font-size: 12.5px; flex-basis: 100%; }
+  input[type=text], input[type=time], input[type=number], select, input[type=file] {
+    font-size: 14px; padding: 8px 11px; border: 1px solid var(--ely-line); border-radius: 10px;
+    background: rgba(255,255,255,.86); color: var(--fg-1); outline: none; max-width: 100%;
   }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  button { padding: 8px 18px; border: 1px solid rgba(255,255,255,.42); border-radius: 999px; background: linear-gradient(135deg, #d34f93, #e98ab8); color: #fff; cursor: pointer; font-size: 14px; box-shadow: 0 6px 14px rgba(184, 66, 126, .2); }
-  button:hover { opacity: .9; }
-  button.secondary { background: linear-gradient(135deg, #70bfd4, #a5e5ef); color: #2f5260; }
-  button.danger { background: linear-gradient(135deg, #b84477, #dc6b9d); }
-  input[type=text], input[type=time], input[type=number] { font-size: 14px; padding: 8px 11px; border: 1px solid var(--ely-line); border-radius: 10px; background: rgba(255,255,255,.76); color: var(--ely-plum); outline: none; }
-  input[type=text]:focus, input[type=time]:focus, input[type=number]:focus { border-color: var(--ely-pink); box-shadow: 0 0 0 3px rgba(211,79,147,.12); }
-  input[type=time] { width: 130px; }
-  input[type=number] { width: 130px; }
-  #result { display: none; margin-bottom: 18px; padding: 12px 15px; border: 1px solid rgba(127, 212, 181, .46); border-radius: 12px; background: rgba(227, 255, 245, .92); color: #25755a; white-space: pre-wrap; font-size: 14px; }
-  #result.error { border-color: rgba(211, 79, 147, .42); background: rgba(255, 231, 243, .94); color: #a43c70; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid rgba(180, 113, 157, .2); }
-  th { font-weight: 800; color: #8b527b; }
-  .muted { color: #9a718c; font-size: 13px; }
-  label.check { display: inline-flex; gap: 5px; align-items: center; margin-right: 12px; }
-  input[type=checkbox] { accent-color: var(--ely-pink); }
+  input[type=text]:focus, input[type=time]:focus, input[type=number]:focus, select:focus {
+    border-color: var(--ely-pink); box-shadow: 0 0 0 3px rgba(211,79,147,.12);
+  }
+  input[type=time], input[type=number] { width: 140px; }
+  input[type=text].wide { width: 320px; }
+  input[type=checkbox] { accent-color: var(--ely-pink); width: 16px; height: 16px; }
+
+  /* 开关 */
+  .switch { display: inline-flex; align-items: center; gap: var(--sp-2); cursor: pointer; user-select: none; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch .track { width: 42px; height: 24px; border-radius: var(--r-pill); background: rgba(154,113,140,.35); position: relative; transition: background var(--t-fast); }
+  .switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.2); transition: transform var(--t-fast); }
+  .switch input:checked + .track { background: linear-gradient(135deg, var(--ely-pink), #e98ab8); }
+  .switch input:checked + .track::after { transform: translateX(18px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--ely-ice); outline-offset: 2px; }
+
+  /* 按钮 */
+  .btn { padding: 8px 16px; border: 1px solid rgba(255,255,255,.42); border-radius: var(--r-pill); background: linear-gradient(135deg, #d34f93, #e98ab8); color: #fff; cursor: pointer; font-size: 13.5px; box-shadow: 0 6px 14px rgba(184,66,126,.18); transition: opacity var(--t-fast), transform var(--t-fast); }
+  .btn:hover { opacity: .92; }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.secondary { background: linear-gradient(135deg, #70bfd4, #a5e5ef); color: #234a56; }
+  .btn.danger { background: linear-gradient(135deg, #b84477, #dc6b9d); }
+  .btn.ghost { background: rgba(255,255,255,.16); color: var(--fg-1); border-color: var(--ely-line); box-shadow: none; }
+  .btn.small { padding: 4px 10px; font-size: 12.5px; }
+  .btn .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.5); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 徽章 */
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: var(--r-pill); font-size: 12px; border: 1px solid transparent; }
+  .badge.ok { background: rgba(31,138,99,.12); color: var(--ok); border-color: rgba(31,138,99,.28); }
+  .badge.warn { background: rgba(181,115,20,.14); color: var(--warn); border-color: rgba(181,115,20,.3); }
+  .badge.err { background: rgba(176,40,94,.12); color: var(--err); border-color: rgba(176,40,94,.3); }
+  .badge.info { background: rgba(47,127,150,.12); color: var(--info); border-color: rgba(47,127,150,.3); }
+
+  /* 表格 */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid rgba(180,113,157,.18); white-space: nowrap; }
+  th { font-weight: 800; color: var(--fg-2); background: rgba(255,255,255,.5); position: sticky; top: 0; }
+  tbody tr:hover { background: rgba(255,255,255,.5); }
+  tr.dirty td { background: rgba(181,115,20,.09); }
+  tr.dirty td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+  td.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .row-actions { display: flex; gap: var(--sp-1); }
+
+  /* 工具栏 */
+  .toolbar { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--sp-3); }
+  .toolbar .grow { margin-left: auto; display: flex; gap: var(--sp-2); align-items: center; }
+  .pager { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); color: var(--fg-3); font-size: 13px; }
+
+  /* 折叠分组 */
+  details.group { border: 1px solid var(--ely-line); border-radius: var(--r-md); background: rgba(255,255,255,.55); margin-bottom: var(--sp-2); overflow: hidden; }
+  details.group > summary { cursor: pointer; padding: 10px var(--sp-3); font-weight: 700; color: var(--fg-1); display: flex; align-items: center; gap: var(--sp-2); list-style: none; }
+  details.group > summary::-webkit-details-marker { display: none; }
+  details.group > summary::before { content: "▸"; color: var(--ely-pink); transition: transform var(--t-fast); }
+  details.group[open] > summary::before { transform: rotate(90deg); }
+  details.group > .body { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+
+  /* 空态 / 步骤 */
+  .empty { text-align: center; color: var(--fg-3); padding: var(--sp-5); font-size: 13.5px; }
+  .steps { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .step { display: flex; gap: var(--sp-2); align-items: center; font-size: 13px; }
+  .step .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); }
+  .step.ok .dot { background: var(--ok); }
+  .step.err .dot { background: var(--err); }
+
+  /* Toast */
+  .toasts { position: fixed; right: var(--sp-4); bottom: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); z-index: 60; }
+  .toast { min-width: 220px; max-width: 360px; padding: 10px 14px; border-radius: var(--r-md); color: #fff; font-size: 13.5px; box-shadow: var(--sh-2); background: #4b274f; animation: fadein var(--t-base) ease-out; }
+  .toast.ok { background: linear-gradient(135deg, #1f8a63, #37b98a); }
+  .toast.err { background: linear-gradient(135deg, #b0285e, #d95b90); }
+  .toast.info { background: linear-gradient(135deg, #2f7f96, #63bfd4); }
+  @keyframes fadein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  /* 模态 / 抽屉 */
+  .modal { position: fixed; inset: 0; background: rgba(30,12,40,.5); display: flex; align-items: center; justify-content: center; z-index: 70; padding: var(--sp-4); }
+  .modal-box { background: linear-gradient(145deg, #fff, #ffeaf6); border-radius: var(--r-lg); padding: var(--sp-5); max-width: 620px; width: 100%; max-height: 86vh; overflow: auto; box-shadow: var(--sh-2); }
+  .modal-box h3 { margin: 0 0 var(--sp-3); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-4); }
+  .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(460px, 92vw); background: linear-gradient(145deg, #fff, #ffeaf6); box-shadow: -12px 0 34px rgba(22,8,36,.28); z-index: 65; padding: var(--sp-5); overflow: auto; }
+  .drawer h3 { margin: 0 0 var(--sp-4); }
+  .drawer .field { grid-template-columns: 120px 1fr; }
+  .scrim { position: fixed; inset: 0; background: rgba(30,12,40,.42); z-index: 55; }
+
+  /* diff 表 */
+  .diff { font-size: 13px; }
+  .diff table td, .diff table th { white-space: normal; }
+
+  /* 移动端 */
+  #navToggle { display: none; }
+  @media (max-width: 820px) {
+    .app { grid-template-columns: 1fr; }
+    .nav { position: fixed; left: 0; top: 0; width: var(--nav-w); transform: translateX(-100%); transition: transform var(--t-base); z-index: 58; }
+    body.nav-open .nav { transform: none; }
+    main { padding: var(--sp-4) var(--sp-3) var(--sp-6); }
+    #navToggle { display: inline-flex; }
+    .field { grid-template-columns: 1fr; }
+    th, td { white-space: normal; }
+    input[type=text].wide { width: 100%; }
+  }
 </style>
 </head>
 <body>
-<h1>acmerQQ群机器人 后台</h1>
+<div class="app">
+  <aside class="nav" id="nav">
+    <div class="brand"><span class="brand-dot"></span>acmerQQ群机器人</div>
+    <a class="nav-item" href="#/overview" data-nav="overview"><i>📊</i>概览与状态</a>
+    <a class="nav-item" href="#/basics" data-nav="basics"><i>⚙️</i>基础设置</a>
+    <a class="nav-item" href="#/settings" data-nav="settings"><i>📣</i>推送设置</a>
+    <a class="nav-item" href="#/groups" data-nav="groups"><i>👥</i>群推送配置</a>
+    <a class="nav-item" href="#/bindings" data-nav="bindings"><i>🔗</i>账号绑定</a>
+    <a class="nav-item" href="#/rank" data-nav="rank"><i>🏆</i>群排行</a>
+    <a class="nav-item" href="#/backup" data-nav="backup"><i>💾</i>配置备份</a>
+    <div class="nav-foot">PINK PEARL · v1.17.0</div>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
 
-<div id="result"></div>
+  <main>
+    <header class="topbar">
+      <button class="btn ghost" id="navToggle" aria-label="切换导航">☰</button>
+      <div class="topbar-title" id="viewTitle">概览与状态</div>
+      <span class="pill">平台实例：<b id="platformId">-</b></span>
+      <span class="badge warn" id="dirtyBadge" hidden>未保存</span>
+      <button class="btn ghost" id="btnReload" title="重新加载配置">↻ 刷新</button>
+    </header>
 
-<div class="card">
-  <h2>管理员设置</h2>
-  <div class="row" style="margin-bottom:10px">
-    <input type="text" id="adminInput" placeholder="输入管理员 QQ号 / openid">
-    <button id="btnAddAdmin">添加</button>
-  </div>
-  <table>
-    <thead><tr><th>管理员 ID</th><th>操作</th></tr></thead>
-    <tbody id="adminBody"></tbody>
-  </table>
-  <div class="muted" style="margin-top:8px">管理员可执行 /update 刷新比赛数据；添加/移除后立即保存。</div>
+    <!-- 概览与状态 -->
+    <section class="view" data-view="overview" hidden>
+      <div class="card">
+        <h2>概览<span class="spacer"><span class="muted" id="ovTime"></span><button class="btn small secondary" id="ovRefresh">刷新</button></span></h2>
+        <div class="stats" id="ovStats"></div>
+        <div class="hint">“主动推送”需要该群在机器人本次运行期间发过消息，否则 QQ 侧可能静默跳过。</div>
+      </div>
+      <div class="card">
+        <h2>下次推送</h2>
+        <div id="ovNext"></div>
+      </div>
+      <div class="card">
+        <h2>最近推送<span class="spacer"><button class="btn small ghost" id="ovLogMore">查看更多</button></span></h2>
+        <div class="table-wrap"><table><thead><tr><th>时间</th><th>群</th><th>类型</th><th>结果</th><th>说明</th></tr></thead><tbody id="ovLog"></tbody></table></div>
+      </div>
+      <div class="card">
+        <h2>立即试跑</h2>
+        <div class="muted" style="margin-bottom:10px">只向单个群试跑一次，<b>不会写入正式推送的幂等键</b>，所以不会影响当天定时推送。</div>
+        <div class="toolbar">
+          <select id="runGroup"></select>
+          <select id="runKind">
+            <option value="morning">早报（含周榜）</option>
+            <option value="weekly">训练周报</option>
+            <option value="settle">赛后赛果</option>
+            <option value="signup">报名提醒</option>
+          </select>
+          <input type="text" id="runContest" placeholder="场次 ID（可选）">
+          <button class="btn" id="runNow">试跑</button>
+        </div>
+        <div id="runResult"></div>
+      </div>
+    </section>
+
+    <!-- 基础设置 -->
+    <section class="view" data-view="basics" hidden>
+      <div class="card">
+        <h2>管理员设置</h2>
+        <div class="muted" style="margin-bottom:10px">管理员可执行 <b>update / 刷新比赛</b> 与 <b>@某人 绑定cf</b> 等后台操作。适配器不会把 QQ 群主/群管理映射成管理员，必须在这里显式添加。</div>
+        <div class="toolbar">
+          <input type="text" class="wide" id="adminInput" placeholder="输入管理员 QQ号 / openid（可带 platform_id: 前缀）">
+          <button class="btn" id="btnAddAdmin">添加</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>管理员 ID</th><th>操作</th></tr></thead><tbody id="adminBody"></tbody></table></div>
+        <div class="hint">添加 / 移除后立即保存。</div>
+      </div>
+      <div class="card">
+        <h2>运行信息</h2>
+        <div id="basicsInfo"></div>
+      </div>
+    </section>
+
+    <!-- 推送设置 -->
+    <section class="view" data-view="settings" hidden>
+      <div class="card">
+        <h2>推送设置<span class="spacer"><span class="badge warn" id="settingsDirty" hidden>未保存</span><button class="btn" id="settingsSave">保存推送设置</button></span></h2>
+        <div class="muted" style="margin-bottom:10px">共 7 组，改完任意一组点右上角保存即可。</div>
+        <div id="settingsGroups"></div>
+      </div>
+    </section>
+
+    <!-- 群推送配置 -->
+    <section class="view" data-view="groups" hidden>
+      <div class="card">
+        <h2>群推送配置<span class="spacer"><span class="badge warn" id="groupsDirty" hidden>未保存</span><button class="btn" id="groupsSave">保存群配置</button></span></h2>
+        <div class="muted" style="margin-bottom:10px">机器人收到过消息的群会自动出现在这里。批量操作只改本地，点“保存群配置”统一提交。</div>
+        <div class="toolbar">
+          <input type="text" id="groupSearch" placeholder="搜索群 ID / 平台">
+          <select id="groupPageSize"><option value="20">20 条/页</option><option value="50">50 条/页</option><option value="100">100 条/页</option></select>
+          <div class="grow">
+            <button class="btn small secondary" id="groupSelectAll">全选本页</button>
+            <button class="btn small ghost" id="groupEnable">批量启用</button>
+            <button class="btn small ghost" id="groupDisable">批量禁用</button>
+            <button class="btn small secondary" id="groupTest">批量测试</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群 ID</th><th>平台</th><th>已激活</th><th>启用</th><th>早报时间</th><th>推送平台</th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
+        <div class="pager" id="groupPager"></div>
+        <div id="groupTestResult"></div>
+      </div>
+    </section>
+
+    <!-- 账号绑定 -->
+    <section class="view" data-view="bindings" hidden>
+      <div class="card">
+        <h2>账号绑定<span class="spacer"><span class="badge info" id="bindCount">0 条</span><button class="btn" id="btnNewBinding">新增绑定</button></span></h2>
+        <div class="muted" style="margin-bottom:10px">后台绑定与群内「@某人 绑定cf」写的是同一份数据：同样跳过验证码，同样受“同一 OJ 账号全局唯一”约束，不会顶掉别人的账号。保存 / 删除后会立即刷新群排行缓存。</div>
+        <div class="toolbar">
+          <select id="bindPlatform"><option value="">全部平台</option><option value="codeforces">Codeforces</option><option value="nowcoder">牛客</option><option value="luogu">洛谷</option><option value="atcoder">AtCoder</option></select>
+          <input type="text" id="bindSearch" placeholder="搜索 QQ / 账号 / 昵称">
+          <div class="grow">
+            <button class="btn small danger" id="bindBatchDelete">批量删除</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="bindHeadCheck"></th><th>QQ 用户</th><th>平台</th><th>账号</th><th>昵称</th><th>绑定时间</th><th>操作</th></tr></thead><tbody id="bindBody"></tbody></table></div>
+        <div class="pager" id="bindPager"></div>
+      </div>
+    </section>
+
+    <!-- 群排行 -->
+    <section class="view" data-view="rank" hidden>
+      <div class="card">
+        <h2>群排行<span class="spacer"><span class="badge info" id="rankStale" hidden>数据可能较旧</span><button class="btn secondary" id="rankRefresh">刷新</button></span></h2>
+        <div class="muted" style="margin-bottom:10px">只读查看。默认命中本地快照，不触发全群抓取；点“刷新”才会强制重算（可能较慢）。</div>
+        <div class="toolbar">
+          <select id="rankGroup"></select>
+          <select id="rankPlatform"><option value="codeforces">Codeforces</option><option value="nowcoder">牛客</option><option value="luogu">洛谷</option><option value="atcoder">AtCoder</option></select>
+          <label class="switch"><input type="checkbox" id="rankProgress"><span class="track"></span><span>本周进步榜</span></label>
+          <button class="btn" id="rankLoad">查看</button>
+        </div>
+        <div id="rankErrors" class="muted"></div>
+        <div class="table-wrap"><table><thead><tr><th>#</th><th>成员</th><th>账号</th><th>指标</th><th>近 7 日</th></tr></thead><tbody id="rankBody"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- 配置备份 -->
+    <section class="view" data-view="backup" hidden>
+      <div class="card">
+        <h2>导出配置</h2>
+        <div class="muted" style="margin-bottom:10px">导出管理员、推送设置与（可选）群配置为 JSON，便于备份或迁移。</div>
+        <div class="toolbar">
+          <label class="switch"><input type="checkbox" id="exportGroups" checked><span class="track"></span><span id="exportGroupsLabel">包含群配置</span></label>
+          <button class="btn" id="btnExport">导出 JSON</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>导入配置</h2>
+        <div class="muted" style="margin-bottom:10px">导入分两步：先校验并预览差异，确认后才会写入。默认“覆盖 settings + 合并 admin_users + 覆盖 groups”。</div>
+        <div class="toolbar">
+          <label class="switch"><input type="checkbox" id="importAdmins" checked><span class="track"></span><span>管理员</span></label>
+          <label class="switch"><input type="checkbox" id="importSettings" checked><span class="track"></span><span>推送设置</span></label>
+          <label class="switch"><input type="checkbox" id="importGroups" checked><span class="track"></span><span>群配置</span></label>
+        </div>
+        <div class="toolbar">
+          <input type="file" id="importFile" accept="application/json,.json">
+          <button class="btn secondary" id="btnPreview">校验并预览</button>
+        </div>
+        <div id="importDiff"></div>
+      </div>
+    </section>
+  </main>
 </div>
 
-<div class="card">
-  <h2>推送设置</h2>
-  <div class="muted" style="margin-bottom:10px">
-    当前 QQ 平台实例 ID：<span id="platformId">-</span>
-    （自动获取，无需填写）。主动推送需要该群在机器人本次运行期间发过消息，
-    否则 QQ 侧可能静默跳过。
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label>每日早报时间</label>
-    <input type="time" id="morningInput">
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <span>推送平台：</span>
-    <label class="check"><input type="checkbox" class="platform-cb" value="nowcoder"> 牛客</label>
-    <label class="check"><input type="checkbox" class="platform-cb" value="codeforces"> Codeforces</label>
-    <label class="check"><input type="checkbox" class="platform-cb" value="atcoder"> AtCoder</label>
-    <label class="check"><input type="checkbox" class="platform-cb" value="luogu"> 洛谷</label>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="reminderInput"> 赛前 15 分钟提醒</label>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="atAllInput"> 通知尝试 @全体成员（注意：QQ 官方群聊不支持，即使机器人是群管理员也不会生效，建议关闭）</label>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="recentDaysInput">最近比赛查询范围</label>
-    <input type="number" id="recentDaysInput" min="1" max="30" step="1" inputmode="numeric">
-    <span>天</span>
-    <span class="muted">默认 7 天，范围 1～30 天；包含正在进行的比赛</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="dailyProblemInput"> 早报附"今日一题"</label>
-    <span class="muted">按本群 Rating 中位数抽题、按星期轮换知识点；同一题在当天早报与 <code>每日一题</code> 指令里保持一致</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="dailyProblemPlatformInput">每日一题平台</label>
-    <select id="dailyProblemPlatformInput">
-      <option value="nowcoder">牛客（本地题库索引，零额外抓取）</option>
-      <option value="codeforces">Codeforces</option>
-      <option value="atcoder">AtCoder</option>
-      <option value="luogu">洛谷</option>
-    </select>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="recommendInput"> 详细资料里给"推荐补题"</label>
-    <span class="muted">按未通过 + 当前难度 + 薄弱知识点推荐 3 题</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="settlePushInput"> 赛后赛果推送</label>
-    <span class="muted">比赛结束后推一张名次卡（名次/通过题数/参赛人数，不含 Rating 变化）</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="settleDelayInput">赛后推送延迟</label>
-    <input type="number" id="settleDelayInput" min="1" max="60" step="1" inputmode="numeric">
-    <span>分钟</span>
-    <span class="muted">默认 10 分钟，范围 1～60；超过 2 小时未拿到赛果则不再补推</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="settleMinInput">最少参赛人数</label>
-    <input type="number" id="settleMinInput" min="1" max="10" step="1" inputmode="numeric">
-    <span class="muted">默认 1，范围 1～10；低于该人数不推送</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="settleUnsolvedInput"> 赛果卡附带"本场未通过题目"（仅 Codeforces）</label>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label class="check"><input type="checkbox" id="weeklyReportInput"> 群训练周报</label>
-    <span class="muted">每周一次推送「本周进步榜 / 退步榜」两张卡 + 一段文字统计（参与人数、人均活跃天数与提交数、进步/退步最多）</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="weeklyWeekdayInput">周报推送星期</label>
-    <select id="weeklyWeekdayInput">
-      <option value="1">周一</option>
-      <option value="2">周二</option>
-      <option value="3">周三</option>
-      <option value="4">周四</option>
-      <option value="5">周五</option>
-      <option value="6">周六</option>
-      <option value="7">周日</option>
-    </select>
-    <input type="time" id="weeklyTimeInput">
-    <span class="muted">默认周一 20:00；同一 ISO 周每群只推一次，无数据时静默跳过</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="nowcoderScopeInput">牛客赛事范围</label>
-    <select id="nowcoderScopeInput">
-      <option value="all">全部牛客赛事（含高校校赛、新生赛、集训营、自主创建赛）</option>
-      <option value="series_only">仅牛客系列赛（比赛名含“牛客”）</option>
-    </select>
-    <span class="muted">默认全部；口径只影响展示与推送，抓取始终取全量，保存后立即生效</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="maxCharsInput">文字转图片最大字符数</label>
-    <input type="number" id="maxCharsInput" min="200" max="10000" step="1" inputmode="numeric">
-    <span class="muted">默认 1800，范围 200～10000</span>
-  </div>
-  <div class="row" style="margin-bottom:10px">
-    <label for="maxLinesInput">文字转图片最大行数</label>
-    <input type="number" id="maxLinesInput" min="10" max="200" step="1" inputmode="numeric">
-    <span class="muted">默认 36，范围 10～200</span>
-  </div>
-  <div class="muted" style="margin-bottom:10px">
-    内容未超过字符数和行数两个阈值时发送文字；超过任一阈值后才生成 HTML 并转为图片。
-    保存后立即生效，转图失败会自动回退为文字分片。
-  </div>
-  <div class="row">
-    <button id="btnSaveSettings">保存推送设置</button>
-  </div>
-</div>
+<div class="toasts" id="toasts"></div>
 
-<div class="card">
-  <h2>群推送配置</h2>
-  <table>
-    <thead><tr><th>群 ID</th><th>启用</th><th>早报时间</th><th>赛后赛果</th><th>操作</th></tr></thead>
-    <tbody id="groupBody"></tbody>
-  </table>
-  <div class="muted" style="margin-top:8px">机器人收到过消息的群会自动出现在这里；修改后点“保存群配置”。
-    “测试推送”会立即向该群发送今日比赛早报（发送前请先在群里发一条消息，QQ 主动推送需要会话缓存）。</div>
-  <div class="row" style="margin-top:10px">
-    <button id="btnSaveGroups">保存群配置</button>
+<aside class="drawer" id="drawer" hidden>
+  <h3 id="drawerTitle">新增绑定</h3>
+  <div class="field"><label for="bfUser">QQ 用户 ID *</label><div class="ctrl"><input type="text" class="wide" id="bfUser" placeholder="QQ号 / openid"></div></div>
+  <div class="field"><label for="bfPlatform">平台 *</label><div class="ctrl">
+    <select id="bfPlatform"><option value="codeforces">Codeforces</option><option value="nowcoder">牛客</option><option value="luogu">洛谷</option><option value="atcoder">AtCoder</option></select>
+  </div></div>
+  <div class="field"><label for="bfIdentifier">账号 *</label><div class="ctrl"><input type="text" class="wide" id="bfIdentifier" placeholder="用户名 / UID / 主页链接"><span class="desc" id="bfHint"></span></div></div>
+  <div class="field"><label for="bfName">昵称（选填）</label><div class="ctrl"><input type="text" class="wide" id="bfName" placeholder="用于排行展示"></div></div>
+  <div class="field"><label for="bfGroup">归属群（选填）</label><div class="ctrl"><select id="bfGroup"><option value="">不加入群排行</option></select></div></div>
+  <div class="modal-actions">
+    <button class="btn ghost" id="bfCancel">取消</button>
+    <button class="btn" id="bfSubmit">保存</button>
   </div>
-</div>
+</aside>
 
+<div class="modal" id="modal" hidden><div class="modal-box" id="modalBox"></div></div>
 <script>
 (function () {
-  const A = window.AstrBotPluginPage;
-  const result = document.getElementById('result');
-  const adminBody = document.getElementById('adminBody');
-  const groupBody = document.getElementById('groupBody');
-  let adminUsers = [];
-  let settings = {
-    morning_push_time: '08:00',
-    push_platforms: [],
-    reminder_enabled: true,
-    at_all_enabled: false,
-    recent_contest_days: 7,
-    nowcoder_scope: 'all',
-    daily_problem_enabled: true,
-    daily_problem_platform: 'nowcoder',
-    daily_problem_count: 1,
-    recommend_enabled: true,
-    settle_push_enabled: true,
-    settle_delay_minutes: 10,
-    settle_min_participants: 1,
-    settle_show_unsolved: true,
-    weekly_report_enabled: true,
-    weekly_report_weekday: 1,
-    weekly_report_time: '20:00',
-    max_plain_text_chars: 1800,
-    max_plain_text_lines: 36
+  'use strict';
+
+  var A = window.AstrBotPluginPage;
+  var PLATFORM_LABELS = { codeforces: 'Codeforces', nowcoder: '牛客', luogu: '洛谷', atcoder: 'AtCoder' };
+  var VIEW_TITLES = {
+    overview: '概览与状态', basics: '基础设置', settings: '推送设置',
+    groups: '群推送配置', bindings: '账号绑定', rank: '群排行', backup: '配置备份'
   };
-  let groups = [];
+  var SETTINGS_GROUPS = [
+    { id: 'morning', title: '早报', fields: [
+      { key: 'morning_push_time', label: '每日早报时间', type: 'time' },
+      { key: 'push_platforms', label: '推送平台', type: 'platforms' }
+    ] },
+    { id: 'reminder', title: '赛前提醒', fields: [
+      { key: 'reminder_enabled', label: '赛前 15 分钟提醒', type: 'bool' },
+      { key: 'at_all_enabled', label: '尝试 @全体成员', type: 'bool', desc: 'QQ 官方群聊不支持 @全体成员，即使机器人是群管理员也不会生效，建议关闭。' }
+    ] },
+    { id: 'daily', title: '每日一题 / 推荐补题', fields: [
+      { key: 'daily_problem_enabled', label: '早报附“今日一题”', type: 'bool' },
+      { key: 'daily_problem_platform', label: '每日一题平台', type: 'select', options: [['nowcoder', '牛客（本地题库索引，零额外抓取）'], ['codeforces', 'Codeforces'], ['atcoder', 'AtCoder'], ['luogu', '洛谷']] },
+      { key: 'daily_problem_count', label: '每日一题数量', type: 'number', min: 1, max: 3, desc: '默认 1，范围 1～3' },
+      { key: 'recommend_enabled', label: '详细资料里给“推荐补题”', type: 'bool', desc: '按未通过 + 当前难度 + 薄弱知识点推荐 3 题' }
+    ] },
+    { id: 'settle', title: '赛后赛果', fields: [
+      { key: 'settle_push_enabled', label: '赛后赛果推送', type: 'bool', desc: '比赛结束后推一张名次卡（名次/通过题数/参赛人数，不含 Rating 变化）' },
+      { key: 'settle_delay_minutes', label: '推送延迟（分钟）', type: 'number', min: 1, max: 60, desc: '默认 10，范围 1～60；超过 2 小时未拿到赛果则不再补推' },
+      { key: 'settle_min_participants', label: '最少参赛人数', type: 'number', min: 1, max: 10, desc: '默认 1，范围 1～10；低于该人数不推送' },
+      { key: 'settle_show_unsolved', label: '赛果卡附“本场未通过题目”（仅 Codeforces）', type: 'bool' }
+    ] },
+    { id: 'weekly', title: '训练周报', fields: [
+      { key: 'weekly_report_enabled', label: '群训练周报', type: 'bool', desc: '每周一次推送本周进步榜 / 退步榜两张卡 + 文字统计' },
+      { key: 'weekly_report_weekday', label: '推送星期', type: 'select', options: [['1', '周一'], ['2', '周二'], ['3', '周三'], ['4', '周四'], ['5', '周五'], ['6', '周六'], ['7', '周日']] },
+      { key: 'weekly_report_time', label: '推送时间', type: 'time', desc: '默认周一 20:00；同一 ISO 周每群只推一次' }
+    ] },
+    { id: 'query', title: '查询口径', fields: [
+      { key: 'recent_contest_days', label: '最近比赛查询天数', type: 'number', min: 1, max: 30, desc: '默认 7，范围 1～30；包含正在进行的比赛' },
+      { key: 'nowcoder_scope', label: '牛客赛事范围', type: 'select', options: [['all', '全部牛客赛事（含高校校赛、新生赛、自主创建赛）'], ['series_only', '仅牛客系列赛（比赛名含“牛客”）']], desc: '只影响展示与推送，抓取始终取全量' }
+    ] },
+    { id: 'render', title: '文字转图片阈值', fields: [
+      { key: 'max_plain_text_chars', label: '最大字符数', type: 'number', min: 200, max: 10000, desc: '默认 1800，范围 200～10000' },
+      { key: 'max_plain_text_lines', label: '最大行数', type: 'number', min: 10, max: 200, desc: '默认 36，范围 10～200' }
+    ] }
+  ];
 
-  function show(text, isError) {
-    result.style.display = 'block';
-    result.textContent = text;
-    result.className = isError ? 'error' : '';
+  var state = {
+    config: { adminUsers: [], settings: {}, groups: [], platformId: '' },
+    dirty: { settings: false, groups: false },
+    groupPage: { page: 1, size: 20, query: '' },
+    bindings: { items: [], total: 0, page: 1, size: 20, query: '', platform: '', selected: {} },
+    rankLoaded: false,
+    importPayload: null
+  };
+
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function text(v) { return v === null || v === undefined ? '' : String(v); }
+  function esc(v) {
+    return text(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmtTs(ts) {
+    if (!ts) return '-';
+    var d = new Date(Number(ts) * 1000);
+    if (isNaN(d.getTime())) return '-';
+    return d.toLocaleString('zh-CN', { hour12: false });
+  }
+  function fmtIso(iso) {
+    if (!iso) return '-';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return text(iso);
+    return d.toLocaleString('zh-CN', { hour12: false });
+  }
+  function platformLabel(p) { return PLATFORM_LABELS[p] || text(p); }
+
+  function toast(msg, type) {
+    var host = $('#toasts');
+    var div = document.createElement('div');
+    div.className = 'toast ' + (type || 'info');
+    div.textContent = text(msg);
+    host.appendChild(div);
+    setTimeout(function () { div.remove(); }, 3200);
   }
 
-  function renderAdmins() {
-    adminBody.innerHTML = '';
-    if (!adminUsers.length) {
-      adminBody.innerHTML = '<tr><td colspan="2" class="muted">暂无管理员，请添加</td></tr>';
-      return;
-    }
-    for (const id of adminUsers) {
-      const tr = document.createElement('tr');
-      const td1 = document.createElement('td'); td1.textContent = id;
-      const td2 = document.createElement('td');
-      const btn = document.createElement('button');
-      btn.className = 'danger';
-      btn.textContent = '移除';
-      btn.onclick = async () => {
-        adminUsers = adminUsers.filter(x => x !== id);
-        renderAdmins();
-        try {
-          await A.apiPost('config', { admin_users: adminUsers });
-          show('管理员已移除并保存');
-        } catch (e) {
-          show('保存失败：' + (e && e.message ? e.message : e), true);
-        }
-      };
-      td2.appendChild(btn);
-      tr.append(td1, td2);
-      adminBody.appendChild(tr);
-    }
+  function openModal(html, mount) {
+    $('#modalBox').innerHTML = html;
+    $('#modal').hidden = false;
+    if (mount) mount($('#modalBox'));
   }
-
-  function renderSettings() {
-    document.getElementById('morningInput').value = settings.morning_push_time || '08:00';
-    document.querySelectorAll('.platform-cb').forEach(cb => {
-      cb.checked = settings.push_platforms.includes(cb.value);
+  function closeModal() { $('#modal').hidden = true; $('#modalBox').innerHTML = ''; }
+  function confirmDialog(title, message, onOk) {
+    openModal('<h3>' + esc(title) + '</h3><div class="muted">' + esc(message) + '</div>' +
+      '<div class="modal-actions"><button class="btn ghost" id="mdCancel">取消</button>' +
+      '<button class="btn danger" id="mdOk">确认</button></div>', function (box) {
+      $('#mdCancel', box).onclick = closeModal;
+      $('#mdOk', box).onclick = function () { closeModal(); onOk(); };
     });
-    document.getElementById('reminderInput').checked = !!settings.reminder_enabled;
-    document.getElementById('atAllInput').checked = !!settings.at_all_enabled;
-    document.getElementById('recentDaysInput').value = settings.recent_contest_days || 7;
-    document.getElementById('nowcoderScopeInput').value = settings.nowcoder_scope === 'series_only' ? 'series_only' : 'all';
-    document.getElementById('dailyProblemInput').checked = settings.daily_problem_enabled !== false;
-    document.getElementById('dailyProblemPlatformInput').value = settings.daily_problem_platform || 'nowcoder';
-    document.getElementById('recommendInput').checked = settings.recommend_enabled !== false;
-    document.getElementById('settlePushInput').checked = settings.settle_push_enabled !== false;
-    document.getElementById('settleDelayInput').value = settings.settle_delay_minutes || 10;
-    document.getElementById('settleMinInput').value = settings.settle_min_participants || 1;
-    document.getElementById('settleUnsolvedInput').checked = settings.settle_show_unsolved !== false;
-    document.getElementById('weeklyReportInput').checked = settings.weekly_report_enabled !== false;
-    document.getElementById('weeklyWeekdayInput').value = String(settings.weekly_report_weekday || 1);
-    document.getElementById('weeklyTimeInput').value = settings.weekly_report_time || '20:00';
-    document.getElementById('maxCharsInput').value = settings.max_plain_text_chars || 1800;
-    document.getElementById('maxLinesInput').value = settings.max_plain_text_lines || 36;
   }
 
-  function renderPlatformId(id) {
-    const el = document.getElementById('platformId');
-    if (el) el.textContent = id || '未检测到';
+  async function apiGet(path, params) {
+    try { return await A.apiGet(path, params || {}); }
+    catch (e) { throw new Error((e && e.message) ? e.message : String(e)); }
+  }
+  async function apiPost(path, body) {
+    try { return await A.apiPost(path, body || {}); }
+    catch (e) { throw new Error((e && e.message) ? e.message : String(e)); }
   }
 
-  function renderGroups() {
-    groupBody.innerHTML = '';
-    if (!groups.length) {
-      groupBody.innerHTML = '<tr><td colspan="5" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
-      return;
-    }
-    groups.sort((a, b) => String(a.group_id).localeCompare(String(b.group_id)));
-    for (const g of groups) {
-      const tr = document.createElement('tr');
-      const td1 = document.createElement('td'); td1.textContent = g.group_id;
-      const td2 = document.createElement('td');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!g.enabled;
-      cb.dataset.gid = g.group_id;
-      cb.className = 'group-enabled';
-      td2.appendChild(cb);
-      const td3 = document.createElement('td');
-      const timeInput = document.createElement('input');
-      timeInput.type = 'time';
-      timeInput.value = g.morning_push_time || '08:00';
-      timeInput.dataset.gid = g.group_id;
-      timeInput.className = 'group-time';
-      td3.appendChild(timeInput);
-      const tdSettle = document.createElement('td');
-      const settleCb = document.createElement('input');
-      settleCb.type = 'checkbox';
-      settleCb.checked = g.settle_push_enabled !== false;
-      settleCb.dataset.gid = g.group_id;
-      settleCb.className = 'group-settle';
-      tdSettle.appendChild(settleCb);
-      const td4 = document.createElement('td');
-      const testBtn = document.createElement('button');
-      testBtn.className = 'secondary';
-      testBtn.textContent = '测试推送';
-      testBtn.onclick = async () => {
-        try {
-          const r = await A.apiPost('test-push', { group_id: g.group_id });
-          show((r && r.message) || '测试推送已发送');
-        } catch (e) {
-          show('测试推送失败：' + (e && e.message ? e.message : e), true);
-        }
-      };
-      td4.appendChild(testBtn);
-      tr.append(td1, td2, td3, tdSettle, td4);
-      groupBody.appendChild(tr);
-    }
+  // ---------------- 脏标记 ----------------
+  function markDirty(section) {
+    state.dirty[section] = true;
+    syncDirty();
   }
-
-  async function loadConfig() {
-    try {
-      const r = await A.apiGet('config');
-      adminUsers = (r && Array.isArray(r.admin_users) ? r.admin_users : []).slice();
-      settings = (r && r.settings) || settings;
-      groups = (r && Array.isArray(r.groups) ? r.groups : []).map(g => Object.assign({}, g));
-      renderPlatformId(r && r.platform_id);
-      renderAdmins();
-      renderSettings();
-      renderGroups();
-    } catch (e) {
-      show('加载配置失败：' + (e && e.message ? e.message : e), true);
-    }
+  function clearDirty(section) {
+    state.dirty[section] = false;
+    syncDirty();
   }
-
-  document.getElementById('btnAddAdmin').onclick = async () => {
-    const input = document.getElementById('adminInput');
-    const value = input.value.trim();
-    if (!value) return;
-    if (!adminUsers.includes(value)) adminUsers.push(value);
-    input.value = '';
-    renderAdmins();
-    try {
-      await A.apiPost('config', { admin_users: adminUsers });
-      show('管理员已添加并保存');
-    } catch (e) {
-      show('保存失败：' + (e && e.message ? e.message : e), true);
+  function syncDirty() {
+    var any = state.dirty.settings || state.dirty.groups;
+    $('#dirtyBadge').hidden = !any;
+    $('#settingsDirty').hidden = !state.dirty.settings;
+    $('#groupsDirty').hidden = !state.dirty.groups;
+  }
+  window.addEventListener('beforeunload', function (e) {
+    if (state.dirty.settings || state.dirty.groups) {
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
     }
-  };
-  document.getElementById('adminInput').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('btnAddAdmin').click();
   });
 
-  document.getElementById('btnSaveSettings').onclick = async () => {
-    const morning = document.getElementById('morningInput').value;
-    if (!morning) { show('请选择早报时间', true); return; }
-    const platforms = [];
-    document.querySelectorAll('.platform-cb').forEach(cb => {
-      if (cb.checked) platforms.push(cb.value);
+  // ---------------- 路由 ----------------
+  function currentView() {
+    var hash = (location.hash || '').replace('#/', '').trim();
+    return VIEW_TITLES[hash] ? hash : 'overview';
+  }
+  function setView(view, force) {
+    if (!force && (state.dirty.settings || state.dirty.groups)) {
+      confirmDialog('有未保存的改动', '切换分区会丢失未保存的修改，确定继续吗？', function () {
+        state.dirty.settings = false; state.dirty.groups = false; syncDirty();
+        location.hash = '#/' + view;
+      });
+      return;
+    }
+    $$('.view').forEach(function (sec) { sec.hidden = sec.getAttribute('data-view') !== view; });
+    $$('.nav-item').forEach(function (a) {
+      a.classList.toggle('active', a.getAttribute('data-nav') === view);
     });
-    if (!platforms.length) { show('请至少选择一个推送平台', true); return; }
-    const recentDays = Number(document.getElementById('recentDaysInput').value);
-    if (!Number.isInteger(recentDays) || recentDays < 1 || recentDays > 30) {
-      show('最近比赛查询范围应为 1～30 的整数', true);
+    $('#viewTitle').textContent = VIEW_TITLES[view] || '';
+    document.body.classList.remove('nav-open');
+    var scrimNode = $('#scrim');
+    if (scrimNode) scrimNode.hidden = true;
+    if (view === 'overview') loadOverview();
+    if (view === 'groups') renderGroups();
+    if (view === 'bindings') loadBindings();
+    if (view === 'rank') prepareRank();
+    if (view === 'backup') renderBackupInfo();
+  }
+  window.addEventListener('hashchange', function () { setView(currentView(), true); });
+
+  // ---------------- 概览 ----------------
+  async function loadOverview() {
+    try {
+      var data = await apiGet('overview');
+      $('#ovStats').innerHTML =
+        stat(data.enabled_group_count, '启用群 / 共 ' + text(data.group_count) + ' 群') +
+        stat(data.admin_count, '管理员') +
+        stat(data.store_backend === 'sqlite' ? 'SQLite' : 'KV', '存储后端') +
+        stat(text(data.platform_id) || '-', '平台实例');
+      $('#platformId').textContent = text(data.platform_id) || '-';
+      $('#ovTime').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      var next = data.next_pushes || [];
+      $('#ovNext').innerHTML = next.length
+        ? '<div class="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>群</th></tr></thead><tbody>' +
+          next.map(function (item) {
+            return '<tr><td>' + esc(fmtIso(item.at)) + '</td><td>' + esc(item.kind === 'morning' ? '早报' : '训练周报') +
+              '</td><td class="mono">' + esc(item.group_id || '全部启用群') + '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<div class="empty">暂无排期（可能所有群都未启用）</div>';
+      renderPushLog(data.recent_pushes || []);
+      fillGroupSelectors();
+    } catch (e) {
+      toast('读取概览失败：' + e.message, 'err');
+    }
+  }
+  function stat(num, lbl) {
+    return '<div class="stat"><div class="num">' + esc(num) + '</div><div class="lbl">' + esc(lbl) + '</div></div>';
+  }
+  function renderPushLog(items) {
+    if (!items.length) {
+      $('#ovLog').innerHTML = '<tr><td colspan="5" class="muted">暂无推送记录</td></tr>';
       return;
     }
-    const settleDelay = Number(document.getElementById('settleDelayInput').value);
-    if (!Number.isInteger(settleDelay) || settleDelay < 1 || settleDelay > 60) {
-      show('赛后推送延迟应为 1～60 的整数', true);
-      return;
+    $('#ovLog').innerHTML = items.map(function (item) {
+      return '<tr><td>' + esc(fmtTs(item.ts)) + '</td><td class="mono">' + esc(item.group_id) + '</td><td>' +
+        esc(kindLabel(item.kind)) + '</td><td>' + (item.ok ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>') +
+        '</td><td>' + esc(item.detail) + '</td></tr>';
+    }).join('');
+  }
+  function kindLabel(kind) {
+    return ({ morning: '早报', weekly_boards: '周榜', weekly_report: '训练周报', settle: '赛后赛果', signup: '报名提醒', test: '试跑/测试' })[kind] || text(kind);
+  }
+  function fillGroupSelectors() {
+    var groups = state.config.groups || [];
+    var opts = groups.map(function (g) {
+      return '<option value="' + esc(g.group_id) + '">' + esc(g.group_id) + '（' + esc(platformLabel(g.platform_id)) + '）</option>';
+    }).join('');
+    ['#runGroup', '#rankGroup'].forEach(function (sel) {
+      var node = $(sel);
+      if (!node) return;
+      var keep = node.value;
+      node.innerHTML = opts || '<option value="">（暂无群）</option>';
+      if (keep) node.value = keep;
+    });
+    var bf = $('#bfGroup');
+    if (bf) {
+      bf.innerHTML = '<option value="">不加入群排行</option>' + opts;
     }
-    const settleMin = Number(document.getElementById('settleMinInput').value);
-    if (!Number.isInteger(settleMin) || settleMin < 1 || settleMin > 10) {
-      show('最少参赛人数应为 1～10 的整数', true);
-      return;
+  }
+
+  // ---------------- 基础设置 ----------------
+  function renderBasics() {
+    var admins = state.config.adminUsers || [];
+    $('#adminBody').innerHTML = admins.length
+      ? admins.map(function (id) {
+          return '<tr><td class="mono">' + esc(id) + '</td><td><button class="btn small danger" data-admin-remove="' + esc(id) + '">移除</button></td></tr>';
+        }).join('')
+      : '<tr><td colspan="2" class="muted">暂无管理员，请添加</td></tr>';
+    var settings = state.config.settings || {};
+    $('#basicsInfo').innerHTML =
+      '<div class="field"><label>平台实例 ID</label><div class="ctrl mono">' + esc(state.config.platformId || '-') + '</div></div>' +
+      '<div class="field"><label>早报时间</label><div class="ctrl">' + esc(settings.morning_push_time || '-') + '</div></div>' +
+      '<div class="field"><label>推送平台</label><div class="ctrl">' + esc((settings.push_platforms || []).map(platformLabel).join(' / ')) + '</div></div>' +
+      '<div class="field"><label>群数量</label><div class="ctrl">' + esc((state.config.groups || []).length) + '</div></div>';
+  }
+  async function saveAdmins(list, okMsg) {
+    try {
+      await apiPost('config', { admin_users: list });
+      state.config.adminUsers = list;
+      renderBasics();
+      toast(okMsg || '管理员已保存', 'ok');
+    } catch (e) {
+      toast('保存失败：' + e.message, 'err');
     }
-    const weeklyWeekday = Number(document.getElementById('weeklyWeekdayInput').value);
-    if (!Number.isInteger(weeklyWeekday) || weeklyWeekday < 1 || weeklyWeekday > 7) {
-      show('周报推送星期应为 1～7（周一=1）', true);
-      return;
+  }
+
+  // ---------------- 推送设置 ----------------
+  function renderSettings() {
+    var settings = state.config.settings || {};
+    $('#settingsGroups').innerHTML = SETTINGS_GROUPS.map(function (group) {
+      return '<details class="group"' + (group.id === 'morning' ? ' open' : '') + '>' +
+        '<summary>' + esc(group.title) + '</summary><div class="body">' +
+        group.fields.map(function (f) { return fieldHtml(f, settings); }).join('') +
+        '</div></details>';
+    }).join('');
+  }
+  function fieldHtml(f, settings) {
+    var value = settings[f.key];
+    var ctrl;
+    if (f.type === 'bool') {
+      ctrl = '<label class="switch"><input type="checkbox" data-key="' + f.key + '"' + (value ? ' checked' : '') +
+        '><span class="track"></span><span>' + esc(f.label) + '</span></label>';
+      return '<div class="field"><label></label><div class="ctrl">' + ctrl +
+        (f.desc ? '<span class="desc">' + esc(f.desc) + '</span>' : '') + '</div></div>';
     }
-    const weeklyTime = document.getElementById('weeklyTimeInput').value;
-    if (!weeklyTime) { show('请选择周报推送时间', true); return; }
-    const maxChars = Number(document.getElementById('maxCharsInput').value);
-    const maxLines = Number(document.getElementById('maxLinesInput').value);
-    if (!Number.isInteger(maxChars) || maxChars < 200 || maxChars > 10000) {
-      show('文字转图片最大字符数应为 200～10000 的整数', true);
-      return;
+    if (f.type === 'time') {
+      ctrl = '<input type="time" data-key="' + f.key + '" value="' + esc(value || '08:00') + '">';
+    } else if (f.type === 'number') {
+      ctrl = '<input type="number" data-key="' + f.key + '" value="' + esc(value) + '" min="' + f.min + '" max="' + f.max + '" step="1" inputmode="numeric">';
+    } else if (f.type === 'select') {
+      ctrl = '<select data-key="' + f.key + '">' + f.options.map(function (opt) {
+        return '<option value="' + esc(opt[0]) + '"' + (text(value) === opt[0] ? ' selected' : '') + '>' + esc(opt[1]) + '</option>';
+      }).join('') + '</select>';
+    } else {
+      var platforms = settings.push_platforms || [];
+      ctrl = '<div data-key="push_platforms" style="display:flex;flex-wrap:wrap;gap:4px">' + ['codeforces', 'nowcoder', 'atcoder', 'luogu'].map(function (p) {
+        return '<label class="switch"><input type="checkbox" class="platform-cb" value="' + p + '"' +
+          (platforms.indexOf(p) >= 0 ? ' checked' : '') + '><span class="track"></span><span>' + esc(platformLabel(p)) + '</span></label>';
+      }).join('') + '</div>';
     }
-    if (!Number.isInteger(maxLines) || maxLines < 10 || maxLines > 200) {
-      show('文字转图片最大行数应为 10～200 的整数', true);
-      return;
+    return '<div class="field" data-field="' + f.key + '"><label>' + esc(f.label) + '</label><div class="ctrl">' + ctrl +
+      (f.desc ? '<span class="desc">' + esc(f.desc) + '</span>' : '') +
+      '<span class="error" hidden></span></div></div>';
+  }
+  function collectSettings() {
+    var out = {};
+    SETTINGS_GROUPS.forEach(function (group) {
+      group.fields.forEach(function (f) {
+        var node = $('[data-key="' + f.key + '"]');
+        if (!node) return;
+        if (f.type === 'bool') out[f.key] = node.checked;
+        else if (f.type === 'number') out[f.key] = Number(node.value);
+        else if (f.type === 'platforms') out[f.key] = $$('.platform-cb').filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
+        else out[f.key] = node.value;
+      });
+    });
+    return out;
+  }
+  function setFieldError(key, message) {
+    var field = $('[data-field="' + key + '"]');
+    if (!field) return;
+    var err = $('.error', field);
+    field.classList.toggle('invalid', !!message);
+    if (err) { err.hidden = !message; err.textContent = message || ''; }
+    return field;
+  }
+  function validateSettings(s) {
+    var firstBad = null;
+    SETTINGS_GROUPS.forEach(function (group) {
+      group.fields.forEach(function (f) {
+        var message = '';
+        if (f.type === 'number') {
+          var num = s[f.key];
+          if (!Number.isInteger(num) || num < f.min || num > f.max) {
+            message = f.label + ' 应为 ' + f.min + '～' + f.max + ' 的整数';
+          }
+        } else if (f.type === 'time' && !s[f.key]) {
+          message = f.label + '不能为空';
+        } else if (f.type === 'platforms' && (!s[f.key] || !s[f.key].length)) {
+          message = '请至少选择一个推送平台';
+        }
+        setFieldError(f.key, message);
+        if (message && !firstBad) firstBad = $('[data-field="' + f.key + '"]');
+      });
+    });
+    if (firstBad && firstBad.scrollIntoView) firstBad.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return !firstBad;
+  }
+  async function saveSettings() {
+    var s = collectSettings();
+    if (!validateSettings(s)) { toast('有字段不合法，请检查红框项', 'err'); return; }
+    var btn = $('#settingsSave');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span>保存中';
+    try {
+      await apiPost('config', { settings: s });
+      state.config.settings = s;
+      clearDirty('settings');
+      toast('推送设置已保存并生效', 'ok');
+    } catch (e) {
+      toast('保存失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '保存推送设置';
     }
-    settings = {
-      morning_push_time: morning,
-      push_platforms: platforms,
-      reminder_enabled: document.getElementById('reminderInput').checked,
-      at_all_enabled: document.getElementById('atAllInput').checked,
-      recent_contest_days: recentDays,
-      nowcoder_scope: document.getElementById('nowcoderScopeInput').value === 'series_only' ? 'series_only' : 'all',
-      daily_problem_enabled: document.getElementById('dailyProblemInput').checked,
-      daily_problem_platform: document.getElementById('dailyProblemPlatformInput').value,
-      daily_problem_count: 1,
-      recommend_enabled: document.getElementById('recommendInput').checked,
-      settle_push_enabled: document.getElementById('settlePushInput').checked,
-      settle_delay_minutes: settleDelay,
-      settle_min_participants: settleMin,
-      settle_show_unsolved: document.getElementById('settleUnsolvedInput').checked,
-      weekly_report_enabled: document.getElementById('weeklyReportInput').checked,
-      weekly_report_weekday: weeklyWeekday,
-      weekly_report_time: weeklyTime,
-      max_plain_text_chars: maxChars,
-      max_plain_text_lines: maxLines
+  }
+
+  // ---------------- 群推送配置 ----------------
+  function filteredGroups() {
+    var q = state.groupPage.query.trim().toLowerCase();
+    return (state.config.groups || []).filter(function (g) {
+      if (!q) return true;
+      return (text(g.group_id) + ' ' + text(g.platform_id)).toLowerCase().indexOf(q) >= 0;
+    }).sort(function (a, b) { return text(a.group_id).localeCompare(text(b.group_id)); });
+  }
+  function renderGroups() {
+    var list = filteredGroups();
+    var size = state.groupPage.size;
+    var maxPage = Math.max(1, Math.ceil(list.length / size));
+    if (state.groupPage.page > maxPage) state.groupPage.page = maxPage;
+    var page = state.groupPage.page;
+    var rows = list.slice((page - 1) * size, page * size);
+    if (!rows.length) {
+      $('#groupBody').innerHTML = '<tr><td colspan="10" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
+    } else {
+      $('#groupBody').innerHTML = rows.map(function (g, index) {
+        var checked = (g.push_platforms || []).map(function (p) { return platformLabel(p); }).join('/');
+        return '<tr data-gid="' + esc(g.group_id) + '">' +
+          '<td><input type="checkbox" class="group-row-check" data-gid="' + esc(g.group_id) + '"></td>' +
+          '<td class="mono">' + esc(g.group_id) + '</td>' +
+          '<td>' + esc(platformLabel(g.platform_id)) + (g.umo ? '' : ' <span class="badge info">未记录会话</span>') + '</td>' +
+          '<td>' + (g.activated ? '<span class="badge ok">已激活</span>' : '<span class="badge warn">待激活</span>') + '</td>' +
+          '<td><label class="switch"><input type="checkbox" class="g-enabled" data-gid="' + esc(g.group_id) + '"' + (g.enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
+          '<td><input type="time" class="g-time" data-gid="' + esc(g.group_id) + '" value="' + esc(g.morning_push_time || '08:00') + '"></td>' +
+          '<td class="muted">' + esc(checked || '-') + '</td>' +
+          '<td><label class="switch"><input type="checkbox" class="g-reminder" data-gid="' + esc(g.group_id) + '"' + (g.reminder_enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
+          '<td><label class="switch"><input type="checkbox" class="g-settle" data-gid="' + esc(g.group_id) + '"' + (g.settle_push_enabled !== false ? ' checked' : '') + '><span class="track"></span></label></td>' +
+          '<td><div class="row-actions"><button class="btn small secondary" data-test-group="' + esc(g.group_id) + '">测试推送</button>' +
+          '<button class="btn small ghost" data-reset-row="' + esc(g.group_id) + '">还原</button></div></td>' +
+          '</tr>';
+      }).join('');
+    }
+    $('#groupPager').innerHTML = '共 ' + list.length + ' 个群 · 第 ' + page + ' / ' + maxPage + ' 页' +
+      '<button class="btn small ghost" id="groupPrev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
+      '<button class="btn small ghost" id="groupNext"' + (page >= maxPage ? ' disabled' : '') + '>下一页</button>';
+    var prev = $('#groupPrev'); if (prev) prev.onclick = function () { state.groupPage.page = page - 1; renderGroups(); };
+    var next = $('#groupNext'); if (next) next.onclick = function () { state.groupPage.page = page + 1; renderGroups(); };
+  }
+  function syncGroupRowToState(tr) {
+    var gid = tr.getAttribute('data-gid');
+    var group = (state.config.groups || []).filter(function (g) { return g.group_id === gid; })[0];
+    if (!group) return;
+    group.enabled = $('.g-enabled', tr).checked;
+    group.morning_push_time = $('.g-time', tr).value || '08:00';
+    group.reminder_enabled = $('.g-reminder', tr).checked;
+    group.settle_push_enabled = $('.g-settle', tr).checked;
+  }
+
+  function collectGroups() {
+    var byId = {};
+    $$('#groupBody tr[data-gid]').forEach(function (tr) {
+      var gid = tr.getAttribute('data-gid');
+      byId[gid] = tr;
+    });
+    return (state.config.groups || []).map(function (g) {
+      var tr = byId[g.group_id];
+      if (!tr) return g;
+      return Object.assign({}, g, {
+        enabled: $('.g-enabled', tr).checked,
+        morning_push_time: $('.g-time', tr).value || '08:00',
+        reminder_enabled: $('.g-reminder', tr).checked,
+        settle_push_enabled: $('.g-settle', tr).checked
+      });
+    });
+  }
+  async function saveGroups() {
+    var groups = (state.config.groups || []).slice();
+    var btn = $('#groupsSave');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span>保存中';
+    try {
+      await apiPost('config', { groups: groups });
+      state.config.groups = groups;
+      state.config.groupsOriginal = JSON.parse(JSON.stringify(groups));
+      clearDirty('groups');
+      renderGroups();
+      toast('群配置已保存并生效', 'ok');
+    } catch (e) {
+      toast('保存失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '保存群配置';
+    }
+  }
+  function selectedGroupIds() {
+    return $$('.group-row-check:checked').map(function (cb) { return cb.getAttribute('data-gid'); });
+  }
+  function batchToggle(enabled) {
+    var ids = selectedGroupIds();
+    if (!ids.length) { toast('请先勾选群', 'info'); return; }
+    ids.forEach(function (gid) {
+      var cb = $('.g-enabled[data-gid="' + gid + '"]');
+      if (cb) cb.checked = enabled;
+      var tr = $('tr[data-gid="' + gid + '"]');
+      if (tr) { tr.classList.add('dirty'); syncGroupRowToState(tr); }
+    });
+    markDirty('groups');
+    toast('已' + (enabled ? '启用' : '禁用') + ' ' + ids.length + ' 个群，记得点保存', 'info');
+  }
+  async function batchTestGroups() {
+    var ids = selectedGroupIds();
+    if (!ids.length) { toast('请先勾选群', 'info'); return; }
+    var box = $('#groupTestResult');
+    box.innerHTML = '<div class="muted">开始批量测试（串行）…</div>';
+    var lines = [];
+    for (var i = 0; i < ids.length; i++) {
+      try {
+        var r = await apiPost('test-push', { group_id: ids[i] });
+        lines.push('<div class="step ok"><span class="dot"></span>' + esc(ids[i]) + '：' + esc((r && r.message) || '已发送') + '</div>');
+      } catch (e) {
+        lines.push('<div class="step err"><span class="dot"></span>' + esc(ids[i]) + '：' + esc(e.message) + '</div>');
+      }
+      box.innerHTML = '<div class="steps">' + lines.join('') + '</div>';
+    }
+  }
+
+  // ---------------- 账号绑定 ----------------
+  async function loadBindings() {
+    try {
+      var data = await apiGet('bindings', {
+        platform: state.bindings.platform, q: state.bindings.query, limit: 2000, offset: 0
+      });
+      state.bindings.items = data.items || [];
+      state.bindings.total = data.total || 0;
+      state.bindings.selected = {};
+      renderBindings();
+    } catch (e) {
+      toast('读取绑定失败：' + e.message, 'err');
+    }
+  }
+  function renderBindings() {
+    var items = state.bindings.items;
+    var size = state.bindings.size;
+    var maxPage = Math.max(1, Math.ceil(items.length / size));
+    if (state.bindings.page > maxPage) state.bindings.page = maxPage;
+    var page = state.bindings.page;
+    var rows = items.slice((page - 1) * size, page * size);
+    $('#bindCount').textContent = items.length + ' 条';
+    if (!rows.length) {
+      $('#bindBody').innerHTML = '<tr><td colspan="7" class="muted">暂无绑定记录</td></tr>';
+    } else {
+      $('#bindBody').innerHTML = rows.map(function (item) {
+        var key = item.user_id + '|' + item.platform;
+        return '<tr><td><input type="checkbox" class="bind-row-check" data-key="' + esc(key) + '"' + (state.bindings.selected[key] ? ' checked' : '') + '></td>' +
+          '<td class="mono">' + esc(item.user_id) + '</td>' +
+          '<td>' + esc(platformLabel(item.platform)) + '</td>' +
+          '<td class="mono">' + esc(item.handle) + '</td>' +
+          '<td>' + esc(item.qq_name || '-') + '</td>' +
+          '<td class="muted">' + esc(fmtTs(item.verified_at)) + '</td>' +
+          '<td><div class="row-actions"><button class="btn small secondary" data-edit-binding="' + esc(key) + '">编辑</button>' +
+          '<button class="btn small danger" data-del-binding="' + esc(key) + '">删除</button></div></td></tr>';
+      }).join('');
+    }
+    $('#bindPager').innerHTML = '共 ' + items.length + ' 条 · 第 ' + page + ' / ' + maxPage + ' 页' +
+      '<button class="btn small ghost" id="bindPrev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
+      '<button class="btn small ghost" id="bindNext"' + (page >= maxPage ? ' disabled' : '') + '>下一页</button>';
+    var prev = $('#bindPrev'); if (prev) prev.onclick = function () { state.bindings.page = page - 1; renderBindings(); };
+    var next = $('#bindNext'); if (next) next.onclick = function () { state.bindings.page = page + 1; renderBindings(); };
+  }
+  function findBinding(key) {
+    var parts = key.split('|');
+    return state.bindings.items.filter(function (item) {
+      return item.user_id === parts[0] && item.platform === parts[1];
+    })[0];
+  }
+  function openBindingForm(item) {
+    $('#drawerTitle').textContent = item ? '编辑绑定' : '新增绑定';
+    $('#bfUser').value = item ? item.user_id : '';
+    $('#bfPlatform').value = item ? item.platform : 'codeforces';
+    $('#bfIdentifier').value = item ? item.handle : '';
+    $('#bfName').value = item ? (item.qq_name || '') : '';
+    $('#bfGroup').value = '';
+    updateBindHint();
+    $('#drawer').hidden = false;
+  }
+  function closeBindingForm() { $('#drawer').hidden = true; }
+  function updateBindHint() {
+    var p = $('#bfPlatform').value;
+    $('#bfHint').textContent = ({
+      codeforces: 'Codeforces 用户名或主页链接',
+      atcoder: 'AtCoder 用户名或主页链接',
+      nowcoder: '牛客数字 UID 或主页链接',
+      luogu: '洛谷数字 UID 或主页链接'
+    })[p] || '';
+  }
+  async function submitBinding() {
+    var payload = {
+      action: 'save',
+      user_id: $('#bfUser').value.trim(),
+      platform: $('#bfPlatform').value,
+      identifier: $('#bfIdentifier').value.trim(),
+      qq_name: $('#bfName').value.trim(),
+      group_id: $('#bfGroup').value
     };
-    try {
-      await A.apiPost('config', { settings });
-      show('推送设置已保存并生效');
-    } catch (e) {
-      show('保存失败：' + (e && e.message ? e.message : e), true);
+    if (!payload.user_id) { toast('请填写 QQ 用户 ID', 'err'); return; }
+    if (!payload.identifier) { toast('请填写账号', 'err'); return; }
+    var existing = state.bindings.items.filter(function (item) {
+      return item.user_id === payload.user_id && item.platform === payload.platform;
+    })[0];
+    var run = async function () {
+      var btn = $('#bfSubmit');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin"></span>正在校验账号…';
+      try {
+        var data = await apiPost('bindings', payload);
+        closeBindingForm();
+        toast(data && data.replaced ? ('已换绑，替换原账号 ' + data.replaced) : '绑定已保存', 'ok');
+        await loadBindings();
+      } catch (e) {
+        toast('绑定失败：' + e.message, 'err');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '保存';
+      }
+    };
+    if (existing && existing.handle !== payload.identifier) {
+      confirmDialog('确认换绑', '该用户在此平台已有绑定（' + existing.handle + '），保存后将替换。继续吗？', run);
+    } else {
+      run();
     }
-  };
-
-  document.getElementById('btnSaveGroups').onclick = async () => {
-    const updated = groups.map(g => {
-      const cb = document.querySelector('.group-enabled[data-gid="' + g.group_id + '"]');
-      const timeInput = document.querySelector('.group-time[data-gid="' + g.group_id + '"]');
-      const settleCb = document.querySelector('.group-settle[data-gid="' + g.group_id + '"]');
-      return {
-        group_id: g.group_id,
-        enabled: cb ? cb.checked : !!g.enabled,
-        morning_push_time: timeInput ? timeInput.value : (g.morning_push_time || '08:00'),
-        push_platforms: g.push_platforms || [],
-        reminder_enabled: !!g.reminder_enabled,
-        settle_push_enabled: settleCb ? settleCb.checked : g.settle_push_enabled !== false
-      };
+  }
+  function deleteBindings(keys) {
+    if (!keys.length) { toast('请先勾选要删除的绑定', 'info'); return; }
+    confirmDialog('确认删除', '将删除 ' + keys.length + ' 条绑定，删除后该用户需要重新绑定。继续吗？', async function () {
+      try {
+        var items = keys.map(function (key) {
+          var parts = key.split('|');
+          return { user_id: parts[0], platform: parts[1] };
+        });
+        var data = await apiPost('bindings', { action: 'delete', items: items });
+        toast('已删除 ' + text(data && data.removed) + ' 条绑定', 'ok');
+        await loadBindings();
+      } catch (e) {
+        toast('删除失败：' + e.message, 'err');
+      }
     });
-    try {
-      await A.apiPost('config', { groups: updated });
-      show('群配置已保存并生效');
-    } catch (e) {
-      show('保存失败：' + (e && e.message ? e.message : e), true);
-    }
-  };
+  }
 
-  A.ready().then(loadConfig);
+  // ---------------- 群排行 ----------------
+  function prepareRank() {
+    fillGroupSelectors();
+    if (!state.rankLoaded) { state.rankLoaded = true; loadRank(false); }
+  }
+  async function loadRank(refresh) {
+    var groupId = $('#rankGroup').value;
+    if (!groupId) { toast('暂无可查看的群', 'info'); return; }
+    var btn = $('#rankRefresh');
+    btn.disabled = true;
+    if (refresh) btn.innerHTML = '<span class="spin"></span>重算中';
+    try {
+      var data = await apiGet('rank', {
+        group_id: groupId,
+        platform: $('#rankPlatform').value,
+        progress: $('#rankProgress').checked ? '1' : '0',
+        refresh: refresh ? '1' : '0'
+      });
+      $('#rankStale').hidden = !data.stale;
+      $('#rankErrors').textContent = (data.errors && data.errors.length) ? ('平台提示：' + data.errors.join('；')) : '';
+      var rows = data.rows || [];
+      $('#rankBody').innerHTML = rows.length
+        ? rows.map(function (row, index) {
+            return '<tr><td>' + (index + 1) + '</td><td>' + esc(row.display_name || row.handle) + '</td>' +
+              '<td class="mono">' + esc(row.handle) + '</td><td>' + esc(row.display_value !== undefined ? row.display_value : row.value) +
+              '</td><td>' + esc(row.delta === null || row.delta === undefined ? '-' : row.delta) + '</td></tr>';
+          }).join('')
+        : '<tr><td colspan="5" class="muted">该群暂无排行数据</td></tr>';
+    } catch (e) {
+      toast('读取排行失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '刷新';
+    }
+  }
+
+  // ---------------- 配置备份 ----------------
+  function renderBackupInfo() {
+    var count = (state.config.groups || []).length;
+    $('#exportGroupsLabel').textContent = '包含群配置（' + count + ' 个群）';
+  }
+  function importSections(content) {
+    var payload = {};
+    if ($('#importAdmins').checked) payload.admin_users = content.admin_users;
+    if ($('#importSettings').checked) payload.settings = content.settings;
+    if ($('#importGroups').checked) payload.groups = content.groups;
+    return payload;
+  }
+  function doExport() {
+    var includeGroups = $('#exportGroups').checked;
+    var payload = {
+      version: 1.17,
+      exported_at: new Date().toISOString(),
+      admin_users: state.config.adminUsers,
+      settings: state.config.settings
+    };
+    if (includeGroups) payload.groups = state.config.groups;
+    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    var stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    a.href = url;
+    a.download = 'acmer-qq-bot-config-' + stamp + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('已导出配置', 'ok');
+  }
+  async function previewImport() {
+    var file = $('#importFile').files[0];
+    if (!file) { toast('请选择 JSON 文件', 'info'); return; }
+    var content;
+    try {
+      content = JSON.parse(await file.text());
+    } catch (e) {
+      toast('文件不是合法 JSON', 'err');
+      return;
+    }
+    try {
+      var data = await apiPost('import', {
+        apply: false,
+        include_groups: $('#importGroups').checked,
+        payload: importSections(content)
+      });
+      state.importPayload = content;
+      renderDiff(data.diff || {});
+    } catch (e) {
+      toast('校验失败：' + e.message, 'err');
+    }
+  }
+  function renderDiff(diff) {
+    var parts = [];
+    if (diff.admin_users) {
+      parts.push('<h3>管理员</h3><div class="muted">新增 ' + diff.admin_users.add.length + ' · 移除 ' + diff.admin_users.remove.length + ' · 保留 ' + diff.admin_users.keep.length + '</div>');
+    }
+    if (diff.settings) {
+      var keys = Object.keys(diff.settings);
+      parts.push('<h3>推送设置</h3>' + (keys.length
+        ? '<div class="table-wrap"><table><thead><tr><th>字段</th><th>当前</th><th>导入后</th></tr></thead><tbody>' +
+          keys.map(function (k) {
+            return '<tr><td>' + esc(k) + '</td><td>' + esc(JSON.stringify(diff.settings[k].from)) + '</td><td>' + esc(JSON.stringify(diff.settings[k].to)) + '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<div class="muted">无变化</div>'));
+    }
+    if (diff.groups) {
+      parts.push('<h3>群配置</h3><div class="muted">新增 ' + diff.groups.add.length + ' · 更新 ' + diff.groups.update.length + ' · 移除 ' + diff.groups.remove.length + '</div>');
+    }
+    parts.push('<div class="modal-actions"><button class="btn" id="btnApplyImport">确认导入</button></div>');
+    $('#importDiff').innerHTML = '<div class="diff">' + parts.join('') + '</div>';
+    $('#btnApplyImport').onclick = applyImport;
+  }
+  async function applyImport() {
+    var content = state.importPayload;
+    if (!content) return;
+    confirmDialog('确认导入', '导入会覆盖推送设置与群配置、并合并管理员列表，确定继续吗？', async function () {
+      try {
+        var data = await apiPost('import', {
+          apply: true,
+          include_groups: $('#importGroups').checked,
+          payload: importSections(content)
+        });
+        toast('导入完成：' + JSON.stringify(data.applied_counts || {}), 'ok');
+        $('#importDiff').innerHTML = '';
+        await loadConfig();
+      } catch (e) {
+        toast('导入失败：' + e.message, 'err');
+      }
+    });
+  }
+
+  // ---------------- 加载与事件 ----------------
+  async function loadConfig() {
+    try {
+      var data = await apiGet('config');
+      state.config.adminUsers = (data && Array.isArray(data.admin_users)) ? data.admin_users.slice() : [];
+      state.config.settings = (data && data.settings) || {};
+      state.config.groups = (data && Array.isArray(data.groups)) ? data.groups.slice() : [];
+      state.config.groupsOriginal = JSON.parse(JSON.stringify(state.config.groups));
+      state.config.platformId = (data && data.platform_id) || '';
+      $('#platformId').textContent = state.config.platformId || '-';
+      renderBasics();
+      renderSettings();
+      renderGroups();
+      fillGroupSelectors();
+      syncDirty();
+    } catch (e) {
+      toast('加载配置失败：' + e.message, 'err');
+    }
+  }
+
+  function bindEvents() {
+    $('#navToggle').onclick = function () {
+      var open = document.body.classList.toggle('nav-open');
+      $('#scrim').hidden = !open;
+    };
+    $('#scrim').onclick = function () {
+      document.body.classList.remove('nav-open');
+      $('#scrim').hidden = true;
+    };
+    $('#btnReload').onclick = function () { loadConfig(); loadOverview(); toast('已重新加载', 'ok'); };
+    $('#ovRefresh').onclick = loadOverview;
+    $('#ovLogMore').onclick = async function () {
+      try {
+        var data = await apiGet('push-log', { limit: 200 });
+        renderPushLog(data.items || []);
+        toast('已加载最近 ' + text((data.items || []).length) + ' 条', 'info');
+      } catch (e) { toast('读取日志失败：' + e.message, 'err'); }
+    };
+    $('#runNow').onclick = async function () {
+      var btn = $('#runNow');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin"></span>试跑中';
+      $('#runResult').innerHTML = '';
+      try {
+        var data = await apiPost('run-now', {
+          group_id: $('#runGroup').value,
+          kind: $('#runKind').value,
+          contest_id: $('#runContest').value.trim()
+        });
+        var steps = (data.results || []).map(function (r) {
+          return '<div class="step ' + (r.ok ? 'ok' : 'err') + '"><span class="dot"></span>' + esc(r.step) + '：' + esc(r.message) + '</div>';
+        }).join('');
+        $('#runResult').innerHTML = '<div class="steps">' + steps + '</div>';
+        toast(data.ok ? '试跑完成' : '试跑未成功，请查看结果', data.ok ? 'ok' : 'err');
+      } catch (e) {
+        toast('试跑失败：' + e.message, 'err');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '试跑';
+      }
+    };
+
+    $('#btnAddAdmin').onclick = function () {
+      var input = $('#adminInput');
+      var value = input.value.trim();
+      if (!value) return;
+      var list = state.config.adminUsers.slice();
+      if (list.indexOf(value) < 0) list.push(value);
+      input.value = '';
+      saveAdmins(list, '管理员已添加并保存');
+    };
+    $('#adminInput').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') $('#btnAddAdmin').click();
+    });
+    $('#adminBody').addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-admin-remove]');
+      if (!btn) return;
+      var id = btn.getAttribute('data-admin-remove');
+      confirmDialog('移除管理员', '确定移除 ' + id + ' 吗？', function () {
+        saveAdmins(state.config.adminUsers.filter(function (x) { return x !== id; }), '管理员已移除');
+      });
+    });
+
+    $('#settingsGroups').addEventListener('change', function () { markDirty('settings'); });
+    $('#settingsGroups').addEventListener('input', function () { markDirty('settings'); });
+    $('#settingsSave').onclick = saveSettings;
+
+    $('#groupSearch').addEventListener('input', function (e) {
+      state.groupPage.query = e.target.value;
+      state.groupPage.page = 1;
+      renderGroups();
+    });
+    $('#groupPageSize').onchange = function (e) {
+      state.groupPage.size = Number(e.target.value);
+      state.groupPage.page = 1;
+      renderGroups();
+    };
+    $('#groupHeadCheck').onchange = function (e) {
+      $$('.group-row-check').forEach(function (cb) { cb.checked = e.target.checked; });
+    };
+    $('#groupSelectAll').onclick = function () {
+      $$('.group-row-check').forEach(function (cb) { cb.checked = true; });
+    };
+    $('#groupEnable').onclick = function () { batchToggle(true); };
+    $('#groupDisable').onclick = function () { batchToggle(false); };
+    $('#groupTest').onclick = batchTestGroups;
+    $('#groupBody').addEventListener('change', function (e) {
+      var tr = e.target.closest('tr[data-gid]');
+      if (!tr) return;
+      syncGroupRowToState(tr);
+      tr.classList.add('dirty');
+      markDirty('groups');
+    });
+    $('#groupBody').addEventListener('click', function (e) {
+      var testBtn = e.target.closest('[data-test-group]');
+      if (testBtn) {
+        var gid = testBtn.getAttribute('data-test-group');
+        apiPost('test-push', { group_id: gid })
+          .then(function (r) { toast((r && r.message) || '测试推送已发送', 'ok'); })
+          .catch(function (err) { toast('测试推送失败：' + err.message, 'err'); });
+        return;
+      }
+      var resetBtn = e.target.closest('[data-reset-row]');
+      if (resetBtn) {
+        var rowId = resetBtn.getAttribute('data-reset-row');
+        var original = (state.config.groupsOriginal || state.config.groups || []).filter(function (g) { return g.group_id === rowId; })[0];
+        if (!original) return;
+        var tr = $('tr[data-gid="' + rowId + '"]');
+        $('.g-enabled', tr).checked = !!original.enabled;
+        $('.g-time', tr).value = original.morning_push_time || '08:00';
+        $('.g-reminder', tr).checked = !!original.reminder_enabled;
+        $('.g-settle', tr).checked = original.settle_push_enabled !== false;
+        tr.classList.remove('dirty');
+        syncGroupRowToState(tr);
+        toast('已还原本行', 'info');
+      }
+    });
+    $('#groupsSave').onclick = saveGroups;
+
+    $('#bindPlatform').onchange = function (e) {
+      state.bindings.platform = e.target.value;
+      loadBindings();
+    };
+    var bindSearchTimer = null;
+    $('#bindSearch').addEventListener('input', function (e) {
+      clearTimeout(bindSearchTimer);
+      var value = e.target.value;
+      bindSearchTimer = setTimeout(function () {
+        state.bindings.query = value;
+        loadBindings();
+      }, 300);
+    });
+    $('#bindHeadCheck').onchange = function (e) {
+      $$('.bind-row-check').forEach(function (cb) {
+        cb.checked = e.target.checked;
+        state.bindings.selected[cb.getAttribute('data-key')] = e.target.checked;
+      });
+    };
+    $('#bindBody').addEventListener('change', function (e) {
+      var cb = e.target.closest('.bind-row-check');
+      if (cb) state.bindings.selected[cb.getAttribute('data-key')] = cb.checked;
+    });
+    $('#btnNewBinding').onclick = function () { openBindingForm(null); };
+    $('#bindBody').addEventListener('click', function (e) {
+      var editBtn = e.target.closest('[data-edit-binding]');
+      if (editBtn) { openBindingForm(findBinding(editBtn.getAttribute('data-edit-binding'))); return; }
+      var delBtn = e.target.closest('[data-del-binding]');
+      if (delBtn) { deleteBindings([delBtn.getAttribute('data-del-binding')]); }
+    });
+    $('#bindBatchDelete').onclick = function () {
+      var keys = Object.keys(state.bindings.selected).filter(function (k) { return state.bindings.selected[k]; });
+      deleteBindings(keys);
+    };
+    $('#bfCancel').onclick = closeBindingForm;
+    $('#bfSubmit').onclick = submitBinding;
+    $('#bfPlatform').onchange = updateBindHint;
+
+    $('#rankLoad').onclick = function () { loadRank(false); };
+    $('#rankRefresh').onclick = function () { loadRank(true); };
+
+    $('#btnExport').onclick = doExport;
+    $('#btnPreview').onclick = previewImport;
+  }
+
+  function boot() {
+    bindEvents();
+    renderBackupInfo();
+    A.ready().then(function () {
+      loadConfig().then(function () {
+        setView(currentView(), true);
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
 })();
 </script>
 </body>

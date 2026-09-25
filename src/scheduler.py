@@ -27,6 +27,18 @@ class PushScheduler:
         self._task: asyncio.Task | None = None
         self._prune_counter = 0
 
+    async def _record_push_log(
+        self, group_id: str, kind: str, ok: bool, detail: str = ""
+    ) -> None:
+        """向插件写入推送日志；插件未提供该方法时静默跳过。"""
+        logger_fn = getattr(self.plugin, "_log_push", None)
+        if not callable(logger_fn):
+            return
+        try:
+            await logger_fn(group_id, kind, ok, detail)
+        except Exception:  # noqa: BLE001 - 日志失败不影响推送
+            pass
+
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="acmer-push")
@@ -187,6 +199,9 @@ class PushScheduler:
                 logger.warning(
                     "群 %s 早报发送失败，下个周期重试", group.group_id
                 )
+                await self._record_push_log(
+                    group.group_id, "morning", False, "早报发送失败"
+                )
                 return
         boards_sent = True
         if callable(board_pusher):
@@ -205,14 +220,26 @@ class PushScheduler:
                 logger.warning(
                     "群 %s 早报已发送，但周榜推送失败", group.group_id
                 )
+            await self._record_push_log(
+                group.group_id,
+                "morning",
+                True,
+                "早报已发送" if boards_sent else "早报已发送，周榜失败",
+            )
             logger.info("群 %s 早报处理完成", group.group_id)
             return
         if boards_sent:
             await self.plugin.put_kv_data(sent_key, True)
+            await self._record_push_log(
+                group.group_id, "morning", True, "仅周榜"
+            )
             logger.info("群 %s 周榜处理完成", group.group_id)
         else:
             logger.warning(
                 "群 %s 周榜推送失败，下个周期重试", group.group_id
+            )
+            await self._record_push_log(
+                group.group_id, "morning", False, "周榜推送失败"
             )
 
     async def _maybe_remind(

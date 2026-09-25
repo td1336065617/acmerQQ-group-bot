@@ -208,10 +208,13 @@ def test_two_tier_reminders_are_idempotent():
         ]
         bot = _build_bot(main_module, contests=contests, groups=[group])
         assert await bot.tick_signup_reminders(NOW) == 2
-        assert bot._kv == {
-            "signup_1001_24h": True,
-            "signup_1002_2h": True,
-        }
+        assert bot._kv.get("signup_1001_24h") is True
+        assert bot._kv.get("signup_1002_2h") is True
+        # 推送结果同时写入后台「运行状态」日志
+        assert [item["kind"] for item in bot._kv["push_log"]] == [
+            "signup",
+            "signup",
+        ]
         texts = [text for _gid, text in bot._sent]
         assert len(texts) == 2
         assert "报名即将截止：24 小时档" in texts[0]

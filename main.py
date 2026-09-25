@@ -137,6 +137,11 @@ NOWCODER_SCOPE_LABELS = {
 }
 # @全体成员 尝试失败后，对该群暂缓重试的时间（秒）
 AT_ALL_BLOCK_SECONDS = 6 * 3600
+# 后台「运行状态」用的推送日志：KV 环形保留最近 N 条，避免无限增长。
+PUSH_LOG_KEY = "push_log"
+PUSH_LOG_MAX = 200
+# 「立即试跑」支持的类型（早报 / 训练周报 / 赛后赛果 / 报名提醒）。
+RUN_NOW_KINDS = ("morning", "weekly", "settle", "signup")
 # 比赛列表最多展示的条数（防止消息过长）
 MAX_CONTEST_LIST = 30
 # 群排行按平台分页，避免 2000 人群一次生成超长图片/消息。
@@ -505,6 +510,48 @@ class AcmerGroupBot(Star):
                 self._web_test_push,
                 ["POST"],
                 "向指定群发送测试早报推送",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/overview",
+                self._web_overview,
+                ["GET"],
+                "后台概览与运行状态",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/push-log",
+                self._web_push_log,
+                ["GET"],
+                "定时推送日志",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/bindings",
+                self._web_bindings_list,
+                ["GET"],
+                "账号绑定列表",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/bindings",
+                self._web_bindings_write,
+                ["POST"],
+                "账号绑定增删改",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/rank",
+                self._web_rank,
+                ["GET"],
+                "群排行只读查看",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/run-now",
+                self._web_run_now,
+                ["POST"],
+                "立即试跑定时推送",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/import",
+                self._web_import,
+                ["POST"],
+                "导入后台配置",
             )
         except Exception as exc:
             logger.error("注册 Web API 失败: %s", exc)
@@ -3988,8 +4035,13 @@ class AcmerGroupBot(Star):
         min_participants: int,
         show_unsolved: bool,
         platform_order: List[str],
+        write_key: bool = True,
     ) -> int:
-        """处理单场赛果：采集 → 渲染 → 推送 → 写幂等键；返回 1/0。"""
+        """处理单场赛果：采集 → 渲染 → 推送 → 写幂等键；返回 1/0。
+
+        write_key=False 供后台“立即试跑”使用：只推送、不写幂等键，
+        避免挤掉当天正式的赛后赛果推送。
+        """
         members = await self._settlement_members(group.group_id, platform)
         if len(members) < max(1, min_participants):
             logger.info(
@@ -4062,13 +4114,22 @@ class AcmerGroupBot(Star):
                 platform,
             )
             return 0
-        await self.put_kv_data(key, True)
+        if write_key and key:
+            await self.put_kv_data(key, True)
+        await self._log_push(
+            group.group_id,
+            "settle",
+            True,
+            f"{platform} {contest.contest_id}"
+            + ("" if write_key else "（试跑）"),
+        )
         logger.info(
-            "群 %s 已推送 %s %s 赛果（%d 人）",
+            "群 %s 已推送 %s %s 赛果（%d 人%s）",
             group.group_id,
             platform,
             contest.contest_id,
             len(result.rows),
+            "" if write_key else "，试跑未写幂等键",
         )
         return 1
 
@@ -4267,62 +4328,84 @@ class AcmerGroupBot(Star):
         for group in await self.get_groups():
             if not group.enabled:
                 continue
-            key = f"weekly_{group.group_id}_{week_key}"
-            if await self.get_kv_data(key, False):
-                continue
-            try:
-                report = await self.build_weekly_report(group)
-            except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
-                logger.warning(
-                    "群 %s 周报构建失败：%s", group.group_id, exc
-                )
-                continue
-            if not report:
-                continue
-            text = str(report.get("text") or "").strip()
-            text_sent = True
-            if text:
-                text_sent = await self.send_notification(group, text)
-            if not text_sent:
-                logger.warning(
-                    "群 %s 周报文字推送失败，下个周期重试", group.group_id
-                )
-                continue
-            cards_ok = True
-            sent_cards = 0
-            for card in report.get("cards") or []:
-                title = str(card.get("title") or "本周训练周报")
-                image_path = card.get("image")
-                if image_path is not None and Path(image_path).is_file():
-                    ok = await self._send_group_image(
-                        group, image_path, caption=title
-                    )
-                else:
-                    ok = await self.send_notification(
-                        group, str(card.get("text") or "")
-                    )
-                if ok:
-                    sent_cards += 1
-                else:
-                    cards_ok = False
-                    logger.warning(
-                        "群 %s 的 %s 推送失败", group.group_id, title
-                    )
-            if not text and sent_cards == 0:
-                # 既没有文字也没有卡片 → 视为未送达，不写幂等键。
-                logger.warning("群 %s 周报无可推送内容，跳过", group.group_id)
-                continue
-            await self.put_kv_data(key, True)
-            pushed += 1
-            logger.info(
-                "群 %s 已推送训练周报（%s，文字=%s，卡片=%d%s）",
-                group.group_id,
-                week_key,
-                "是" if text else "否",
-                sent_cards,
-                "" if cards_ok else "，部分卡片失败",
-            )
+            if await self._push_weekly_report_for_group(
+                group, moment, week_key=week_key
+            ):
+                pushed += 1
         return pushed
+
+    async def _push_weekly_report_for_group(
+        self,
+        group: GroupConfig,
+        moment: datetime,
+        *,
+        week_key: str = "",
+        write_key: bool = True,
+    ) -> bool:
+        """推送单个群的训练周报；返回是否送达。
+
+        write_key=False 供后台“立即试跑”使用：不写 weekly 幂等键。
+        """
+        week = week_key or self._iso_week_key(moment)
+        key = f"weekly_{group.group_id}_{week}"
+        if write_key and await self.get_kv_data(key, False):
+            return False
+        try:
+            report = await self.build_weekly_report(group)
+        except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
+            logger.warning("群 %s 周报构建失败：%s", group.group_id, exc)
+            return False
+        if not report:
+            return False
+        text = str(report.get("text") or "").strip()
+        text_sent = True
+        if text:
+            text_sent = await self.send_notification(group, text)
+        if not text_sent:
+            logger.warning("群 %s 周报文字推送失败，下个周期重试", group.group_id)
+            return False
+        cards_ok = True
+        sent_cards = 0
+        for card in report.get("cards") or []:
+            title = str(card.get("title") or "本周训练周报")
+            image_path = card.get("image")
+            if image_path is not None and Path(image_path).is_file():
+                ok = await self._send_group_image(
+                    group, image_path, caption=title
+                )
+            else:
+                ok = await self.send_notification(
+                    group, str(card.get("text") or "")
+                )
+            if ok:
+                sent_cards += 1
+            else:
+                cards_ok = False
+                logger.warning("群 %s 的 %s 推送失败", group.group_id, title)
+        if not text and sent_cards == 0:
+            # 既没有文字也没有卡片 → 视为未送达，不写幂等键。
+            logger.warning("群 %s 周报无可推送内容，跳过", group.group_id)
+            return False
+        if write_key:
+            await self.put_kv_data(key, True)
+        try:
+            await self._log_push(
+                group.group_id,
+                "weekly_report",
+                True,
+                "试跑" if not write_key else week,
+            )
+        except Exception:  # noqa: BLE001 - 日志失败不影响推送
+            pass
+        logger.info(
+            "群 %s 已推送训练周报（%s，文字=%s，卡片=%d%s）",
+            group.group_id,
+            week,
+            "是" if text else "否",
+            sent_cards,
+            "" if cards_ok else "，部分卡片失败",
+        )
+        return True
 
     # ------------------------------------------------------------------
     # 报名截止提醒（A4）
@@ -4409,13 +4492,8 @@ class AcmerGroupBot(Star):
             text = self._signup_reminder_text(contest, deadline, remaining)
             sent = False
             for group in groups:
-                try:
-                    if await self.send_notification(group, text):
-                        sent = True
-                except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
-                    logger.warning(
-                        "群 %s 报名提醒发送异常：%s", group.group_id, exc
-                    )
+                if await self._send_signup_text(group, text):
+                    sent = True
             if not sent:
                 logger.warning(
                     "牛客比赛 %s 报名提醒发送失败，下个周期重试",
@@ -4423,6 +4501,9 @@ class AcmerGroupBot(Star):
                 )
                 continue
             await self.put_kv_data(key, True)
+            await self._log_push(
+                "", "signup", True, f"{contest.contest_id} {tier}"
+            )
             reminded += 1
             logger.info(
                 "已推送牛客比赛 %s 的报名截止提醒（%s，剩余 %.1f 小时，%d 个群）",
@@ -4432,6 +4513,14 @@ class AcmerGroupBot(Star):
                 len(groups),
             )
         return reminded
+
+    async def _send_signup_text(self, group: GroupConfig, text: str) -> bool:
+        """向单个群发送报名提醒；异常按失败处理，不打断其他群。"""
+        try:
+            return bool(await self.send_notification(group, text))
+        except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
+            logger.warning("群 %s 报名提醒发送异常：%s", group.group_id, exc)
+            return False
 
     async def build_test_text(self, group: GroupConfig) -> str:
         """测试推送内容：优先今日早报，今日无比赛时展示最近一场。
@@ -4996,6 +5085,179 @@ class AcmerGroupBot(Star):
     # ------------------------------------------------------------------
     # WebUI 配置
     # ------------------------------------------------------------------
+    @staticmethod
+    def _query_param(name: str, default: str = "") -> str:
+        """读取 GET 查询参数。
+
+        不同 AstrBot 版本的 request 实现略有差异（args / query），这里集中兜底，
+        避免各接口散落 try/except。
+        """
+        for source in (
+            getattr(request, "args", None),
+            getattr(request, "query", None),
+        ):
+            if source is None:
+                continue
+            getter = getattr(source, "get", None)
+            if not callable(getter):
+                continue
+            try:
+                value = getter(name)
+            except Exception:  # noqa: BLE001 - 参数读取失败按缺省处理
+                continue
+            if value is not None:
+                return str(value)
+        return default
+
+    async def _log_push(
+        self, group_id: str, kind: str, ok: bool, detail: str = ""
+    ) -> None:
+        """把一次推送结果写进环形日志（最近 PUSH_LOG_MAX 条），失败只告警。"""
+        try:
+            items = await self.get_kv_data(PUSH_LOG_KEY, []) or []
+        except Exception as exc:  # noqa: BLE001 - 日志失败不影响推送
+            logger.warning("读取推送日志失败：%s", exc)
+            return
+        if not isinstance(items, list):
+            items = []
+        items.append(
+            {
+                "ts": time.time(),
+                "group_id": str(group_id),
+                "kind": str(kind),
+                "ok": bool(ok),
+                "detail": str(detail or "")[:200],
+            }
+        )
+        try:
+            await self.put_kv_data(PUSH_LOG_KEY, items[-PUSH_LOG_MAX:])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("写入推送日志失败：%s", exc)
+
+    @staticmethod
+    def _next_time_occurrence(
+        now: datetime, hhmm: str
+    ) -> Optional[datetime]:
+        """今天的 hhmm 若已过，则返回明天的同一时刻。"""
+        try:
+            text = validate_hhmm(hhmm)
+        except ValueError:
+            return None
+        hour, minute = (int(part) for part in text.split(":"))
+        moment = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return moment if moment > now else moment + timedelta(days=1)
+
+    @staticmethod
+    def _next_weekday_occurrence(
+        now: datetime, weekday: int, hhmm: str
+    ) -> Optional[datetime]:
+        """下一个指定星期（1=周一）的 hhmm。"""
+        try:
+            text = validate_hhmm(hhmm)
+        except ValueError:
+            return None
+        hour, minute = (int(part) for part in text.split(":"))
+        target = max(1, min(7, int(weekday)))
+        moment = (now + timedelta(days=(target - now.isoweekday()) % 7)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if moment <= now:
+            moment += timedelta(days=7)
+        return moment
+
+    async def _next_push_times(
+        self, groups: List[GroupConfig], now: Optional[datetime] = None
+    ) -> List[dict]:
+        """各群下次早报 + 全局下次周报；赛果/报名提醒是事件驱动，不在其中。"""
+        moment = now or datetime.now(CN_TZ)
+        settings = await self.get_settings()
+        entries: List[dict] = []
+        for group in groups:
+            if not group.enabled:
+                continue
+            at = self._next_time_occurrence(moment, group.morning_push_time)
+            if at is not None:
+                entries.append(
+                    {
+                        "group_id": str(group.group_id),
+                        "kind": "morning",
+                        "at": at.isoformat(),
+                    }
+                )
+        if settings.get("weekly_report_enabled", True):
+            at = self._next_weekday_occurrence(
+                moment,
+                settings.get("weekly_report_weekday", 1),
+                settings.get("weekly_report_time", "20:00"),
+            )
+            if at is not None:
+                entries.append(
+                    {"group_id": "", "kind": "weekly_report", "at": at.isoformat()}
+                )
+        entries.sort(key=lambda item: item["at"])
+        return entries[:20]
+
+    async def _web_overview(self):
+        """后台概览：计数、平台实例、存储后端、最近推送、下次推送。"""
+        try:
+            groups = await self.get_groups()
+            admins = await self._get_admins()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("后台概览读取失败：%s", exc)
+            return error_response("读取概览失败，请稍后重试")
+        try:
+            raw_log = await self.get_kv_data(PUSH_LOG_KEY, []) or []
+        except Exception:  # noqa: BLE001 - 日志缺失不影响概览
+            raw_log = []
+        if not isinstance(raw_log, list):
+            raw_log = []
+        recent = [item for item in raw_log if isinstance(item, dict)][-20:][::-1]
+        return json_response(
+            {
+                "status": "success",
+                "data": {
+                    "group_count": len(groups),
+                    "enabled_group_count": sum(1 for g in groups if g.enabled),
+                    "admin_count": len(admins),
+                    "platform_id": self._default_platform_id(),
+                    "store_backend": (
+                        "sqlite"
+                        if self.account_registry.store_enabled
+                        else "kv"
+                    ),
+                    "next_pushes": await self._next_push_times(groups),
+                    "recent_pushes": recent,
+                },
+            }
+        )
+
+    async def _web_push_log(self):
+        """推送日志：倒序返回，支持 limit / group_id。"""
+        try:
+            limit = int(self._query_param("limit", "50") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(PUSH_LOG_MAX, limit))
+        group_id = self._query_param("group_id", "").strip()
+        try:
+            items = await self.get_kv_data(PUSH_LOG_KEY, []) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取推送日志失败：%s", exc)
+            items = []
+        if not isinstance(items, list):
+            items = []
+        rows = [item for item in items if isinstance(item, dict)]
+        if group_id:
+            rows = [
+                item
+                for item in rows
+                if str(item.get("group_id") or "") == group_id
+            ]
+        rows = rows[::-1][:limit]
+        return json_response(
+            {"status": "success", "data": {"items": rows, "total": len(rows)}}
+        )
+
     async def _web_config_get(self):
         return json_response(
             {
@@ -5024,172 +5286,26 @@ class AcmerGroupBot(Star):
                 settings = payload["settings"]
                 if not isinstance(settings, dict):
                     raise ValueError("settings 必须是对象")
-                current = await self.get_settings()
-                morning = settings.get(
-                    "morning_push_time", current["morning_push_time"]
+                normalized = await self._normalize_settings_payload(
+                    settings, await self.get_settings()
                 )
-                morning = validate_hhmm(morning)
-                raw_platforms = settings.get(
-                    "push_platforms", current["push_platforms"]
-                )
-                platforms = raw_platforms or list(DEFAULT_PLATFORMS)
-                if not isinstance(platforms, list):
-                    raise ValueError("push_platforms 必须是列表")
-                platforms = [p for p in DEFAULT_PLATFORMS if p in platforms]
-                max_plain_text_chars = self._validate_bounded_int(
-                    settings.get(
-                        "max_plain_text_chars", current["max_plain_text_chars"]
-                    ),
-                    "文字转图片最大字符数",
-                    MIN_MAX_PLAIN_TEXT_CHARS,
-                    MAX_MAX_PLAIN_TEXT_CHARS,
-                )
-                max_plain_text_lines = self._validate_bounded_int(
-                    settings.get(
-                        "max_plain_text_lines", current["max_plain_text_lines"]
-                    ),
-                    "文字转图片最大行数",
-                    MIN_MAX_PLAIN_TEXT_LINES,
-                    MAX_MAX_PLAIN_TEXT_LINES,
-                )
-                recent_contest_days = self._validate_bounded_int(
-                    settings.get(
-                        "recent_contest_days", current["recent_contest_days"]
-                    ),
-                    "最近比赛查询天数",
-                    MIN_RECENT_CONTEST_DAYS,
-                    MAX_RECENT_CONTEST_DAYS,
-                )
-                nowcoder_scope = self._read_nowcoder_scope(
-                    settings.get("nowcoder_scope", current["nowcoder_scope"])
-                )
-                settle_delay_minutes = self._validate_bounded_int(
-                    settings.get(
-                        "settle_delay_minutes", current["settle_delay_minutes"]
-                    ),
-                    "赛后赛果推送延迟",
-                    MIN_SETTLE_DELAY_MINUTES,
-                    MAX_SETTLE_DELAY_MINUTES,
-                )
-                daily_problem_count = self._validate_bounded_int(
-                    settings.get(
-                        "daily_problem_count", current["daily_problem_count"]
-                    ),
-                    "每日一题数量",
-                    MIN_DAILY_PROBLEM_COUNT,
-                    MAX_DAILY_PROBLEM_COUNT,
-                )
-                settle_min_participants = self._validate_bounded_int(
-                    settings.get(
-                        "settle_min_participants",
-                        current["settle_min_participants"],
-                    ),
-                    "赛后赛果最少参赛人数",
-                    MIN_SETTLE_MIN_PARTICIPANTS,
-                    MAX_SETTLE_MIN_PARTICIPANTS,
-                )
-                weekly_report_weekday = self._validate_bounded_int(
-                    settings.get(
-                        "weekly_report_weekday",
-                        current["weekly_report_weekday"],
-                    ),
-                    "训练周报推送星期",
-                    MIN_WEEKLY_REPORT_WEEKDAY,
-                    MAX_WEEKLY_REPORT_WEEKDAY,
-                )
-                weekly_report_time = validate_hhmm(
-                    settings.get(
-                        "weekly_report_time", current["weekly_report_time"]
-                    )
-                )
-                await self.put_kv_data(
-                    "settings",
-                    {
-                        "morning_push_time": morning,
-                        "push_platforms": platforms or list(DEFAULT_PLATFORMS),
-                        "reminder_enabled": bool(
-                            settings.get(
-                                "reminder_enabled", current["reminder_enabled"]
-                            )
-                        ),
-                        "at_all_enabled": bool(
-                            settings.get(
-                                "at_all_enabled", current["at_all_enabled"]
-                            )
-                        ),
-                        "max_plain_text_chars": max_plain_text_chars,
-                        "max_plain_text_lines": max_plain_text_lines,
-                        "recent_contest_days": recent_contest_days,
-                        "nowcoder_scope": nowcoder_scope,
-                        "settle_push_enabled": bool(
-                            settings.get(
-                                "settle_push_enabled",
-                                current["settle_push_enabled"],
-                            )
-                        ),
-                        "settle_delay_minutes": settle_delay_minutes,
-                        "settle_min_participants": settle_min_participants,
-                        "settle_show_unsolved": bool(
-                            settings.get(
-                                "settle_show_unsolved",
-                                current["settle_show_unsolved"],
-                            )
-                        ),
-                        "daily_problem_enabled": bool(
-                            settings.get(
-                                "daily_problem_enabled",
-                                current["daily_problem_enabled"],
-                            )
-                        ),
-                        "daily_problem_platform": self._read_daily_problem_platform(
-                            settings.get(
-                                "daily_problem_platform",
-                                current["daily_problem_platform"],
-                            )
-                        ),
-                        "daily_problem_count": daily_problem_count,
-                        "recommend_enabled": bool(
-                            settings.get(
-                                "recommend_enabled",
-                                current["recommend_enabled"],
-                            )
-                        ),
-                        "weekly_report_enabled": bool(
-                            settings.get(
-                                "weekly_report_enabled",
-                                current["weekly_report_enabled"],
-                            )
-                        ),
-                        "weekly_report_weekday": weekly_report_weekday,
-                        "weekly_report_time": weekly_report_time,
-                    },
-                )
-                # 保存成功后立即更新当前实例，无需等待下一次消息或重启插件。
+                await self.put_kv_data("settings", normalized)
                 self._settings_cache = None
                 self._configure_output_renderer(
                     {
-                        "max_plain_text_chars": max_plain_text_chars,
-                        "max_plain_text_lines": max_plain_text_lines,
+                        "max_plain_text_chars": normalized[
+                            "max_plain_text_chars"
+                        ],
+                        "max_plain_text_lines": normalized[
+                            "max_plain_text_lines"
+                        ],
                     }
                 )
                 self._configure_contest_fetcher(
-                    {"nowcoder_scope": nowcoder_scope}
+                    {"nowcoder_scope": normalized["nowcoder_scope"]}
                 )
             if "groups" in payload:
-                groups = payload["groups"]
-                if not isinstance(groups, list):
-                    raise ValueError("groups 必须是列表")
-                raw = {}
-                for item in groups:
-                    if not isinstance(item, dict) or not item.get("group_id"):
-                        continue
-                    gid = str(item["group_id"])
-                    pid = str(item.get("platform_id") or "")
-                    try:
-                        cfg = GroupConfig(group_id=gid, **item)
-                    except Exception as exc:
-                        raise ValueError(f"群 {gid} 配置不合法：{exc}") from exc
-                    raw[platform_compat.scoped_key(pid, gid)] = cfg.model_dump()
+                raw = self._build_groups_payload(payload["groups"])
                 await self.put_kv_data("groups", raw)
                 self._groups_cache = None
         except ValueError as exc:
@@ -5221,10 +5337,623 @@ class AcmerGroupBot(Star):
         text = await self.build_test_text(group)
         sent = await self.send_notification(group, text)
         if not sent:
+            await self._log_push(group_id, "test", False, "发送失败")
             return error_response("发送失败，请查看 AstrBot 日志")
         # 与真实早报一致：正文之后追加两张周榜图片，便于在后台预览完整效果。
         try:
             await self.push_weekly_boards(group)
         except Exception:  # noqa: BLE001 - 周榜预览失败不影响测试推送结果
             logger.warning("测试推送的周榜发送失败", exc_info=True)
+        await self._log_push(group_id, "test", True, "测试推送")
         return json_response({"status": "success", "data": {"message": "测试推送已发送"}})
+
+    async def _normalize_settings_payload(
+        self, settings: dict, current: dict
+    ) -> dict:
+        """校验并归一化 settings；非法值抛 ValueError（与保存配置同一套规则）。"""
+        morning = validate_hhmm(
+            settings.get("morning_push_time", current["morning_push_time"])
+        )
+        raw_platforms = settings.get("push_platforms", current["push_platforms"])
+        platforms = raw_platforms or list(DEFAULT_PLATFORMS)
+        if not isinstance(platforms, list):
+            raise ValueError("push_platforms 必须是列表")
+        platforms = [p for p in DEFAULT_PLATFORMS if p in platforms]
+        max_plain_text_chars = self._validate_bounded_int(
+            settings.get("max_plain_text_chars", current["max_plain_text_chars"]),
+            "文字转图片最大字符数",
+            MIN_MAX_PLAIN_TEXT_CHARS,
+            MAX_MAX_PLAIN_TEXT_CHARS,
+        )
+        max_plain_text_lines = self._validate_bounded_int(
+            settings.get("max_plain_text_lines", current["max_plain_text_lines"]),
+            "文字转图片最大行数",
+            MIN_MAX_PLAIN_TEXT_LINES,
+            MAX_MAX_PLAIN_TEXT_LINES,
+        )
+        recent_contest_days = self._validate_bounded_int(
+            settings.get("recent_contest_days", current["recent_contest_days"]),
+            "最近比赛查询天数",
+            MIN_RECENT_CONTEST_DAYS,
+            MAX_RECENT_CONTEST_DAYS,
+        )
+        nowcoder_scope = self._read_nowcoder_scope(
+            settings.get("nowcoder_scope", current["nowcoder_scope"])
+        )
+        settle_delay_minutes = self._validate_bounded_int(
+            settings.get("settle_delay_minutes", current["settle_delay_minutes"]),
+            "赛后赛果推送延迟",
+            MIN_SETTLE_DELAY_MINUTES,
+            MAX_SETTLE_DELAY_MINUTES,
+        )
+        daily_problem_count = self._validate_bounded_int(
+            settings.get("daily_problem_count", current["daily_problem_count"]),
+            "每日一题数量",
+            MIN_DAILY_PROBLEM_COUNT,
+            MAX_DAILY_PROBLEM_COUNT,
+        )
+        settle_min_participants = self._validate_bounded_int(
+            settings.get(
+                "settle_min_participants", current["settle_min_participants"]
+            ),
+            "赛后赛果最少参赛人数",
+            MIN_SETTLE_MIN_PARTICIPANTS,
+            MAX_SETTLE_MIN_PARTICIPANTS,
+        )
+        weekly_report_weekday = self._validate_bounded_int(
+            settings.get("weekly_report_weekday", current["weekly_report_weekday"]),
+            "训练周报推送星期",
+            MIN_WEEKLY_REPORT_WEEKDAY,
+            MAX_WEEKLY_REPORT_WEEKDAY,
+        )
+        weekly_report_time = validate_hhmm(
+            settings.get("weekly_report_time", current["weekly_report_time"])
+        )
+        return {
+            "morning_push_time": morning,
+            "push_platforms": platforms or list(DEFAULT_PLATFORMS),
+            "reminder_enabled": bool(
+                settings.get("reminder_enabled", current["reminder_enabled"])
+            ),
+            "at_all_enabled": bool(
+                settings.get("at_all_enabled", current["at_all_enabled"])
+            ),
+            "max_plain_text_chars": max_plain_text_chars,
+            "max_plain_text_lines": max_plain_text_lines,
+            "recent_contest_days": recent_contest_days,
+            "nowcoder_scope": nowcoder_scope,
+            "settle_push_enabled": bool(
+                settings.get("settle_push_enabled", current["settle_push_enabled"])
+            ),
+            "settle_delay_minutes": settle_delay_minutes,
+            "settle_min_participants": settle_min_participants,
+            "settle_show_unsolved": bool(
+                settings.get("settle_show_unsolved", current["settle_show_unsolved"])
+            ),
+            "daily_problem_enabled": bool(
+                settings.get("daily_problem_enabled", current["daily_problem_enabled"])
+            ),
+            "daily_problem_platform": self._read_daily_problem_platform(
+                settings.get(
+                    "daily_problem_platform", current["daily_problem_platform"]
+                )
+            ),
+            "daily_problem_count": daily_problem_count,
+            "recommend_enabled": bool(
+                settings.get("recommend_enabled", current["recommend_enabled"])
+            ),
+            "weekly_report_enabled": bool(
+                settings.get("weekly_report_enabled", current["weekly_report_enabled"])
+            ),
+            "weekly_report_weekday": weekly_report_weekday,
+            "weekly_report_time": weekly_report_time,
+        }
+
+    @staticmethod
+    def _build_groups_payload(groups) -> dict:
+        """校验并归一化 groups 列表；非法值抛 ValueError。"""
+        if not isinstance(groups, list):
+            raise ValueError("groups 必须是列表")
+        raw = {}
+        for item in groups:
+            if not isinstance(item, dict) or not item.get("group_id"):
+                continue
+            gid = str(item["group_id"])
+            pid = str(item.get("platform_id") or "")
+            try:
+                cfg = GroupConfig(group_id=gid, **item)
+            except Exception as exc:
+                raise ValueError(f"群 {gid} 配置不合法：{exc}") from exc
+            raw[platform_compat.scoped_key(pid, gid)] = cfg.model_dump()
+        return raw
+
+    async def _web_bindings_list(self):
+        """账号绑定列表（查）：一次性返回，前端筛选与分页。"""
+        platform = self._query_param("platform", "").strip()
+        keyword = self._query_param("q", "").strip().lower()
+        try:
+            limit = int(self._query_param("limit", "200") or 200)
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            offset = int(self._query_param("offset", "0") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        limit = max(1, min(2000, limit))
+        offset = max(0, offset)
+        try:
+            accounts = await self.account_registry.get_all_accounts()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("后台读取绑定失败：%s", exc)
+            return error_response("读取绑定失败，请稍后重试")
+        items = []
+        for user_id, per_user in accounts.items():
+            if not isinstance(per_user, dict):
+                continue
+            for platform_name, record in per_user.items():
+                if not isinstance(record, dict):
+                    continue
+                if platform and str(platform_name) != platform:
+                    continue
+                handle = str(
+                    record.get("handle") or record.get("platform_user_id") or ""
+                )
+                qq_name = str(record.get("qq_name") or "")
+                if keyword and keyword not in (
+                    f"{user_id} {handle} {qq_name}".lower()
+                ):
+                    continue
+                try:
+                    verified_at = float(record.get("verified_at") or 0)
+                except (TypeError, ValueError):
+                    verified_at = 0.0
+                items.append(
+                    {
+                        "user_id": str(user_id),
+                        "platform": str(platform_name),
+                        "handle": handle,
+                        "platform_user_id": str(
+                            record.get("platform_user_id") or ""
+                        ),
+                        "display_name": str(record.get("display_name") or handle),
+                        "qq_name": qq_name,
+                        "verified_at": verified_at,
+                    }
+                )
+        items.sort(key=lambda item: item["verified_at"], reverse=True)
+        counts: Dict[str, int] = {}
+        for item in items:
+            counts[item["platform"]] = counts.get(item["platform"], 0) + 1
+        return json_response(
+            {
+                "status": "success",
+                "data": {
+                    "total": len(items),
+                    "items": items[offset: offset + limit],
+                    "platform_counts": counts,
+                },
+            }
+        )
+
+    async def _web_bindings_write(self):
+        """账号绑定增/改/删（actions: save | delete）。"""
+        payload = await request.json(default=None)
+        if not isinstance(payload, dict):
+            return error_response("请求体格式不正确")
+        action = str(payload.get("action") or "").strip()
+
+        if action == "delete":
+            items = payload.get("items")
+            if not isinstance(items, list) or not items:
+                return error_response("请选择要删除的绑定")
+            removed = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                user_id = str(item.get("user_id") or "").strip()
+                platform = str(item.get("platform") or "").strip()
+                if not user_id or platform not in ACCOUNT_PLATFORMS:
+                    continue
+                try:
+                    if await self.account_registry.remove_binding(user_id, platform):
+                        removed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "后台解绑失败 user=%s platform=%s: %s",
+                        user_id,
+                        platform,
+                        exc,
+                    )
+            if removed:
+                self._invalidate_all_rank_cache()
+                logger.info("后台解绑 admin=web removed=%d", removed)
+            return json_response(
+                {"status": "success", "data": {"action": "delete", "removed": removed}}
+            )
+
+        if action != "save":
+            return error_response("不支持的 action")
+
+        user_id = str(payload.get("user_id") or "").strip()
+        platform = str(payload.get("platform") or "").strip()
+        identifier = str(payload.get("identifier") or "").strip()
+        qq_name = str(payload.get("qq_name") or "").strip()[:32]
+        group_id = str(payload.get("group_id") or "").strip()
+
+        if not user_id:
+            return error_response("请填写 QQ 用户 ID")
+        if platform not in ACCOUNT_PLATFORMS:
+            return error_response("不支持的平台")
+        if not identifier:
+            return error_response("请填写账号")
+        normalized = normalize_account_identifier(platform, identifier)
+        if not normalized:
+            return error_response(
+                self.account_fetcher.invalid_identifier_message(platform)
+            )
+
+        try:
+            profile = await self.account_fetcher.get_profile(
+                platform, normalized, detail=False, force=True
+            )
+        except AccountFetchError as exc:
+            return error_response(self._account_error_text(platform, exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("后台绑定抓取失败：%s", exc)
+            return error_response(self._account_error_text(platform, exc))
+
+        old_handle = ""
+        try:
+            record = (await self.account_registry.get_user_accounts(user_id)).get(
+                platform
+            )
+            if isinstance(record, dict):
+                old_handle = str(
+                    record.get("handle") or record.get("platform_user_id") or ""
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取原绑定失败：%s", exc)
+
+        try:
+            await self.account_registry.save_binding(
+                user_id,
+                platform,
+                profile,
+                group_id=group_id or None,
+                qq_name=qq_name,
+            )
+        except ValueError:
+            return error_response("这个平台账号已经绑定到其他 QQ 用户，请先删除原绑定")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("后台绑定保存失败：%s", exc, exc_info=True)
+            return error_response("绑定保存失败，请稍后重试")
+
+        self._invalidate_all_rank_cache()
+        logger.info(
+            "后台绑定 admin=web user=%s platform=%s handle=%s",
+            user_id,
+            platform,
+            profile.handle,
+        )
+        return json_response(
+            {
+                "status": "success",
+                "data": {
+                    "action": "save",
+                    "item": {
+                        "user_id": user_id,
+                        "platform": platform,
+                        "handle": profile.handle,
+                        "qq_name": qq_name,
+                    },
+                    "replaced": old_handle or None,
+                },
+            }
+        )
+
+    async def _web_rank(self):
+        """群排行只读查看；默认命中快照，refresh=1 才强制重算。"""
+        group_id = self._query_param("group_id", "").strip()
+        if not group_id:
+            return error_response("缺少 group_id")
+        platform = self._query_param("platform", "codeforces").strip() or "codeforces"
+        if platform not in ACCOUNT_PLATFORMS:
+            return error_response("不支持的平台")
+        progress = self._query_param("progress", "0") in {"1", "true", "True"}
+        refresh = self._query_param("refresh", "0") in {"1", "true", "True"}
+        try:
+            rows, errors = await self.rank_service.read(
+                group_id,
+                platform,
+                progress=progress,
+                allow_stale=not refresh,
+                force=refresh,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("后台读取排行失败：%s", exc)
+            return error_response("读取排行失败，请稍后重试")
+        return json_response(
+            {
+                "status": "success",
+                "data": {
+                    "rows": rows,
+                    "errors": [str(item) for item in (errors or [])],
+                    "stale": not refresh,
+                },
+            }
+        )
+
+    async def _run_now_settle(self, group: GroupConfig, contest_id: str) -> List[dict]:
+        """试跑赛果：挑一场刚结束的比赛推送（不写幂等键）。"""
+        settings = await self.get_settings()
+        delay_minutes = int(settings.get("settle_delay_minutes") or 0)
+        min_participants = int(settings.get("settle_min_participants") or 1)
+        show_unsolved = bool(settings.get("settle_show_unsolved", True))
+        platforms = [
+            p for p in settings["push_platforms"] if p in group.push_platforms
+        ] or list(group.push_platforms or DEFAULT_PLATFORMS)
+        moment = datetime.now(timezone.utc)
+        for platform in platforms:
+            if platform not in SETTLE_PLATFORMS:
+                continue
+            try:
+                contests, _err = await self.fetcher.fetch_platform(platform)
+            except Exception:  # noqa: BLE001
+                continue
+            if contests:
+                self.settlement.remember_contests(platform, contests)
+            candidates = self.settlement.settlement_candidates(
+                platform, moment, delay_minutes
+            )
+            if contest_id:
+                candidates = [
+                    item
+                    for item in candidates
+                    if str(getattr(item, "contest_id", "")) == contest_id
+                ]
+            if not candidates:
+                continue
+            contest = candidates[0]
+            try:
+                pushed = await self._push_settlement(
+                    group,
+                    platform,
+                    contest,
+                    "",
+                    min_participants=min_participants,
+                    show_unsolved=show_unsolved,
+                    platform_order=list(platforms),
+                    write_key=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return [{"step": "赛果推送", "ok": False, "message": str(exc)}]
+            if pushed:
+                return [
+                    {
+                        "step": "赛果推送",
+                        "ok": True,
+                        "message": f"{platform} {getattr(contest, 'contest_id', '')}",
+                    }
+                ]
+        return [
+            {
+                "step": "赛果推送",
+                "ok": False,
+                "message": "没有可推送的已结束比赛（或本群无人参加）",
+            }
+        ]
+
+    async def _run_now_signup(self, group: GroupConfig, contest_id: str) -> List[dict]:
+        """试跑报名提醒：挑一场未开始且报名未截止的牛客比赛（不写幂等键）。"""
+        try:
+            contests, err = await self.fetcher.fetch_platform("nowcoder")
+        except Exception as exc:  # noqa: BLE001
+            return [{"step": "报名提醒", "ok": False, "message": str(exc)}]
+        if err or not contests:
+            return [{"step": "报名提醒", "ok": False, "message": "读不到牛客赛程"}]
+        moment = datetime.now(timezone.utc)
+        for contest in contests:
+            cid = str(getattr(contest, "contest_id", ""))
+            if contest_id and cid != contest_id:
+                continue
+            deadline = getattr(contest, "signup_end_time", None)
+            start = getattr(contest, "start_time", None)
+            if not isinstance(deadline, datetime) or not isinstance(start, datetime):
+                continue
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            if start <= moment:
+                continue
+            remaining = (deadline - moment).total_seconds()
+            if remaining < 0:
+                continue
+            text = self._signup_reminder_text(contest, deadline, remaining)
+            sent = await self._send_signup_text(group, text)
+            return [
+                {"step": "报名提醒", "ok": bool(sent), "message": cid or "已发送"}
+            ]
+        return [
+            {
+                "step": "报名提醒",
+                "ok": False,
+                "message": "没有可提醒的比赛（需未开始且报名未截止）",
+            }
+        ]
+
+    async def _web_run_now(self):
+        """立即试跑：单群、指定类型；不写任何幂等键。"""
+        payload = await request.json(default=None)
+        if not isinstance(payload, dict):
+            return error_response("请求体格式不正确")
+        group_id = str(payload.get("group_id") or "").strip()
+        kind = str(payload.get("kind") or "").strip()
+        contest_id = str(payload.get("contest_id") or "").strip()
+        if not group_id:
+            return error_response("缺少 group_id")
+        if kind not in RUN_NOW_KINDS:
+            return error_response("不支持的试跑类型")
+        group = next(
+            (g for g in await self.get_groups() if g.group_id == group_id), None
+        )
+        if group is None:
+            return error_response("该群未注册，请先让群内发一条消息")
+        if not group.enabled:
+            return error_response("该群已停用推送")
+        if not self._group_scene_ready(group.group_id, group.platform_id):
+            return error_response("QQ 主动推送会话未就绪：请先让该群给机器人发一条消息")
+        results: List[dict] = []
+        try:
+            if kind == "morning":
+                text = await self.build_test_text(group)
+                sent = await self.send_notification(group, text)
+                results.append(
+                    {
+                        "step": "发送早报",
+                        "ok": bool(sent),
+                        "message": "已发送" if sent else "发送失败",
+                    }
+                )
+                if sent:
+                    try:
+                        boards_ok = await self.push_weekly_boards(group)
+                        results.append(
+                            {
+                                "step": "推送周榜",
+                                "ok": bool(boards_ok),
+                                "message": "已发送" if boards_ok else "无数据或发送失败",
+                            }
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        results.append(
+                            {"step": "推送周榜", "ok": False, "message": str(exc)}
+                        )
+            elif kind == "weekly":
+                pushed = await self._push_weekly_report_for_group(
+                    group, datetime.now(CN_TZ), write_key=False
+                )
+                results.append(
+                    {
+                        "step": "训练周报",
+                        "ok": bool(pushed),
+                        "message": "已发送" if pushed else "无数据或发送失败",
+                    }
+                )
+            elif kind == "settle":
+                results.extend(await self._run_now_settle(group, contest_id))
+            elif kind == "signup":
+                results.extend(await self._run_now_signup(group, contest_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("试跑失败：%s", exc, exc_info=True)
+            return error_response(f"试跑失败：{exc}")
+        ok_all = bool(results) and all(bool(item.get("ok")) for item in results)
+        await self._log_push(group_id, "test", ok_all, f"试跑:{kind}")
+        return json_response(
+            {"status": "success", "data": {"ok": ok_all, "results": results}}
+        )
+
+    async def _web_import(self):
+        """导入配置：apply=false 只校验并返回差异；apply=true 落库。"""
+        payload = await request.json(default=None)
+        if not isinstance(payload, dict):
+            return error_response("请求体格式不正确")
+        data = payload.get("payload")
+        if not isinstance(data, dict):
+            return error_response("导入内容格式不正确")
+        include_groups = bool(payload.get("include_groups", True))
+        apply_changes = bool(payload.get("apply", False))
+        try:
+            current = await self.get_settings()
+            current_admins = await self._get_admins()
+            diff: Dict[str, Any] = {}
+
+            incoming_admins = data.get("admin_users")
+            if incoming_admins is not None:
+                if not isinstance(incoming_admins, list):
+                    raise ValueError("admin_users 必须是列表")
+                normalized_admins = [
+                    str(item).strip() for item in incoming_admins if str(item).strip()
+                ]
+                diff["admin_users"] = {
+                    "add": sorted(set(normalized_admins) - set(current_admins)),
+                    "remove": sorted(set(current_admins) - set(normalized_admins)),
+                    "keep": sorted(set(normalized_admins) & set(current_admins)),
+                }
+            else:
+                normalized_admins = current_admins
+
+            incoming_settings = data.get("settings")
+            if incoming_settings is not None:
+                if not isinstance(incoming_settings, dict):
+                    raise ValueError("settings 必须是对象")
+                normalized_settings = await self._normalize_settings_payload(
+                    incoming_settings, current
+                )
+                diff["settings"] = {
+                    key: {"from": current.get(key), "to": value}
+                    for key, value in normalized_settings.items()
+                    if current.get(key) != value
+                }
+            else:
+                normalized_settings = None
+
+            groups_payload = None
+            if include_groups and data.get("groups") is not None:
+                groups_payload = self._build_groups_payload(data["groups"])
+                current_raw = await self._raw_groups(fresh=True)
+                diff["groups"] = {
+                    "add": sorted(set(groups_payload) - set(current_raw)),
+                    "remove": sorted(set(current_raw) - set(groups_payload)),
+                    "update": sorted(
+                        key
+                        for key in set(groups_payload) & set(current_raw)
+                        if current_raw.get(key) != groups_payload.get(key)
+                    ),
+                }
+        except ValueError as exc:
+            return error_response(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("导入配置校验失败：%s", exc, exc_info=True)
+            return error_response("导入失败：内容无法解析")
+
+        if not apply_changes:
+            return json_response(
+                {"status": "success", "data": {"applied": False, "diff": diff}}
+            )
+
+        applied: Dict[str, Any] = {}
+        try:
+            if incoming_admins is not None:
+                await self.put_kv_data("admin_users", normalized_admins)
+                applied["admin_users"] = len(normalized_admins)
+            if normalized_settings is not None:
+                await self.put_kv_data("settings", normalized_settings)
+                self._settings_cache = None
+                self._configure_output_renderer(
+                    {
+                        "max_plain_text_chars": normalized_settings[
+                            "max_plain_text_chars"
+                        ],
+                        "max_plain_text_lines": normalized_settings[
+                            "max_plain_text_lines"
+                        ],
+                    }
+                )
+                self._configure_contest_fetcher(
+                    {"nowcoder_scope": normalized_settings["nowcoder_scope"]}
+                )
+                applied["settings"] = len(normalized_settings)
+            if groups_payload is not None:
+                await self.put_kv_data("groups", groups_payload)
+                self._groups_cache = None
+                applied["groups"] = len(groups_payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("导入配置写入失败：%s", exc, exc_info=True)
+            return error_response("导入写入失败，请重试")
+        return json_response(
+            {
+                "status": "success",
+                "data": {"applied": True, "applied_counts": applied},
+            }
+        )
