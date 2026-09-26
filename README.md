@@ -19,7 +19,9 @@ XCPC Link（线下赛）
    自适应输出：短内容发文字，长内容转 PNG 图片
 ```
 
-- **版本**：1.15.2 ｜ **支持平台**：`qq_official` / `qq_official_webhook`（QQ 官方）+ `aiocqhttp`（OneBot v11） ｜ **AstrBot**：`>=4.13.0,<5` ｜ **许可**：MIT
+- **支持平台**：`qq_official` / `qq_official_webhook`（QQ 官方）+ `aiocqhttp`（OneBot v11）
+- **运行要求**：AstrBot `>=4.13.0,<5`；版本号与更新内容见 [CHANGELOG.md](CHANGELOG.md)
+- **许可**：MIT
 
 ---
 
@@ -222,7 +224,7 @@ XCPC Link（线下赛）
 
 ---
 
-## 数据来源与稳定性
+## 数据来源
 
 赛程与账号数据全部来自公开接口或页面，**不要求用户提供平台密码、Cookie 或 API Key**。
 
@@ -238,17 +240,10 @@ XCPC Link（线下赛）
 
 牛客的题目难度与知识点来自**题库索引**：插件会整库抓取一次牛客题库列表（约 1.4 万题，索引每周更新、落盘复用），因此难度分布覆盖全部通过题，而不是只覆盖前若干道。少数只存在于比赛中的题目（定制自测题等）牛客未公开难度与知识点，卡片会如实标注为“未标难度”。
 
-**接口抖动时的行为**
+**接口抖动时的表现**
 
-- 请求超时 10 秒，最多重试 3 次（重试间隔递增）；失败会返回友好提示并记录日志。
-- 在线比赛缓存 5 分钟、线下赛缓存 30 分钟（并持久化到 `data/contest_cache.json`）；缓存过期时同一平台只允许一个请求实际抓取，其余并发查询复用该结果。
-- 抓取失败时若存在旧缓存，会先返回旧数据兜底，避免网站短暂波动直接导致查询失败。
-- 用户请求不再撞上“缓存过期后同步抓取”：定时任务会在缓存到期前 90 秒提前预热一个平台，预热失败按平台指数退避（5 分钟起，最长 30 分钟）。
-- 账号资料缓存 30 分钟、题目级分析缓存 12 小时、题目资源缓存 24 小时；分析失败使用 5 分钟短缓存，不会长时间保留失败结果。题目数据暂时读不到时，仍会显示基础资料与 Rating 历史。
-- 群排行与进步榜/退步榜使用本地快照（排行新鲜窗口 60 分钟，进步榜 2 小时），过期时先返回旧数据并后台刷新。
-- 平台侧瞬时限流时，排行结果会说明失败的平台、账号数与原因，这些账号本次不计入排行。
-
----
+- 抓取失败会返回友好提示而不是报错堆栈；若本地还有旧数据，会先用旧数据兜底，因此网站短暂波动不影响查询。
+- 平台侧临时限流时，排行结果会说明失败的平台与账号数，这些账号本次不计入排行。
 
 ## 常见问题
 
@@ -274,6 +269,22 @@ XCPC Link（线下赛）
 QQ 官方机器人在群聊场景不支持 `@everyone`（官方格式文档只对文字子频道定义该标签），与机器人是否群管理员无关。插件开启后仍会照常发通知，失败时自动降级为不带 @ 的普通通知，并在该群 6 小时内不再重试；建议在 QQ 官方通道保持关闭。OneBot 通道支持 `@全体成员`（At 段传 all），可正常使用。
 
 ---
+
+## Windows 支持
+
+Windows 上 Chromium / Firefox 通常不在 PATH，插件已内置常见安装路径探测
+（Chrome / Edge / Firefox），并内置 Windows 系统字体（微软雅黑 / 黑体 / 宋体 / 等线）
+与 Emoji 字体（Segoe UI Emoji）。
+
+若仍拿不到图片，可显式指定（不改代码）：
+
+```bat
+set ACMER_QQ_BOT_RENDERER=C:\Program Files\Google\Chrome\Application\chrome.exe
+set ACMER_QQ_BOT_FONT=C:\Windows\Fonts\msyh.ttc
+set ACMER_QQ_BOT_FONT_INDEX=0
+```
+
+> 缓存与数据库位置：`data/plugin_data/acmer_qq_group_bot/`（不再写入插件代码目录）。
 
 ## 开发
 
@@ -305,9 +316,29 @@ acmer_qq_group_bot/
 - **新增一个平台的赛程**：在 `src/contest_fetcher.py` 中按现有平台实现抓取方法，把结果转换为 `src/models.py` 的 `Contest` 模型；再在 `src/models.py` 的 `PLATFORM_LABELS` / `DEFAULT_PLATFORMS` 与 `main.py` 的 `QUERY_COMMANDS` 中登记平台标识与指令别名，即可接入查询、早报与提醒。
 - 指令与文案以 `main.py` 中的指令表为准（`QUERY_COMMANDS`、`GROUP_RANK_COMMANDS`、`MENU_TEXT` 等），修改后请同步更新本文件与 [docs/CONFIG.md](docs/CONFIG.md)。
 
-## 更新日志
+### 缓存、预热与重试（工程细节）
 
-见 [CHANGELOG.md](CHANGELOG.md)。
+- 请求超时 10 秒、最多重试 3 次（间隔递增）。
+- 在线比赛缓存 5 分钟、线下赛缓存 30 分钟（持久化到 `data/contest_cache.json`）；缓存过期时同一平台只允许一个请求真正抓取，其余并发查询复用结果。
+- 定时任务会在缓存到期前 90 秒预热一个平台；预热失败按平台指数退避（5 分钟起，最长 30 分钟）。
+- 账号资料缓存 30 分钟、题目级分析缓存 12 小时、题目资源缓存 24 小时；分析失败用 5 分钟短缓存。
+- 群排行 / 进步榜使用本地快照（新鲜窗口 60 分钟 / 2 小时），过期先返回旧数据并后台刷新。
+
+## 相关文档
+
+用户向：
+
+- [配置参考](docs/CONFIG.md)：全部配置项、默认值与取值范围
+- [更新日志](CHANGELOG.md)：每个版本的新增与修复
+
+开发者向（实现与方案）：
+
+- [性能与架构优化实施方案](docs/性能与架构优化实施方案.md)
+- [缓存与响应延迟优化方案](docs/缓存与响应延迟优化方案.md)
+- [牛客数据获取范围优化方案](docs/牛客数据获取范围优化方案.md)
+- [未绑定用户战绩查询方案](docs/未绑定用户战绩查询方案.md)
+- [打卡热力图方案](docs/打卡热力图方案.md)
+- [管理员 @代绑定方案](docs/管理员@代绑定方案.md) ／ [实现文档](docs/管理员@代绑定实现文档.md)
 
 ## 免责声明
 
@@ -315,18 +346,3 @@ acmer_qq_group_bot/
 
 ---
 
-## Windows 支持
-
-Windows 上 Chromium / Firefox 通常不在 PATH，插件已内置常见安装路径探测
-（Chrome / Edge / Firefox），并内置 Windows 系统字体（微软雅黑 / 黑体 / 宋体 / 等线）
-与 Emoji 字体（Segoe UI Emoji）。
-
-若仍拿不到图片，可显式指定（不改代码）：
-
-```bat
-set ACMER_QQ_BOT_RENDERER=C:\Program Files\Google\Chrome\Application\chrome.exe
-set ACMER_QQ_BOT_FONT=C:\Windows\Fonts\msyh.ttc
-set ACMER_QQ_BOT_FONT_INDEX=0
-```
-
-> 缓存与数据库位置：`data/plugin_data/acmer_qq_group_bot/`（不再写入插件代码目录）。
