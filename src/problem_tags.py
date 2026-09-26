@@ -207,5 +207,6 @@ def rotate_tag(weekday: int) -> str:
     return CANONICAL_TAGS[index]
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——canonical_tag_order
 def canonical_tag_order() -> Sequence[str]:
     return CANONICAL_TAGS

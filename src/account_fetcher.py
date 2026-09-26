@@ -290,6 +290,7 @@ def _nested_dicts(value: object):
             yield from _nested_dicts(child)
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——_first_value
 def _first_value(data: object, *keys: str) -> object:
     for item in _nested_dicts(data):
         for key in keys:

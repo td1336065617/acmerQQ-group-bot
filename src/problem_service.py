@@ -121,6 +121,7 @@ def band_of_rating(rating: Optional[int]) -> int:
     return 6
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——band_range
 def band_range(difficulty: Optional[int]) -> tuple:
     index = band_of_difficulty(difficulty)
     if index is None:

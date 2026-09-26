@@ -127,5 +127,6 @@ def is_contest_in_recent_window(
     return start >= current
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——log_plugin
 def log_plugin(name: str, message: str) -> None:
     logger.info("[%s] %s", name, message)

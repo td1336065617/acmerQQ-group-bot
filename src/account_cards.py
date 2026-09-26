@@ -506,6 +506,7 @@ def _rating_history_values(profile: object, limit: int = 8) -> List[int]:
     return [rating for _, _, rating in values[-max(2, int(limit)):]]
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——_difficulty_chart_height
 def _difficulty_chart_height(profile: object) -> int:
     items = _difficulty_items(profile)
     if not items:
@@ -775,6 +776,7 @@ def _solved_count_label(profile: object) -> str:
     return "已统计题数" if _difficulty_scan_is_partial(profile) else "通过题数"
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——_difficulty_text
 def _difficulty_text(profile: object) -> str:
     items = _difficulty_items(profile)
     return " · ".join(f"{label} {count}" for label, count in items)

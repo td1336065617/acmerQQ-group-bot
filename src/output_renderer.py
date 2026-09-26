@@ -46,6 +46,7 @@ def _cached_probe(key: str, producer):
     return value
 
 
+# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——clear_probe_cache
 def clear_probe_cache() -> None:
     """清空探测缓存（测试或运行环境变化时使用）。"""
     _PROBE_CACHE.clear()
@@ -249,15 +250,6 @@ def _tracked_width(draw, value: str, font, tracking: float) -> float:
         for unit in units
     )
     return width + max(0, len(units) - 1) * tracking
-
-
-def _draw_tracked(draw, xy, value: str, font, fill, tracking: float) -> None:
-    cursor = float(xy[0])
-    y = xy[1]
-    for unit in _text_units(value):
-        draw.text((round(cursor), y), unit, font=font, fill=fill)
-        box = draw.textbbox((0, 0), unit, font=font)
-        cursor += box[2] - box[0] + tracking
 
 
 class AdaptiveOutputRenderer:
