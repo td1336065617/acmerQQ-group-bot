@@ -41,6 +41,7 @@ from .src.group_names import event_group_name, fetch_group_name
 from .src.settlement import SETTLE_PLATFORMS, SettlementService
 from .src.problem_service import ProblemService, weak_tags_from_analysis
 from .src.account_cards import (
+    SETTLE_CARD_MAX_ROWS,
     _platform_rank_text,
     AccountCardRenderer,
     current_metric_header,
@@ -4296,11 +4297,15 @@ class AcmerGroupBot(Star):
                 if result.note
                 else result.extra_note
             )
-        note = (
-            f"{result.note} · 评分变化以平台为准"
-            if result.note
-            else "评分变化以平台为准"
+        # 赛果卡每平台最多列 SETTLE_CARD_MAX_ROWS 行；真的被截断时补一句提示，
+        # 避免用户以为"只有这些人参赛"（F-003）
+        truncated_hint = (
+            f"仅显示各平台前 {SETTLE_CARD_MAX_ROWS} 名"
+            if any(len(rows) > SETTLE_CARD_MAX_ROWS for rows in sections.values())
+            else ""
         )
+        note_parts = [part for part in (result.note, "评分变化以平台为准", truncated_hint) if part]
+        note = " · ".join(note_parts)
         title = f"🏁 {result.contest_name} 赛果"
         subtitle = f"本群 {len(result.rows)} 人参赛"
         image_path = None
