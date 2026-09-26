@@ -1104,6 +1104,58 @@ def test_admin_bind_rejects_multiple_mentions():
         message_str=text,
         message_obj=types.SimpleNamespace(raw_message=raw, self_id=""),
     )
+    # 多目标 + 绑定指令 → 明确“无法确定要绑定谁”，不再静默返回 None
+    assert m.AcmerGroupBot._mentioned_admin_bind(event, text) == {
+        "ambiguous": True,
+        "count": 2,
+    }
+
+
+def test_multiple_mentions_bind_does_not_fall_back_to_self_bind():
+    """管理员 @了多个人 + 绑定指令：必须给提示，绝不能退回“给发送者自助绑定”。
+
+    否则发送者会拿到一张绑到自己名下的验证码，确认后就把被 @ 成员的账号绑走了。
+    """
+    m = _load_main_module()
+    mentions = [
+        types.SimpleNamespace(member_openid="u1", username="用户1", is_you=False),
+        types.SimpleNamespace(member_openid="u2", username="用户2", is_you=False),
+    ]
+    text = "<@u1> <@u2> 绑定cf demo"
+    raw = types.SimpleNamespace(mentions=mentions, content=text, self_id="")
+    event = FakeEvent(
+        group_id="group-1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id=""),
+    )
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_bind(ev, platform, identifier):
+        calls.append((platform, identifier))
+        yield "BIND"
+
+    bot._reply_account_bind = fake_bind
+    results = _collect(bot.on_message(event))
+
+    assert calls == []                       # 绝不能退回自助绑定
+    assert results and "无法确定要绑定谁" in results[0]
+
+
+def test_multiple_mentions_without_bind_command_is_ignored():
+    m = _load_main_module()
+    mentions = [
+        types.SimpleNamespace(member_openid="u1", username="用户1", is_you=False),
+        types.SimpleNamespace(member_openid="u2", username="用户2", is_you=False),
+    ]
+    text = "<@u1> <@u2> 晚上好"
+    raw = types.SimpleNamespace(mentions=mentions, content=text, self_id="")
+    event = FakeEvent(
+        group_id="group-1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id=""),
+    )
     assert m.AcmerGroupBot._mentioned_admin_bind(event, text) is None
 
 

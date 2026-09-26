@@ -1099,8 +1099,22 @@ class AcmerGroupBot(Star):
     ) -> Optional[dict]:
         """识别“@某人 绑定/代绑定<平台> <账号>”；非该形态返回 None。"""
         targets = cls._collect_mention_targets(event, raw_message)
-        if len(targets) != 1:
+        if not targets:
             return None
+
+        if len(targets) > 1:
+            # 多个被 @：无法确定要绑定谁。若这条确实是绑定指令，必须明确提示，
+            # 绝不能返回 None 让上层退回「给发送者自助绑定」——那会把被 @ 成员的
+            # 账号绑到发送者自己名下。
+            remaining = str(raw_message or "")
+            for target in targets:
+                remaining = cls._strip_mention_text(remaining, target)
+            if ADMIN_BIND_RE.match(remaining) or ADMIN_BIND_USAGE_RE.match(
+                remaining
+            ):
+                return {"ambiguous": True, "count": len(targets)}
+            return None
+
         remaining = cls._strip_mention_text(raw_message, targets[0])
 
         match = ADMIN_BIND_RE.match(remaining)
@@ -1750,6 +1764,15 @@ class AcmerGroupBot(Star):
         event: AstrMessageEvent,
         bind: dict,
     ):
+        # 目标不唯一：先给用法提示（与权限无关，且必须阻止退回自助绑定）
+        if bind.get("ambiguous"):
+            yield event.plain_result(
+                f"⚠️ 检测到 {int(bind.get('count') or 0)} 个被 @ 的成员，"
+                "无法确定要绑定谁。\n"
+                "请只 @ 要绑定的那个人；如果要绑定自己，请不要 @ 任何人。"
+            )
+            return
+
         # 授权口径：只认后台 admin_users；QQ 群主/群管理员角色一律不认。
         if not await self._is_admin(event):
             yield event.plain_result("此指令仅限管理员")
