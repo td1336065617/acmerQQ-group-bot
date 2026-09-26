@@ -104,7 +104,7 @@ class RankService:
         record_metrics: bool = True,
         allow_stale: bool = True,
         force: bool = False,
-    ) -> Tuple[List[Dict[str, Any]], List[Any], Dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[Any], dict[str, Any]]:
         """同 read()，但额外返回 meta：{"fresh": bool, "snapshot_at": float}（BUG-032）。"""
         gid = str(group_id)
         mode = _mode_of(progress)

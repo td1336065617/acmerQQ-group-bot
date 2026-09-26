@@ -5369,8 +5369,8 @@ class AcmerGroupBot(Star):
     async def clear_push_attempts(self, kind: str, key: str) -> None:
         try:
             await self.put_kv_data(f"pushattempt_{kind}_{key}", {})
-        except Exception:  # noqa: BLE001 - 清理失败无副作用
-            pass
+        except Exception as exc:  # noqa: BLE001 - 清理失败无副作用，只记 debug
+            logger.debug("清理补发尝试计数失败：%s（%s）", f"pushattempt_{kind}_{key}", exc)
 
     async def _log_push(
         self, group_id: str, kind: str, ok: bool, detail: str = ""
