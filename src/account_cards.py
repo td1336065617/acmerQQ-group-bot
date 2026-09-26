@@ -226,7 +226,20 @@ def rank_metric_label_for_rows(
     platform: str = "",
     fallback: str = "Rating",
 ) -> str:
-    """从排行行数据中取实际指标名；总览按分区分别解析。"""
+    """从排行行数据中取实际指标名；总览按分区分别解析。
+
+    平台优先用显式入参；未传时**从行数据里兜底推断**（render_ranking 会把 platform
+    注入每一行，所以行里通常带得到）——否则洛谷的「旧缓存 Rating → Elo」纠正会失效（BUG-054）。
+    """
+    rows = list(rows)
+    resolved_platform = str(platform or "").strip().casefold()
+    if not resolved_platform:
+        for row in rows:
+            if isinstance(row, dict):
+                candidate = str(row.get("platform") or "").strip()
+                if candidate:
+                    resolved_platform = candidate.casefold()
+                    break
     labels = []
     for row in rows:
         if not isinstance(row, dict):
@@ -236,7 +249,7 @@ def rank_metric_label_for_rows(
             or row.get("metric_label")
             or ""
         ).strip()
-        if platform == "luogu" and label == "Rating":
+        if resolved_platform == "luogu" and label == "Rating":
             # 旧缓存曾把洛谷 Elo 记录成 Rating，展示时按实际含义纠正。
             label = "Elo"
         if label in {"", "当前指标", "近7日变化"}:
@@ -249,7 +262,7 @@ def rank_metric_label_for_rows(
         if set(labels) == {"Elo", "平台排名"}:
             return "Elo / 平台排名"
         return "各平台对应指标"
-    if platform == "luogu":
+    if resolved_platform == "luogu":
         return "Elo / 平台排名"
     return str(fallback or "Rating").strip() or "Rating"
 

@@ -194,3 +194,14 @@ def test_delta_secondary_header_uses_change_label():
     assert _resolved_secondary_header(
         "", [], metric_label="平台排名", secondary_value_key="rank"
     ) == "排名"
+
+
+def test_rank_metric_label_infers_platform_from_rows():
+    """BUG-054：未显式传 platform 时，应从行数据兜底推断（否则洛谷纠正失效）。"""
+    from src.account_cards import rank_metric_label_for_rows
+
+    rows = [{"current_metric_label": "Rating", "platform": "luogu"}]
+    assert rank_metric_label_for_rows(rows) == "Elo"                 # 兜底推断生效
+    assert rank_metric_label_for_rows(rows, platform="codeforces") == "Rating"   # 显式入参优先
+    # 无平台信息时保持原样（不误判）
+    assert rank_metric_label_for_rows([{"current_metric_label": "Rating"}]) == "Rating"
