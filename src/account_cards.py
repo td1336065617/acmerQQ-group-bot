@@ -212,11 +212,11 @@ def _resolved_secondary_header(
             platform=platform,
             fallback=metric_label,
         )
-        return (
-            progress_metric_header(resolved_metric)
-            if secondary_value_key != "delta"
-            else current_metric_header(resolved_metric)
-        )
+        if secondary_value_key != "delta":
+            return progress_metric_header(resolved_metric)
+        # delta 列显示的是变化量（+12 / -5），兜底表头必须是"近7日变化"，
+        # 不能借用 current_metric_header（那会写成"当前 Rating"，与取值不符，BUG-053）
+        return "近7日变化"
     return value
 
 

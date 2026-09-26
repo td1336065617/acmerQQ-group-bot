@@ -11,6 +11,19 @@
 
 ## 近期版本
 
+## [1.19.17] - 2026-09-26
+
+> 🐛 修复：排行/进步榜的「近7日变化」列在缺少标签时会显示成「当前 Rating」（表头与取值不符）。
+
+### 🐛 修复
+- _resolved_secondary_header：delta 列的兜底表头改为「近7日变化」（此前借用了 current_metric_header，写成"当前 X"）；
+- 非 delta 的次列（如平台排名）仍走 progress_metric_header，行为不变。
+
+### ✅ 验证
+- 新增 1 条用例（delta 兜底标签 / 有效标签保留 / 非 delta 仍为排名）；acmer 全量 405 条通过。
+
+---
+
 ## [1.19.16] - 2026-09-26
 
 > 🐛 修复：周报「通过题数」在题库题上会少算 —— 题库题（无 contestId、只有 problemsetName）因 index 相同被折叠成一条。

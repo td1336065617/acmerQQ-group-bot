@@ -176,3 +176,21 @@ def test_rank_header_fits_remaining_width():
             "international grandmaster", FONT
         ):
             assert fitted.endswith("…")
+
+
+def test_delta_secondary_header_uses_change_label():
+    """BUG-053：delta 列（变化量）的兜底表头必须是「近7日变化」，不能写成「当前 X」。"""
+    from src.account_cards import _resolved_secondary_header
+
+    # 无标签 + delta 列 → 变化量标签
+    assert _resolved_secondary_header(
+        "", [], metric_label="Rating", secondary_value_key="delta"
+    ) == "近7日变化"
+    # 传入的标签有效时原样保留
+    assert _resolved_secondary_header(
+        "近7日变化", [], metric_label="Rating", secondary_value_key="delta"
+    ) == "近7日变化"
+    # 非 delta 的次列仍走 progress 表头
+    assert _resolved_secondary_header(
+        "", [], metric_label="平台排名", secondary_value_key="rank"
+    ) == "排名"
