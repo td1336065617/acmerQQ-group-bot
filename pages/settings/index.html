@@ -310,7 +310,7 @@
             <button class="btn small secondary" id="groupTest">批量测试</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th>已激活</th><th>启用</th><th>早报时间</th><th>推送平台</th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th>已激活</th><th>启用</th><th>早报时间</th><th>推送平台<span class="muted" style="font-weight:400">（与全局取交集，提醒除外）</span></th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
         <div class="pager" id="groupPager"></div>
         <div id="groupTestResult"></div>
       </div>
@@ -502,6 +502,21 @@
       '<div class="muted mono" title="' + esc(text(gid)) + '">' + esc(shortId(gid)) + '</div>';
   }
   function platformLabel(p) { return PLATFORM_LABELS[p] || text(p); }
+
+  // 行键 = 平台 + 群（同一 group_id 可能出现在多个平台实例上）
+  function rowKey(g) { return text(g.platform_id) + '|' + text(g.group_id); }
+  function groupByKey(key) {
+    return (state.config.groups || []).filter(function (g) { return rowKey(g) === key; })[0];
+  }
+  // 复合键里含 |，不再拼进 CSS 选择器：统一遍历比较 dataset
+  function findGroupRow(key) {
+    var found = null;
+    $$('#groupBody tr[data-gid]').forEach(function (tr) {
+      if (tr.getAttribute('data-gid') === key) found = tr;
+    });
+    return found;
+  }
+  var PLATFORM_OPTIONS = ['codeforces', 'nowcoder', 'atcoder', 'luogu'];
 
   function toast(msg, type) {
     var host = $('#toasts');
@@ -817,21 +832,31 @@
       $('#groupBody').innerHTML = '<tr><td colspan="10" class="muted">暂无群，机器人收到群消息后自动注册</td></tr>';
     } else {
       $('#groupBody').innerHTML = rows.map(function (g, index) {
-        var checked = (g.push_platforms || []).map(function (p) { return platformLabel(p); }).join('/');
-        return '<tr data-gid="' + esc(g.group_id) + '">' +
-          '<td><input type="checkbox" class="group-row-check" data-gid="' + esc(g.group_id) + '"></td>' +
+        var key = rowKey(g);
+        var platforms = g.push_platforms || [];
+        var platformCell = PLATFORM_OPTIONS.map(function (p) {
+          return '<label class="switch" title="' + esc(platformLabel(p)) + '"><input type="checkbox" class="g-platform" data-gid="' + esc(key) + '" value="' + esc(p) + '"' + (platforms.indexOf(p) >= 0 ? ' checked' : '') + '><span class="track"></span><span style="font-size:12px">' + esc(platformLabel(p)) + '</span></label>';
+        }).join('');
+        return '<tr data-gid="' + esc(key) + '">' +
+          '<td><input type="checkbox" class="group-row-check" data-gid="' + esc(key) + '"></td>' +
           '<td>' + groupCell(g.name, g.group_id) + '</td>' +
           '<td>' + esc(platformLabel(g.platform_id)) + (g.umo ? '' : ' <span class="badge info">未记录会话</span>') + '</td>' +
           '<td>' + (g.activated ? '<span class="badge ok">已激活</span>' : '<span class="badge warn">待激活</span>') + '</td>' +
-          '<td><label class="switch"><input type="checkbox" class="g-enabled" data-gid="' + esc(g.group_id) + '"' + (g.enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
-          '<td><input type="time" class="g-time" data-gid="' + esc(g.group_id) + '" value="' + esc(g.morning_push_time || '08:00') + '"></td>' +
-          '<td class="muted">' + esc(checked || '-') + '</td>' +
-          '<td><label class="switch"><input type="checkbox" class="g-reminder" data-gid="' + esc(g.group_id) + '"' + (g.reminder_enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
-          '<td><label class="switch"><input type="checkbox" class="g-settle" data-gid="' + esc(g.group_id) + '"' + (g.settle_push_enabled !== false ? ' checked' : '') + '><span class="track"></span></label></td>' +
+          '<td><label class="switch"><input type="checkbox" class="g-enabled" data-gid="' + esc(key) + '"' + (g.enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
+          '<td><input type="time" class="g-time" data-gid="' + esc(key) + '" value="' + esc(g.morning_push_time || '08:00') + '"></td>' +
+          '<td><div class="row" style="gap:8px;flex-wrap:wrap">' + platformCell + '</div></td>' +
+          '<td><label class="switch"><input type="checkbox" class="g-reminder" data-gid="' + esc(key) + '"' + (g.reminder_enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
+          '<td><label class="switch"><input type="checkbox" class="g-settle" data-gid="' + esc(key) + '"' + (g.settle_push_enabled !== false ? ' checked' : '') + '><span class="track"></span></label></td>' +
           '<td><div class="row-actions"><button class="btn small secondary" data-test-group="' + esc(g.group_id) + '">测试推送</button>' +
-          '<button class="btn small ghost" data-reset-row="' + esc(g.group_id) + '">还原</button></div></td>' +
+          '<button class="btn small ghost" data-reset-row="' + esc(key) + '">还原</button></div></td>' +
           '</tr>';
       }).join('');
+      var seenKeys = {};
+      $$('#groupBody tr[data-gid]').forEach(function (tr) {
+        var k = tr.getAttribute('data-gid');
+        if (seenKeys[k]) console.warn('[acmer] 群表格行键重复，可能存在漏改：' + k);
+        seenKeys[k] = true;
+      });
     }
     $('#groupPager').innerHTML = '共 ' + list.length + ' 个群 · 第 ' + page + ' / ' + maxPage + ' 页' +
       '<button class="btn small ghost" id="groupPrev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
@@ -840,34 +865,44 @@
     var next = $('#groupNext'); if (next) next.onclick = function () { state.groupPage.page = page + 1; renderGroups(); };
   }
   function syncGroupRowToState(tr) {
-    var gid = tr.getAttribute('data-gid');
-    var group = (state.config.groups || []).filter(function (g) { return g.group_id === gid; })[0];
+    var key = tr.getAttribute('data-gid');
+    var group = groupByKey(key);
     if (!group) return;
     group.enabled = $('.g-enabled', tr).checked;
     group.morning_push_time = $('.g-time', tr).value || '08:00';
     group.reminder_enabled = $('.g-reminder', tr).checked;
     group.settle_push_enabled = $('.g-settle', tr).checked;
+    var platforms = $$('.g-platform', tr).filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
+    // 至少选 1 个：取消最后一项时不写回空数组，保留原值（保存时还会再校验一次）
+    if (platforms.length) group.push_platforms = platforms;
   }
 
   function collectGroups() {
-    var byId = {};
+    var byKey = {};
     $$('#groupBody tr[data-gid]').forEach(function (tr) {
-      var gid = tr.getAttribute('data-gid');
-      byId[gid] = tr;
+      byKey[tr.getAttribute('data-gid')] = tr;
     });
     return (state.config.groups || []).map(function (g) {
-      var tr = byId[g.group_id];
+      var tr = byKey[rowKey(g)];
       if (!tr) return g;
-      return Object.assign({}, g, {
+      var platforms = $$('.g-platform', tr).filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
+      var next = Object.assign({}, g, {
         enabled: $('.g-enabled', tr).checked,
         morning_push_time: $('.g-time', tr).value || '08:00',
         reminder_enabled: $('.g-reminder', tr).checked,
         settle_push_enabled: $('.g-settle', tr).checked
       });
+      if (platforms.length) next.push_platforms = platforms;
+      return next;
     });
   }
   async function saveGroups() {
     var groups = (state.config.groups || []).slice();
+    var noPlatform = groups.filter(function (g) { return !(g.push_platforms || []).length; });
+    if (noPlatform.length) {
+      toast('「' + text(noPlatform[0].name || noPlatform[0].group_id) + '」没有勾选任何推送平台，请至少选 1 个（群级与全局取交集）', 'err');
+      return;
+    }
     var btn = $('#groupsSave');
     btn.disabled = true;
     btn.innerHTML = '<span class="spin"></span>保存中';
@@ -891,11 +926,13 @@
   function batchToggle(enabled) {
     var ids = selectedGroupIds();
     if (!ids.length) { toast('请先勾选群', 'info'); return; }
-    ids.forEach(function (gid) {
-      var cb = $('.g-enabled[data-gid="' + gid + '"]');
+    ids.forEach(function (key) {
+      var tr = findGroupRow(key);
+      if (!tr) return;
+      var cb = $('.g-enabled', tr);
       if (cb) cb.checked = enabled;
-      var tr = $('tr[data-gid="' + gid + '"]');
-      if (tr) { tr.classList.add('dirty'); syncGroupRowToState(tr); }
+      tr.classList.add('dirty');
+      syncGroupRowToState(tr);
     });
     markDirty('groups');
     toast('已' + (enabled ? '启用' : '禁用') + ' ' + ids.length + ' 个群，记得点保存', 'info');
@@ -908,7 +945,8 @@
     var lines = [];
     for (var i = 0; i < ids.length; i++) {
       try {
-        var r = await apiPost('test-push', { group_id: ids[i] });
+        var target = groupByKey(ids[i]) || {};
+        var r = await apiPost('test-push', { group_id: target.group_id || ids[i] });
         lines.push('<div class="step ok"><span class="dot"></span>' + esc(ids[i]) + '：' + esc((r && r.message) || '已发送') + '</div>');
       } catch (e) {
         lines.push('<div class="step err"><span class="dot"></span>' + esc(ids[i]) + '：' + esc(e.message) + '</div>');
@@ -1378,7 +1416,13 @@
       document.body.classList.remove('nav-open');
       $('#scrim').hidden = true;
     };
-    $('#btnReload').onclick = function () { loadConfig(); loadOverview(); toast('已重新加载', 'ok'); };
+    $('#btnReload').onclick = async function () {
+      await loadConfig();
+      clearDirty('settings');
+      clearDirty('groups');
+      loadOverview();
+      toast('已重新加载（本地未保存改动已放弃）', 'ok');
+    };
     $('#ovRefresh').onclick = loadOverview;
     $('#ovLogMore').onclick = async function () {
       try {
@@ -1473,14 +1517,18 @@
       }
       var resetBtn = e.target.closest('[data-reset-row]');
       if (resetBtn) {
-        var rowId = resetBtn.getAttribute('data-reset-row');
-        var original = (state.config.groupsOriginal || state.config.groups || []).filter(function (g) { return g.group_id === rowId; })[0];
+        var rowKeyValue = resetBtn.getAttribute('data-reset-row');
+        var original = (state.config.groupsOriginal || state.config.groups || []).filter(function (g) { return rowKey(g) === rowKeyValue; })[0];
         if (!original) return;
-        var tr = $('tr[data-gid="' + rowId + '"]');
+        var tr = findGroupRow(rowKeyValue);
+        if (!tr) return;
         $('.g-enabled', tr).checked = !!original.enabled;
         $('.g-time', tr).value = original.morning_push_time || '08:00';
         $('.g-reminder', tr).checked = !!original.reminder_enabled;
         $('.g-settle', tr).checked = original.settle_push_enabled !== false;
+        $$('.g-platform', tr).forEach(function (cb) {
+          cb.checked = (original.push_platforms || []).indexOf(cb.value) >= 0;
+        });
         tr.classList.remove('dirty');
         syncGroupRowToState(tr);
         toast('已还原本行', 'info');

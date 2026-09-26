@@ -2872,11 +2872,13 @@ class AccountCardRenderer:
 
         返回 [[count|None, ...7], ...]；未来日期用 None 占位不绘制。
         """
+        # 回退时用北京时间：数据生产端统一按北京日期切分（BUG-033）
+        fallback_today = datetime.now(CN_TZ).date()
         end_text = str(summary.get("end") or "").strip()
         try:
-            today = date.fromisoformat(end_text) if end_text else date.today()
+            today = date.fromisoformat(end_text) if end_text else fallback_today
         except ValueError:
-            today = date.today()
+            today = fallback_today
         end_of_week = today + timedelta(days=6 - today.weekday())
         start = end_of_week - timedelta(days=weeks * 7 - 1)
         columns = []

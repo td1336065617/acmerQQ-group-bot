@@ -285,3 +285,24 @@ def test_html_heatmap_renders_cells_and_legend():
     )
     assert "--weeks:26" in compact_html
     assert "近 6 个月打卡" in compact_html
+
+
+def test_activity_columns_fallback_uses_beijing_today(monkeypatch):
+    """BUG-033：summary 缺 end 时，回退的「今天」必须是北京日期。
+
+    UTC 2026-01-01 20:00 = 北京 2026-01-02 04:00；若回退用 UTC/服务器本地日期，
+    当天那条 01-02 的数据就会被判成「未来」而丢掉。
+    """
+    import src.account_cards as cards
+
+    fixed_utc = datetime(2026, 1, 1, 20, 0, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_utc.astimezone(tz or timezone.utc)
+
+    monkeypatch.setattr(cards, "datetime", _FixedDateTime)
+    columns = cards.AccountCardRenderer._activity_columns({"2026-01-02": 3}, {}, weeks=2)
+    values = [v for col in columns for v in col if v is not None]
+    assert 3 in values
