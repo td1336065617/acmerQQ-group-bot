@@ -65,6 +65,18 @@ CREATE TABLE IF NOT EXISTS group_members (
 CREATE INDEX IF NOT EXISTS idx_members_group_enabled
     ON group_members (group_id, enabled);
 
+-- 管理员在后台「强制加入」的排行成员。单独存表并在读取成员时 UNION，
+-- 这样用户自己发「退出排行」或退群都不会把他清掉（只有管理员能移除）。
+CREATE TABLE IF NOT EXISTS rank_member_overrides (
+    group_id   TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    added_by   TEXT NOT NULL DEFAULT '',
+    note       TEXT NOT NULL DEFAULT '',
+    preexisting INTEGER NOT NULL DEFAULT 0,
+    added_at   REAL NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS pending_bindings (
     user_id          TEXT NOT NULL,
     platform         TEXT NOT NULL,
@@ -367,12 +379,17 @@ class AccountStore:
             try:
                 rows = conn.execute(
                     """
-                    SELECT m.user_id AS user_id, a.*
-                    FROM group_members m
-                    JOIN accounts a ON a.user_id = m.user_id
-                    WHERE m.group_id=? AND m.enabled=1 AND a.platform=?
+                    SELECT x.user_id AS user_id, a.*
+                    FROM (
+                        SELECT user_id FROM group_members
+                        WHERE group_id=? AND enabled=1
+                        UNION
+                        SELECT user_id FROM rank_member_overrides WHERE group_id=?
+                    ) x
+                    JOIN accounts a ON a.user_id = x.user_id
+                    WHERE a.platform=?
                     """,
-                    (str(group_id), str(platform)),
+                    (str(group_id), str(group_id), str(platform)),
                 ).fetchall()
                 return [dict(row) for row in rows]
             finally:
@@ -617,16 +634,137 @@ class AccountStore:
     async def get_group_member_ids(
         self, group_id: str, *, enabled_only: bool = True
     ) -> List[str]:
-        sql = (
-            "SELECT user_id FROM group_members WHERE group_id=?"
-            + (" AND enabled=1" if enabled_only else "")
-        )
+        if enabled_only:
+            sql = (
+                "SELECT user_id FROM group_members WHERE group_id=? AND enabled=1"
+                " UNION SELECT user_id FROM rank_member_overrides WHERE group_id=?"
+            )
+            params: tuple = (str(group_id), str(group_id))
+        else:
+            sql = (
+                "SELECT user_id FROM group_members WHERE group_id=?"
+                " UNION SELECT user_id FROM rank_member_overrides WHERE group_id=?"
+            )
+            params = (str(group_id), str(group_id))
 
         def _query() -> List[str]:
             conn = self._connect()
             try:
-                rows = conn.execute(sql, (str(group_id),)).fetchall()
+                rows = conn.execute(sql, params).fetchall()
                 return [str(row["user_id"]) for row in rows]
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_query)
+
+    # ------------------------------------------------------------------
+    # 后台「强制加入排行」覆盖表
+    # ------------------------------------------------------------------
+    async def is_group_member(self, group_id: str, user_id: str) -> bool:
+        """该用户当前是否已是启用状态的群成员（用于记录 preexisting）。"""
+
+        def _query() -> bool:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT enabled FROM group_members WHERE group_id=? AND user_id=?",
+                    (str(group_id), str(user_id)),
+                ).fetchone()
+                return bool(row) and bool(row["enabled"])
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_query)
+
+    async def add_rank_member_override(
+        self, group_id: str, user_id: str, added_by: str = "", note: str = ""
+    ) -> bool:
+        """把用户强制加入某群排行；preexisting 记录“本来就在排行里”，便于移除时还原。"""
+
+        def _add() -> bool:
+            conn = self._connect()
+            try:
+                with conn:
+                    row = conn.execute(
+                        "SELECT enabled FROM group_members WHERE group_id=? AND user_id=?",
+                        (str(group_id), str(user_id)),
+                    ).fetchone()
+                    preexisting = 1 if (row is not None and bool(row["enabled"])) else 0
+                    conn.execute(
+                        """
+                        INSERT INTO rank_member_overrides
+                            (group_id, user_id, added_by, note, preexisting, added_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(group_id, user_id)
+                        DO UPDATE SET added_by=excluded.added_by,
+                                      note=excluded.note,
+                                      added_at=excluded.added_at
+                        """,
+                        (
+                            str(group_id),
+                            str(user_id),
+                            str(added_by or ""),
+                            str(note or ""),
+                            preexisting,
+                            _now(),
+                        ),
+                    )
+                    return True
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_add)
+
+    async def remove_rank_member_override(self, group_id: str, user_id: str) -> bool:
+        """移除强制加入记录；返回是否原本存在。"""
+
+        def _remove() -> bool:
+            conn = self._connect()
+            try:
+                with conn:
+                    cur = conn.execute(
+                        "DELETE FROM rank_member_overrides WHERE group_id=? AND user_id=?",
+                        (str(group_id), str(user_id)),
+                    )
+                    return bool(cur.rowcount)
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_remove)
+
+    async def get_rank_member_override(
+        self, group_id: str, user_id: str
+    ) -> Dict[str, Any] | None:
+        def _query():
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM rank_member_overrides WHERE group_id=? AND user_id=?",
+                    (str(group_id), str(user_id)),
+                ).fetchone()
+                return dict(row) if row is not None else None
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_query)
+
+    async def list_rank_member_overrides(
+        self, group_id: str | None = None
+    ) -> List[Dict[str, Any]]:
+        def _query() -> List[Dict[str, Any]]:
+            conn = self._connect()
+            try:
+                if group_id:
+                    rows = conn.execute(
+                        "SELECT * FROM rank_member_overrides WHERE group_id=?"
+                        " ORDER BY added_at DESC",
+                        (str(group_id),),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM rank_member_overrides ORDER BY added_at DESC"
+                    ).fetchall()
+                return [dict(row) for row in rows]
             finally:
                 conn.close()
 

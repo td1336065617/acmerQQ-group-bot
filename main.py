@@ -568,6 +568,18 @@ class AcmerGroupBot(Star):
                 "群排行只读查看",
             )
             self.context.register_web_api(
+                f"/{PLUGIN_NAME}/rank/members",
+                self._web_rank_members,
+                ["GET"],
+                "群排行成员列表",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/rank/members",
+                self._web_rank_members_write,
+                ["POST"],
+                "强制加入/移除群排行成员",
+            )
+            self.context.register_web_api(
                 f"/{PLUGIN_NAME}/run-now",
                 self._web_run_now,
                 ["POST"],
@@ -5783,6 +5795,102 @@ class AcmerGroupBot(Star):
                 },
             }
         )
+
+    async def _web_rank_members(self):
+        """群排行成员列表：区分自然成员与后台强制加入，并带出绑定账号。"""
+        group_id = self._query_param("group_id", "").strip()
+        if not group_id:
+            return error_response("缺少 group_id")
+        try:
+            members = await self.account_registry.list_rank_members(group_id)
+            accounts = await self.account_registry.get_all_accounts()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("后台读取排行成员失败：%s", exc)
+            return error_response("读取排行成员失败，请稍后重试")
+
+        items = []
+        for item in members:
+            uid = str(item.get("user_id") or "")
+            bound = []
+            for platform, record in (accounts.get(uid) or {}).items():
+                if not isinstance(record, dict):
+                    continue
+                bound.append(
+                    {
+                        "platform": platform,
+                        "handle": str(
+                            record.get("handle") or record.get("platform_user_id") or ""
+                        ),
+                        "display_name": str(record.get("display_name") or ""),
+                        "qq_name": str(record.get("qq_name") or ""),
+                    }
+                )
+            qq_name = next((b["qq_name"] for b in bound if b["qq_name"]), "")
+            items.append({**item, "accounts": bound, "qq_name": qq_name})
+        manual_count = sum(1 for item in items if item.get("manual"))
+        return json_response(
+            {
+                "status": "success",
+                "data": {
+                    "group_id": group_id,
+                    "items": items,
+                    "total": len(items),
+                    "manual_count": manual_count,
+                },
+            }
+        )
+
+    async def _web_rank_members_write(self):
+        """后台强制把已绑定用户加入某群排行，或移除。"""
+        payload = await request.json(default=None)
+        if not isinstance(payload, dict):
+            return error_response("请求体格式不正确")
+        action = str(payload.get("action") or "").strip()
+        group_id = str(payload.get("group_id") or "").strip()
+        user_id = str(payload.get("user_id") or "").strip()
+        if not group_id or not user_id:
+            return error_response("缺少 group_id / user_id")
+
+        if action == "add":
+            try:
+                accounts = await self.account_registry.get_user_accounts(user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("读取待加入用户绑定失败：%s", exc)
+                return error_response("读取该用户的绑定失败，请稍后重试")
+            if not accounts:
+                return error_response("该用户还没有绑定任何平台账号，请先在「账号绑定」里绑定")
+            try:
+                result = await self.account_registry.add_rank_member(
+                    group_id, user_id, added_by="webui"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("强制加入排行失败：%s", exc, exc_info=True)
+                return error_response("强制加入失败，请稍后重试")
+            self._invalidate_rank_cache(group_id)
+            logger.info(
+                "后台强制加入排行 group=%s user=%s preexisting=%s",
+                group_id,
+                user_id,
+                result.get("preexisting"),
+            )
+            return json_response({"status": "success", "data": result})
+
+        if action == "remove":
+            try:
+                result = await self.account_registry.remove_rank_member(group_id, user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("移除排行成员失败：%s", exc, exc_info=True)
+                return error_response("移除失败，请稍后重试")
+            self._invalidate_rank_cache(group_id)
+            logger.info(
+                "后台移除排行成员 group=%s user=%s restored=%s",
+                group_id,
+                user_id,
+                result.get("restored"),
+            )
+            return json_response({"status": "success", "data": result})
+
+        return error_response("不支持的 action")
 
     async def _web_rank(self):
         """群排行只读查看；默认命中快照，refresh=1 才强制重算。"""

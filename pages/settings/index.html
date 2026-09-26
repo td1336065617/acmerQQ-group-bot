@@ -347,6 +347,17 @@
         <div id="rankErrors" class="muted"></div>
         <div class="table-wrap"><table><thead><tr><th>#</th><th>成员</th><th>账号</th><th>指标</th><th>近 7 日</th></tr></thead><tbody id="rankBody"></tbody></table></div>
       </div>
+
+      <div class="card">
+        <h2>排行成员<span class="spacer"><span class="badge info" id="rmCount">0 人</span><span class="badge warn" id="rmManualCount" hidden>强制加入 0</span><button class="btn secondary" id="rmLoad">查看成员</button></span></h2>
+        <div class="muted" style="margin-bottom:10px">把<b>已绑定用户</b>强制加入本群排行。强制加入后，用户自己在群里发「退出排行」也不会掉（只有在这里移除才会消失）；移除只去掉强制标记，原本就在排行里的成员不会被踢出。</div>
+        <div class="toolbar">
+          <select id="rmGroup"></select>
+          <input type="text" id="rmSearch" placeholder="搜索 QQ / 账号 / 昵称，从未加入者里选">
+        </div>
+        <div id="rmCandidates"></div>
+        <div class="table-wrap"><table><thead><tr><th>成员</th><th>来源</th><th>绑定账号</th><th>加入时间</th><th>操作</th></tr></thead><tbody id="rmBody"></tbody></table></div>
+      </div>
     </section>
 
     <!-- 配置备份 -->
@@ -1029,7 +1040,10 @@
   // ---------------- 群排行 ----------------
   function prepareRank() {
     fillGroupSelectors();
+    fillRankMemberSelectors();
+    bindRankMemberEvents();
     if (!state.rankLoaded) { state.rankLoaded = true; loadRank(false); }
+    if (!state.rmLoaded) { state.rmLoaded = true; loadRankMembers(); }
   }
   async function loadRank(refresh) {
     var groupId = $('#rankGroup').value;
@@ -1060,6 +1074,129 @@
       btn.disabled = false;
       btn.textContent = '刷新';
     }
+  }
+
+  // ---------------- 排行成员（强制加入） ----------------
+  function fillRankMemberSelectors() {
+    var groups = state.config.groups || [];
+    var node = $('#rmGroup');
+    if (!node) return;
+    node.innerHTML = groups.map(function (g) {
+      var label = text(g.name).trim() ? (text(g.name) + ' · ' + shortId(g.group_id)) : shortId(g.group_id);
+      return '<option value="' + esc(g.group_id) + '">' + esc(label) + '</option>';
+    }).join('') || '<option value="">（暂无群）</option>';
+    var rankNode = $('#rankGroup');
+    if (rankNode && rankNode.value) node.value = rankNode.value;
+  }
+  async function ensureBoundUsers() {
+    if (state.rmBound && state.rmBound.length) return state.rmBound;
+    try {
+      var data = await apiGet('bindings', { limit: 2000, offset: 0 });
+      state.rmBound = data.items || [];
+    } catch (e) { state.rmBound = []; }
+    return state.rmBound;
+  }
+  async function loadRankMembers() {
+    var groupId = $('#rmGroup').value;
+    if (!groupId) { toast('暂无可管理的群', 'info'); return; }
+    var btn = $('#rmLoad');
+    btn.disabled = true;
+    try {
+      var data = await apiGet('rank/members', { group_id: groupId });
+      state.rmMembers = data.items || [];
+      $('#rmCount').textContent = state.rmMembers.length + ' 人';
+      var manual = state.rmMembers.filter(function (item) { return item.manual; }).length;
+      $('#rmManualCount').hidden = !manual;
+      $('#rmManualCount').textContent = '强制加入 ' + manual;
+      renderRankMembers();
+      await ensureBoundUsers();
+      renderRankCandidates();
+      state.config = null;
+    } catch (e) {
+      toast('读取排行成员失败：' + e.message, 'err');
+    } finally { btn.disabled = false; }
+  }
+  function renderRankMembers() {
+    var items = state.rmMembers || [];
+    if (!items.length) {
+      $('#rmBody').innerHTML = '<tr><td colspan="5" class="muted">该群还没有排行成员：成员在群里发一条消息会自动加入，或用上面的搜索强制加入。</td></tr>';
+      return;
+    }
+    $('#rmBody').innerHTML = items.map(function (item) {
+      var bound = (item.accounts || []).map(function (a) {
+        return platformLabel(a.platform) + '：' + esc(a.handle);
+      }).join('<br>') || '<span class="muted">未绑定</span>';
+      var source = item.manual ? '<span class="badge warn">强制加入</span>' : '<span class="badge info">自然成员</span>';
+      return '<tr>' +
+        '<td>' + (item.qq_name ? esc(item.qq_name) + '<br>' : '') + '<span class="mono muted">' + esc(shortId(item.user_id)) + '</span></td>' +
+        '<td>' + source + '</td>' +
+        '<td>' + bound + '</td>' +
+        '<td class="muted">' + (item.manual ? esc(fmtTs(item.added_at)) : '-') + '</td>' +
+        '<td>' + (item.manual
+          ? '<button class="btn small danger" data-rm-remove="' + esc(item.user_id) + '">移除</button>'
+          : '<span class="muted">—</span>') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+  function renderRankCandidates() {
+    var box = $('#rmCandidates');
+    if (!box) return;
+    var query = $('#rmSearch').value.trim().toLowerCase();
+    if (!query) { box.innerHTML = ''; return; }
+    var memberIds = {};
+    (state.rmMembers || []).forEach(function (item) { memberIds[item.user_id] = true; });
+    var seen = {};
+    var hits = [];
+    (state.rmBound || []).forEach(function (item) {
+      var uid = item.user_id;
+      if (memberIds[uid]) return;
+      var hay = (text(item.user_id) + ' ' + text(item.handle) + ' ' + text(item.qq_name)).toLowerCase();
+      if (hay.indexOf(query) < 0) return;
+      if (seen[uid]) { seen[uid].accounts.push(item); return; }
+      var rec = { user_id: uid, qq_name: item.qq_name || '', accounts: [item] };
+      seen[uid] = rec;
+      hits.push(rec);
+    });
+    if (!hits.length) {
+      box.innerHTML = '<div class="muted">没有可加入的匹配用户（可能已在该群排行里，或该用户还没有绑定账号）。</div>';
+      return;
+    }
+    box.innerHTML = '<div class="muted" style="margin-bottom:6px">匹配到 ' + hits.length + ' 个已绑定用户（最多显示 20 个）</div>' +
+      hits.slice(0, 20).map(function (rec) {
+        var accounts = rec.accounts.map(function (a) { return platformLabel(a.platform) + '：' + esc(a.handle); }).join('　');
+        return '<div class="row" style="align-items:center;gap:8px;margin-bottom:6px">' +
+          '<span class="mono">' + esc(shortId(rec.user_id)) + '</span>' +
+          (rec.qq_name ? '<span>' + esc(rec.qq_name) + '</span>' : '') +
+          '<span class="muted">' + accounts + '</span>' +
+          '<button class="btn small" data-rm-add="' + esc(rec.user_id) + '">强制加入</button></div>';
+      }).join('');
+  }
+  async function rankMemberWrite(action, userId) {
+    var groupId = $('#rmGroup').value;
+    if (!groupId || !userId) return;
+    try {
+      await apiPost('rank/members', { action: action, group_id: groupId, user_id: userId });
+      toast(action === 'add' ? '已强制加入该群排行（点“刷新”重算可见）' : '已移除强制加入标记', 'ok');
+      await loadRankMembers();
+    } catch (e) {
+      toast((action === 'add' ? '加入' : '移除') + '失败：' + e.message, 'err');
+    }
+  }
+  function bindRankMemberEvents() {
+    var box = $('#rmCandidates');
+    if (!box || box.dataset.bound) return;
+    box.dataset.bound = '1';
+    $('#rmLoad').onclick = loadRankMembers;
+    $('#rmGroup').onchange = loadRankMembers;
+    $('#rmSearch').oninput = renderRankCandidates;
+    box.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-rm-add]');
+      if (btn) rankMemberWrite('add', btn.getAttribute('data-rm-add'));
+    });
+    $('#rmBody').addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-rm-remove]');
+      if (btn) rankMemberWrite('remove', btn.getAttribute('data-rm-remove'));
+    });
   }
 
   // ---------------- 配置备份 ----------------

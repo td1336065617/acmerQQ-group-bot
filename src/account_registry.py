@@ -26,6 +26,8 @@ from .account_store import AccountStore, default_store_path
 ACCOUNTS_KEY = "linked_accounts"
 PENDING_BINDINGS_KEY = "pending_account_bindings"
 GROUP_RANK_KEY = "group_rank_members"
+#: 后台「强制加入排行」名单（KV 回退用）
+RANK_MEMBER_KEY = "rank_member_overrides"
 RATING_SNAPSHOTS_KEY = "account_rating_snapshots"
 
 BINDING_TTL = 10 * 60
@@ -391,6 +393,126 @@ class AccountRegistry:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("SQLite 读取群成员失败，回退 KV: %s", exc)
         return await self._kv_get_group_member_ids(gid)
+
+    # ------------------------------------------------------------------
+    # 后台「强制加入排行」
+    # ------------------------------------------------------------------
+    async def add_rank_member(
+        self, group_id: str, user_id: str, *, added_by: str = "", note: str = ""
+    ) -> Dict[str, Any]:
+        """把用户强制加入某群排行。
+
+        与用户在群里自己「加入排行」的区别：名单单独落库（rank_member_overrides），
+        读取成员时 UNION 进来，因此用户之后发「退出排行」或退群都不会掉，
+        只有管理员在后台移除才会消失。
+        """
+        gid = str(group_id)
+        uid = str(user_id)
+        preexisting = False
+        if self._need_store():
+            try:
+                preexisting = await self.store.is_group_member(gid, uid)
+                await self.store.add_rank_member_override(gid, uid, added_by, note)
+                await self._dual(self._kv_add_rank_member(gid, uid, added_by, note))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("写入强制加入名单失败，回退 KV：%s", exc)
+                await self._kv_add_rank_member(gid, uid, added_by, note)
+        else:
+            await self._kv_add_rank_member(gid, uid, added_by, note)
+        # 同步置为启用成员：让既有查询与 KV 模式立即生效
+        await self._kv_set_group_member(gid, uid, True)
+        if self._need_store():
+            try:
+                await self.store.set_group_member(gid, uid, True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 强制加入群成员失败：%s", exc)
+        return {"group_id": gid, "user_id": uid, "preexisting": preexisting}
+
+    async def remove_rank_member(self, group_id: str, user_id: str) -> Dict[str, Any]:
+        """移除后台强制加入；原本就在排行里的成员只去掉强制标记。"""
+        gid = str(group_id)
+        uid = str(user_id)
+        override: Dict[str, Any] | None = None
+        if self._need_store():
+            try:
+                override = await self.store.get_rank_member_override(gid, uid)
+                await self.store.remove_rank_member_override(gid, uid)
+                await self._dual(self._kv_remove_rank_member(gid, uid))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("移除强制加入名单失败，回退 KV：%s", exc)
+                await self._kv_remove_rank_member(gid, uid)
+        else:
+            override = (await self._kv_get_rank_members(gid)).get(uid)
+            await self._kv_remove_rank_member(gid, uid)
+        preexisting = bool((override or {}).get("preexisting"))
+        if not preexisting:
+            await self._kv_set_group_member(gid, uid, False)
+            if self._need_store():
+                try:
+                    await self.store.set_group_member(gid, uid, False)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("SQLite 移除群成员失败：%s", exc)
+        return {"group_id": gid, "user_id": uid, "restored": preexisting}
+
+    async def list_rank_members(self, group_id: str) -> List[Dict[str, Any]]:
+        """列出某群排行成员及其来源（manual= 后台强制加入）。"""
+        gid = str(group_id)
+        overrides: Dict[str, Dict[str, Any]] = {}
+        if self._need_store():
+            try:
+                for row in await self.store.list_rank_member_overrides(gid):
+                    overrides[str(row.get("user_id") or "")] = row
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("读取强制加入名单失败：%s", exc)
+        if not overrides:
+            overrides = await self._kv_get_rank_members(gid)
+        members = await self.get_group_member_ids(gid)
+        out: List[Dict[str, Any]] = []
+        for uid in members:
+            override = overrides.get(str(uid)) or {}
+            out.append(
+                {
+                    "user_id": str(uid),
+                    "manual": bool(override),
+                    "added_by": str(override.get("added_by") or ""),
+                    "added_at": float(override.get("added_at") or 0),
+                    "note": str(override.get("note") or ""),
+                    "preexisting": bool(override.get("preexisting")),
+                }
+            )
+        return out
+
+    async def _kv_add_rank_member(
+        self, group_id: str, user_id: str, added_by: str = "", note: str = ""
+    ) -> None:
+        data = await self._get(RANK_MEMBER_KEY, {})
+        if not isinstance(data, dict):
+            data = {}
+        data[f"{group_id}|{user_id}"] = {
+            "group_id": str(group_id),
+            "user_id": str(user_id),
+            "added_by": str(added_by or ""),
+            "note": str(note or ""),
+            "added_at": time.time(),
+        }
+        await self._put(RANK_MEMBER_KEY, data)
+
+    async def _kv_remove_rank_member(self, group_id: str, user_id: str) -> None:
+        data = await self._get(RANK_MEMBER_KEY, {})
+        if not isinstance(data, dict):
+            data = {}
+        if data.pop(f"{group_id}|{user_id}", None) is not None:
+            await self._put(RANK_MEMBER_KEY, data)
+
+    async def _kv_get_rank_members(self, group_id: str) -> Dict[str, Dict[str, Any]]:
+        data = await self._get(RANK_MEMBER_KEY, {})
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for item in data.values():
+            if isinstance(item, dict) and str(item.get("group_id")) == str(group_id):
+                out[str(item.get("user_id"))] = item
+        return out
 
     async def remove_user_from_all_groups(self, user_id: str) -> None:
         uid = str(user_id)
