@@ -124,6 +124,9 @@ class _FakePlugin:
         self.sent: list[str] = []
         self.board_pushes = 0
         self.kv: dict = {}
+        self.attempt_ok = True
+        self.attempt_checks = 0
+        self.attempt_notes = 0
 
     async def build_morning_text(self, group):
         return self._morning
@@ -141,6 +144,14 @@ class _FakePlugin:
 
     async def put_kv_data(self, key, value):
         self.kv[key] = value
+
+    async def push_attempt_allowed(self, kind, key):
+        self.attempt_checks += 1
+        return self.attempt_ok
+
+    async def note_push_attempt(self, kind, key):
+        self.attempt_notes += 1
+        return self.attempt_notes
 
 
 def _tick(plugin):
@@ -192,3 +203,35 @@ def test_morning_push_keeps_text_when_boards_fail():
     # 正文已送达即标记完成，避免重复早报
     assert plugin.kv.get("morning_g1_20260913") is True
 
+
+def test_morning_push_late_still_fires():
+    """BUG-026：早报时间已过（补发窗口）也要推，当天仍只会成功一次。"""
+    from datetime import datetime
+
+    from src.models import CN_TZ
+
+    plugin = _FakePlugin("🌅 今日比赛早报")
+    scheduler = PushScheduler(plugin)
+
+    now = datetime(2026, 9, 13, 9, 30, tzinfo=CN_TZ)   # 群里设的是 08:00
+    asyncio.run(scheduler._maybe_morning_push(_group(), now))
+    assert plugin.sent == ["🌅 今日比赛早报"]
+    assert plugin.kv.get("morning_g1_20260913") is True
+    assert plugin.attempt_notes == 1
+
+
+def test_morning_push_respects_attempt_gate():
+    """BUG-026 护栏：尝试次数用尽后不再触发（避免每 30 秒重试）。"""
+    from datetime import datetime
+
+    from src.models import CN_TZ
+
+    plugin = _FakePlugin("🌅 今日比赛早报")
+    plugin.attempt_ok = False
+    scheduler = PushScheduler(plugin)
+
+    now = datetime(2026, 9, 13, 9, 30, tzinfo=CN_TZ)
+    asyncio.run(scheduler._maybe_morning_push(_group(), now))
+    assert plugin.sent == []
+    assert plugin.attempt_checks == 1
+    assert plugin.attempt_notes == 0

@@ -4508,16 +4508,26 @@ class AcmerGroupBot(Star):
             settings.get("weekly_report_weekday")
             or DEFAULT_WEEKLY_REPORT_WEEKDAY
         )
-        if moment.isoweekday() != weekday:
-            return 0
         try:
             push_time = validate_hhmm(
                 settings.get("weekly_report_time") or DEFAULT_WEEKLY_REPORT_TIME
             )
         except ValueError:
             return 0
-        if moment.strftime("%H:%M") != push_time:
+        # 同一 ISO 周内、已过本周该时刻即可补发（幂等键仍是 weekly_<群>_<周>，一周只成功推一次）
+        hour, minute = (int(part) for part in push_time.split(":"))
+        monday = (moment - timedelta(days=moment.isoweekday() - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        scheduled = monday + timedelta(days=weekday - 1, hours=hour, minutes=minute)
+        if moment < scheduled:
             return 0
+        if moment.isoweekday() != weekday or moment.strftime("%H:%M") != push_time:
+            logger.info(
+                "周报补发：本周计划 %s，当前 %s",
+                scheduled.strftime("%Y-%m-%d %H:%M"),
+                moment.strftime("%Y-%m-%d %H:%M"),
+            )
 
         week_key = self._iso_week_key(moment)
         pushed = 0
@@ -4553,6 +4563,11 @@ class AcmerGroupBot(Star):
             return False
         if not report:
             return False
+        if write_key:
+            # 补发护栏：真的要有内容推送了才计一次尝试（避免「无数据」也消耗次数，BUG-026）
+            if not await self.push_attempt_allowed("weekly", key):
+                return False
+            await self.note_push_attempt("weekly", key)
         text = str(report.get("text") or "").strip()
         text_sent = True
         if text:
@@ -5310,6 +5325,53 @@ class AcmerGroupBot(Star):
                 return str(value)
         return default
 
+    #: 补发类推送的尝试上限与最小间隔（防止补发窗口把失败重试放大，BUG-026）
+    PUSH_ATTEMPT_MAX = 3
+    PUSH_ATTEMPT_MIN_INTERVAL = 600.0
+
+    async def push_attempt_allowed(self, kind: str, key: str) -> bool:
+        """补发尝试闸门：同一 key 最多 PUSH_ATTEMPT_MAX 次，且两次至少间隔 PUSH_ATTEMPT_MIN_INTERVAL。"""
+        store_key = f"pushattempt_{kind}_{key}"
+        try:
+            info = await self.get_kv_data(store_key, {}) or {}
+        except Exception:  # noqa: BLE001 - 读不到计数就放行
+            return True
+        if not isinstance(info, dict):
+            return True
+        if int(info.get("n") or 0) >= self.PUSH_ATTEMPT_MAX:
+            return False
+        return (time.time() - float(info.get("ts") or 0.0)) >= self.PUSH_ATTEMPT_MIN_INTERVAL
+
+    async def note_push_attempt(self, kind: str, key: str) -> int:
+        """记一次补发尝试；返回累计次数。"""
+        store_key = f"pushattempt_{kind}_{key}"
+        try:
+            info = await self.get_kv_data(store_key, {}) or {}
+        except Exception:  # noqa: BLE001
+            info = {}
+        if not isinstance(info, dict):
+            info = {}
+        count = int(info.get("n") or 0) + 1
+        try:
+            await self.put_kv_data(store_key, {"n": count, "ts": time.time()})
+        except Exception as exc:  # noqa: BLE001 - 计数失败不影响推送
+            logger.warning("写补发尝试计数失败：%s（%s）", store_key, exc)
+            return count
+        if count >= self.PUSH_ATTEMPT_MAX:
+            logger.warning(
+                "补发 %s %s 已尝试 %d 次仍未成功，本周期不再重试（等下一个推送窗口）",
+                kind,
+                key,
+                count,
+            )
+        return count
+
+    async def clear_push_attempts(self, kind: str, key: str) -> None:
+        try:
+            await self.put_kv_data(f"pushattempt_{kind}_{key}", {})
+        except Exception:  # noqa: BLE001 - 清理失败无副作用
+            pass
+
     async def _log_push(
         self, group_id: str, kind: str, ok: bool, detail: str = ""
     ) -> None:
@@ -6063,7 +6125,7 @@ class AcmerGroupBot(Star):
         progress = self._query_param("progress", "0") in {"1", "true", "True"}
         refresh = self._query_param("refresh", "0") in {"1", "true", "True"}
         try:
-            rows, errors = await self.rank_service.read(
+            rows, errors, meta = await self.rank_service.read_with_meta(
                 group_id,
                 platform,
                 progress=progress,
@@ -6079,7 +6141,8 @@ class AcmerGroupBot(Star):
                 "data": {
                     "rows": rows,
                     "errors": [str(item) for item in (errors or [])],
-                    "stale": not refresh,
+                    "stale": not (meta or {}).get("fresh", False),
+                    "snapshot_at": float((meta or {}).get("snapshot_at") or 0.0),
                 },
             }
         )

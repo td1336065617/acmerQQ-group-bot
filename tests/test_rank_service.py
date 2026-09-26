@@ -161,3 +161,30 @@ def test_rank_dirty_triggers_background_refresh(tmp_path):
         assert float(meta["refreshed_at"]) >= float(meta["dirty_at"])
 
     asyncio.run(scenario())
+
+
+def test_read_with_meta_reports_fresh_and_snapshot_at(tmp_path):
+    """BUG-032：read_with_meta 要能如实给出 fresh 与 snapshot_at（后台徽标据此显示）。"""
+
+    async def scenario():
+        store = AccountStore(tmp_path / "rank.db")
+        await store.initialize()
+        plugin = FakePlugin(store)
+        service = RankService(plugin)
+        service._closing = True          # 避免过期快照触发后台刷新任务
+
+        rows, errors, meta = await service.read_with_meta("g1", "codeforces")
+        assert rows and errors == []
+        assert meta["fresh"] is True and meta["snapshot_at"] > 0
+
+        fresh_meta = await store.get_rank_meta("g1", "codeforces")
+        assert fresh_meta is not None
+
+        # 标记为脏 -> 快照变陈旧，但依然返回旧数据并给出 fresh=False
+        await store.mark_rank_dirty("g1", "codeforces")
+        rows2, _errors2, meta2 = await service.read_with_meta("g1", "codeforces", allow_stale=True)
+        assert rows2
+        assert meta2["fresh"] is False
+        assert meta2["snapshot_at"] == float((await store.get_rank_meta("g1", "codeforces")).get("refreshed_at") or 0.0)
+
+    asyncio.run(scenario())

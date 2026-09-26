@@ -85,6 +85,27 @@ class RankService:
         force: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Any]]:
         """读取群排行/进步榜；优先命中 SQLite 快照，miss/stale 时才同步计算。"""
+        rows, errors, _meta = await self.read_with_meta(
+            group_id,
+            platform,
+            progress=progress,
+            record_metrics=record_metrics,
+            allow_stale=allow_stale,
+            force=force,
+        )
+        return rows, errors
+
+    async def read_with_meta(
+        self,
+        group_id: str,
+        platform: str,
+        *,
+        progress: bool = False,
+        record_metrics: bool = True,
+        allow_stale: bool = True,
+        force: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], List[Any], Dict[str, Any]]:
+        """同 read()，但额外返回 meta：{"fresh": bool, "snapshot_at": float}（BUG-032）。"""
         gid = str(group_id)
         mode = _mode_of(progress)
         store = self._store()
@@ -108,7 +129,7 @@ class RankService:
                     logger.warning("排行快照落库失败: %s", exc)
             if dirty_pending is not None:
                 dirty_pending.discard(gid)
-            return rows, errors
+            return rows, errors, {"fresh": True, "snapshot_at": started}
 
         if store is not None and not dirty_now:
             try:
@@ -116,12 +137,19 @@ class RankService:
                 snapshot_rows = await store.get_rank_rows(
                     gid, platform, mode=mode
                 )
+                snapshot_at = float((meta or {}).get("refreshed_at") or 0.0)
                 if fresh:
-                    return snapshot_rows, self._meta_errors(meta)
+                    return snapshot_rows, self._meta_errors(meta), {
+                        "fresh": True,
+                        "snapshot_at": snapshot_at,
+                    }
                 if snapshot_rows and allow_stale:
                     # 先回旧快照，后台刷新；用户无需等全群抓取。
                     await self.request_refresh(gid, platform, progress=progress)
-                    return snapshot_rows, self._meta_errors(meta)
+                    return snapshot_rows, self._meta_errors(meta), {
+                        "fresh": False,
+                        "snapshot_at": snapshot_at,
+                    }
             except Exception as exc:  # noqa: BLE001 - 快照失败回退同步计算
                 logger.warning("读取排行快照失败，回退同步计算: %s", exc)
 
@@ -145,7 +173,7 @@ class RankService:
             await self.request_refresh(gid, platform, progress=True)
         if dirty_pending is not None:
             dirty_pending.discard(gid)
-        return rows, errors
+        return rows, errors, {"fresh": True, "snapshot_at": started}
 
     async def request_refresh(
         self,

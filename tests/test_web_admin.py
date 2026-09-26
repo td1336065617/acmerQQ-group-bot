@@ -114,6 +114,15 @@ class FakeRank:
         self.calls.append((group_id, platform, kwargs))
         return [{"handle": "a", "value": 1}], ["warn"]
 
+    async def read_with_meta(self, group_id, platform, **kwargs):
+        # fresh 跟随 force：force=False 时视为旧快照（stale=True），force=True 时视为刚重算
+        self.calls.append((group_id, platform, kwargs))
+        return (
+            [{"handle": "a", "value": 1}],
+            ["warn"],
+            {"fresh": bool(kwargs.get("force")), "snapshot_at": 1790000000.0},
+        )
+
 
 def _bot(
     main_module,

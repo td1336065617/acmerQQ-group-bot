@@ -88,3 +88,25 @@ def test_scene_not_ready_is_throttled_and_not_counted():
         assert bot._sent == []
 
     asyncio.run(scenario())
+
+
+def test_push_attempt_gate_limits_count_and_spacing():
+    """BUG-026 护栏：同一天最多 3 次尝试，且两次间隔不少于 10 分钟。"""
+
+    async def scenario():
+        main_module = _load_main_module()
+        bot = _build_bot(main_module)
+        assert await bot.push_attempt_allowed("morning", "k") is True
+        await bot.note_push_attempt("morning", "k")
+        # 刚记过一次 -> 10 分钟内不再尝试
+        assert await bot.push_attempt_allowed("morning", "k") is False
+        # 次数用尽 -> 即使间隔够了也不再尝试
+        bot._kv["pushattempt_morning_k"] = {
+            "n": main_module.AcmerGroupBot.PUSH_ATTEMPT_MAX,
+            "ts": 0.0,
+        }
+        assert await bot.push_attempt_allowed("morning", "k") is False
+        await bot.clear_push_attempts("morning", "k")
+        assert await bot.push_attempt_allowed("morning", "k") is True
+
+    asyncio.run(scenario())

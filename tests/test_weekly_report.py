@@ -205,9 +205,11 @@ def test_time_not_reached_does_not_push(monkeypatch):
         main_module = _load_main_module()
         _patch_activity(monkeypatch, main_module, _activity_ok())
         bot = _build_bot(main_module)
+        # 本周还没到点 -> 不推
         assert await bot.tick_weekly_report(MONDAY.replace(hour=19, minute=59)) == 0
-        assert await bot.tick_weekly_report(MONDAY.replace(hour=20, minute=1)) == 0
         assert bot._kv == {}
+        # 到点之后（含补发窗口，BUG-026）-> 推一次
+        assert await bot.tick_weekly_report(MONDAY.replace(hour=20, minute=1)) == 1
         # 关闭开关后同样不推
         bot = _build_bot(main_module, settings={"weekly_report_enabled": False})
         assert await bot.tick_weekly_report(MONDAY) == 0
@@ -355,5 +357,20 @@ def test_collect_weekly_activity_skips_failures_and_caches():
         assert plugin.account_fetcher.calls.count("bad") == 2
         assert plugin.account_fetcher.calls.count("good") == 1  # 命中 6 小时缓存
         clear_weekly_activity_cache()
+
+    asyncio.run(scenario())
+
+
+def test_weekly_report_is_repushed_later_in_week(monkeypatch):
+    """BUG-026：计划周一 20:00，但周二 10:00 才被触发时也要补发（同一 ISO 周只推一次）。"""
+
+    async def scenario():
+        main_module = _load_main_module()
+        _patch_activity(monkeypatch, main_module)
+        bot = _build_bot(main_module, groups=[GROUP])
+        late = datetime(2026, 9, 22, 10, 0, tzinfo=CN_TZ)     # 周二上午
+        assert await bot.tick_weekly_report(late) == 1
+        # 同周再触发 -> 幂等键命中，不再重复
+        assert await bot.tick_weekly_report(late) == 0
 
     asyncio.run(scenario())

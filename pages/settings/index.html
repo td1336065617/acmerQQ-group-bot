@@ -336,7 +336,7 @@
     <!-- 群排行 -->
     <section class="view" data-view="rank" hidden>
       <div class="card">
-        <h2>群排行<span class="spacer"><span class="badge info" id="rankStale" hidden>数据可能较旧</span><button class="btn secondary" id="rankRefresh">刷新</button></span></h2>
+        <h2>群排行<span class="spacer"><span class="muted" id="rankTime"></span><span class="badge info" id="rankStale" hidden>数据可能较旧</span><button class="btn secondary" id="rankRefresh">刷新</button></span></h2>
         <div class="muted" style="margin-bottom:10px">只读查看。默认命中本地快照，不触发全群抓取；点“刷新”才会强制重算（可能较慢）。</div>
         <div class="toolbar">
           <select id="rankGroup"></select>
@@ -1152,6 +1152,12 @@
         refresh: refresh ? '1' : '0'
       });
       $('#rankStale').hidden = !data.stale;
+      var rankTime = $('#rankTime');
+      if (rankTime) {
+        rankTime.textContent = data.snapshot_at
+          ? ('更新于 ' + new Date(data.snapshot_at * 1000).toLocaleString('zh-CN', { hour12: false }))
+          : '';
+      }
       $('#rankErrors').textContent = (data.errors && data.errors.length) ? ('平台提示：' + data.errors.join('；')) : '';
       var rows = data.rows || [];
       $('#rankBody').innerHTML = rows.length
