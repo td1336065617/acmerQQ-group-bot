@@ -290,10 +290,10 @@ def test_min_participants_blocks_push():
     asyncio.run(scenario())
 
 
-def test_no_members_or_no_result_skips_without_writing_key():
+def test_skip_records_marker_and_repushes_when_membership_changes():
     async def scenario():
         main_module = _load_main_module()
-        # 没有绑定该平台的成员
+        # 没有绑定该平台的成员：跳过，但要落「带成员指纹的」标记（BUG-039）
         bot = _build_bot(
             main_module,
             groups=[GROUP],
@@ -303,7 +303,17 @@ def test_no_members_or_no_result_skips_without_writing_key():
             settlement=FakeSettlement(result=_result()),
         )
         assert await bot.tick_settlements() == 0
-        assert bot._kv == {}
+        marker = bot._kv.get("settle_g1_codeforces_2264")
+        assert isinstance(marker, dict) and marker.get("skipped") is True
+        assert marker.get("members") == ""
+        # 成员没变 -> 第二个 tick 不再重复评估
+        assert await bot.tick_settlements() == 0
+        assert not bot._sent
+        # 之后有人绑定该平台 -> 指纹变化 -> 允许补评估一次并推送
+        bot.account_registry._members["g1"] = ["u1"]
+        bot.account_registry._accounts["u1"] = ACCOUNTS["u1"]
+        assert await bot.tick_settlements() == 1
+        assert bot._sent and "赛果" in bot._sent[0][1]
         # 采集返回 None（未就绪）→ 不写幂等键，下一 tick 可重试
         bot = _build_bot(
             main_module,
@@ -402,5 +412,33 @@ def test_settlement_exception_does_not_break_tick():
             await bot.tick_settlements()
         except RuntimeError:
             raise AssertionError("tick 不应向上抛采集异常")
+
+    asyncio.run(scenario())
+
+def test_skip_low_participants_writes_idempotent_key():
+    """BUG-039：成员不足时「跳过」也必须落幂等键，否则每个 tick 都会重复评估同一场。"""
+
+    async def scenario():
+        main_module = _load_main_module()
+        settlement = FakeSettlement(result=_result())
+        bot = _build_bot(
+            main_module,
+            groups=[GROUP],
+            contests={"codeforces": [_contest()]},
+            members={"g1": []},  # 本群没有任何绑定成员 -> 低于阈值
+            accounts=ACCOUNTS,
+            settlement=settlement,
+        )
+        assert await bot.tick_settlements() == 0
+        assert settlement.calls == 0
+        # 关键：跳过也要落标记（带成员指纹），避免每 tick 空转
+        marker = bot._kv.get("settle_g1_codeforces_2264")
+        assert isinstance(marker, dict) and marker.get("skipped") is True
+        # 第二个 tick 命中幂等键：不再重复评估，也不重复抓取
+        assert await bot.tick_settlements() == 0
+        assert settlement.calls == 0
+        # 推送日志里能查到「跳过」
+        logs = bot._kv.get("push_log") or []
+        assert any("跳过" in str(item.get("detail", "")) for item in logs)
 
     asyncio.run(scenario())

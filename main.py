@@ -4020,6 +4020,15 @@ class AcmerGroupBot(Star):
         return members
 
     @staticmethod
+    def _members_fingerprint(members: List[tuple]) -> str:
+        """成员集合指纹（按 handle 排序），用于判断「跳过之后是否有人新绑定」。
+
+        与 1.13.3 赛果缓存串台的修法同一思路：凡是按作用域缓存/判重，键里必须带成员指纹。
+        """
+        handles = sorted(str(item[2]) for item in members if len(item) > 2)
+        return "|".join(handles)
+
+    @staticmethod
     def _settlement_text(result) -> str:
         """赛果卡的纯文本兜底（渲染不可用时使用）。"""
         lines = [f"🏁 {result.contest_name} 赛果"]
@@ -4088,8 +4097,17 @@ class AcmerGroupBot(Star):
                     )
                 for contest in candidates:
                     key = f"settle_{group.group_id}_{platform}_{contest.contest_id}"
-                    if await self.get_kv_data(key, False):
-                        continue
+                    marker = await self.get_kv_data(key, False)
+                    if marker:
+                        if not (isinstance(marker, dict) and marker.get("skipped")):
+                            continue  # 已正式推送过：幂等
+                        # 跳过过的场次：只有「成员集合变了」才重新评估一次，
+                        # 既保留「稍后有人绑定就能补推」，又不再每 tick 空转（BUG-039）
+                        current = self._members_fingerprint(
+                            await self._settlement_members(group.group_id, platform)
+                        )
+                        if str(marker.get("members") or "") == current:
+                            continue
                     try:
                         pushed += await self._push_settlement(
                             group,
@@ -4141,6 +4159,28 @@ class AcmerGroupBot(Star):
                 len(members),
                 max(1, min_participants),
             )
+            if write_key:
+                # 跳过也要落标记：否则每个 tick 都会把同一场重新评估一遍，
+                # 造成重复抓取 + 日志洪水 + CPU 打满（生产实测，BUG-039）。
+                # 标记里带成员指纹：之后有人绑定该平台时指纹变化 -> 允许补评估一次。
+                try:
+                    await self.put_kv_data(
+                        key,
+                        {
+                            "skipped": True,
+                            "members": self._members_fingerprint(members),
+                            "ts": time.time(),
+                        },
+                    )
+                    await self._log_push(
+                        group.group_id,
+                        "settle",
+                        True,
+                        f"跳过：本群绑定 {platform} 的成员 {len(members)} 人，"
+                        f"低于阈值 {max(1, min_participants)}",
+                    )
+                except Exception as exc:  # noqa: BLE001 - 标记写失败不影响其它群/场次
+                    logger.warning("写赛果跳过标记失败：%s（%s）", key, exc)
             return 0
         result = await self.settlement.collect(platform, contest, members)
         if result is None:
