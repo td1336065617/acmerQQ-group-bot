@@ -4537,9 +4537,10 @@ class AcmerGroupBot(Star):
         scheduled = monday + timedelta(days=weekday - 1, hours=hour, minutes=minute)
         if moment < scheduled:
             return 0
-        if moment.isoweekday() != weekday or moment.strftime("%H:%M") != push_time:
-            logger.info(
-                "周报补发：本周计划 %s，当前 %s",
+        late = moment.isoweekday() != weekday or moment.strftime("%H:%M") != push_time
+        if late:
+            logger.debug(
+                "周报补发窗口：本周计划 %s，当前 %s",
                 scheduled.strftime("%Y-%m-%d %H:%M"),
                 moment.strftime("%Y-%m-%d %H:%M"),
             )
@@ -4549,6 +4550,15 @@ class AcmerGroupBot(Star):
         for group in await self.get_groups():
             if not group.enabled:
                 continue
+            key = f"weekly_{group.group_id}_{week_key}"
+            if await self.get_kv_data(key, False):
+                continue                                  # 本周已推过：静默
+            if late:
+                logger.info(
+                    "群 %s 周报补发（本周计划 %s）",
+                    group.group_id,
+                    scheduled.strftime("%Y-%m-%d %H:%M"),
+                )
             if await self._push_weekly_report_for_group(
                 group, moment, week_key=week_key
             ):

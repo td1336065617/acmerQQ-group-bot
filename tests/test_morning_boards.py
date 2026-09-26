@@ -235,3 +235,20 @@ def test_morning_push_respects_attempt_gate():
     assert plugin.sent == []
     assert plugin.attempt_checks == 1
     assert plugin.attempt_notes == 0
+
+
+def test_morning_push_is_silent_when_already_sent(caplog):
+    """BUG-045：补发窗口内「已发过」的群不能再每 tick 打日志。"""
+    import logging
+    from datetime import datetime
+
+    from src.models import CN_TZ
+
+    plugin = _FakePlugin("今日比赛早报")
+    plugin.kv["morning_g1_20260913"] = True
+    scheduler = PushScheduler(plugin)
+    now = datetime(2026, 9, 13, 9, 30, tzinfo=CN_TZ)
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scheduler._maybe_morning_push(_group(), now))
+    assert plugin.sent == []
+    assert not any("早报时间到" in r.message for r in caplog.records)

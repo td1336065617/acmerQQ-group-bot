@@ -178,6 +178,15 @@ class PushScheduler:
             return
         if now.strftime("%H:%M") < push_time:
             return
+        date_key = now.strftime("%Y%m%d")
+        sent_key = f"morning_{group.group_id}_{date_key}"
+        if await self.plugin.get_kv_data(sent_key, False):
+            # 已发过：静默返回（补发窗口内每 tick 都会走到这里，不能刷日志，BUG-045）
+            logger.debug("群 %s 今日早报已发送过，跳过", group.group_id)
+            return
+        # 补发窗口的护栏：同一天最多尝试 3 次，且两次间隔 >= 10 分钟（BUG-026）
+        if not await self.plugin.push_attempt_allowed("morning", sent_key):
+            return
         late = now.strftime("%H:%M") != push_time
         logger.info(
             "群 %s 早报时间到（%s%s），开始检查今日比赛",
@@ -185,14 +194,6 @@ class PushScheduler:
             push_time,
             "，补发" if late else "",
         )
-        date_key = now.strftime("%Y%m%d")
-        sent_key = f"morning_{group.group_id}_{date_key}"
-        if await self.plugin.get_kv_data(sent_key, False):
-            logger.info("群 %s 今日早报已发送过，跳过", group.group_id)
-            return
-        # 补发窗口的护栏：同一天最多尝试 3 次，且两次间隔 >= 10 分钟（BUG-026）
-        if not await self.plugin.push_attempt_allowed("morning", sent_key):
-            return
         await self.plugin.note_push_attempt("morning", sent_key)
         text = await self.plugin.build_morning_text(group)
         # 早报正文保持原样（有比赛才发）；随后无论有没有比赛，都追加两张周榜图片
