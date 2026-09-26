@@ -1669,3 +1669,94 @@ def test_placeholder_in_mentions_list_is_skipped():
     )
     assert m.AcmerGroupBot._collect_mention_targets(event, "绑定cf X") == []
 
+
+# ---------------------------------------------------------------------------
+# 官方通道“必须先 @机器人 才能唤醒”的场景
+# ---------------------------------------------------------------------------
+def test_official_bot_mention_in_text_still_self_binds():
+    """@机器人 + 绑定cf：正文里残留的占位符 @ 必须被忽略，走自助绑定。"""
+    m = _load_main_module()
+    text = "<@qq_official> 绑定cf MaxBlazeIceInk"
+    raw = types.SimpleNamespace(mentions=[], content=text, self_id="qq_official")
+    event = FakeEvent(
+        group_id="g1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="qq_official"),
+    )
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_bind(ev, platform, identifier):
+        calls.append((platform, identifier))
+        yield "BIND"
+
+    bot._reply_account_bind = fake_bind
+    results = _collect(bot.on_message(event))
+
+    assert results == ["BIND"]
+    assert calls == [("codeforces", "MaxBlazeIceInk")]
+
+
+def test_official_must_at_bot_plus_target_binds_target():
+    """@机器人 @目标 绑定cf：机器人不算目标，剩下的那个才是代绑定对象。"""
+    m = _load_main_module()
+    text = "<@qq_official> <@openid-target> 绑定cf MaxBlazeIceInk"
+    mention = types.SimpleNamespace(
+        member_openid="openid-target", username="羊村小草", is_you=False
+    )
+    raw = types.SimpleNamespace(mentions=[mention], content=text, self_id="qq_official")
+    event = FakeEvent(
+        group_id="g1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="qq_official"),
+    )
+
+    targets = m.AcmerGroupBot._collect_mention_targets(event, text)
+    assert [t["user_id"] for t in targets] == ["openid-target"]
+
+    bind = m.AcmerGroupBot._mentioned_admin_bind(event, text)
+    assert bind == {
+        "user_id": "openid-target",
+        "display_name": "羊村小草",
+        "platform": "codeforces",
+        "identifier": "MaxBlazeIceInk",
+    }
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_admin(ev, b):
+        calls.append(b)
+        yield "ADMIN"
+
+    bot._reply_admin_bind = fake_admin
+    results = _collect(bot.on_message(event))
+    assert results == ["ADMIN"]
+    assert calls and calls[0]["user_id"] == "openid-target"
+
+
+def test_official_bot_mention_plus_my_stats_is_self_query():
+    """@机器人 我的战绩：即使占位符留在正文里，也必须按“查自己”处理。"""
+    m = _load_main_module()
+    text = "<@qq_official> 我的战绩"
+    raw = types.SimpleNamespace(mentions=[], content=text, self_id="qq_official")
+    event = FakeEvent(
+        group_id="g1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="qq_official"),
+    )
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_my(ev, **kwargs):
+        calls.append(kwargs)
+        yield "MINE"
+
+    bot._reply_my_account = fake_my
+    results = _collect(bot.on_message(event))
+
+    assert results == ["MINE"]
+    assert calls == [{"force": False}]
+

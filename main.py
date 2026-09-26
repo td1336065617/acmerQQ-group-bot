@@ -176,6 +176,12 @@ PLACEHOLDER_USER_IDS = {
     "all",
     "everyone",
 }
+#: 任意形态的 @ 记号（<@id> / <@!id> / CQ at / [At:...]），用于把残留的
+#: 机器人占位符 @（如 <@qq_official>）一并清掉，保证指令本体可被匹配。
+ANY_MENTION_TOKEN_RE = re.compile(
+    r"<@!?[^>]+>|\[CQ:at,qq=[^\]]+\]|\[At:[^\]]+\]",
+    re.I,
+)
 
 
 def _format_signed_number(value: object) -> str:
@@ -946,6 +952,12 @@ class AcmerGroupBot(Star):
         return str(user_id or "").strip().casefold() in PLACEHOLDER_USER_IDS
 
     @classmethod
+    def _strip_any_mention_tokens(cls, text: str) -> str:
+        """清掉任意形态的 @ 记号（含机器人占位符 @），只留下指令本体。"""
+        cleaned = ANY_MENTION_TOKEN_RE.sub(" ", str(text or ""))
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @classmethod
     def _collect_mention_targets(
         cls,
         event: AstrMessageEvent,
@@ -1082,7 +1094,9 @@ class AcmerGroupBot(Star):
         if len(targets) != 1:
             return None
         command = normalize_command(
-            cls._strip_mention_text(raw_message, targets[0])
+            cls._strip_any_mention_tokens(
+                cls._strip_mention_text(raw_message, targets[0])
+            )
         )
         # "我的战绩/我的账号"即使 @ 了别人也只查自己，不能走"查他人"分支
         if command in SELF_ONLY_PROFILE_COMMANDS:
@@ -1109,13 +1123,16 @@ class AcmerGroupBot(Star):
             remaining = str(raw_message or "")
             for target in targets:
                 remaining = cls._strip_mention_text(remaining, target)
+            remaining = cls._strip_any_mention_tokens(remaining)
             if ADMIN_BIND_RE.match(remaining) or ADMIN_BIND_USAGE_RE.match(
                 remaining
             ):
                 return {"ambiguous": True, "count": len(targets)}
             return None
 
-        remaining = cls._strip_mention_text(raw_message, targets[0])
+        remaining = cls._strip_any_mention_tokens(
+            cls._strip_mention_text(raw_message, targets[0])
+        )
 
         match = ADMIN_BIND_RE.match(remaining)
         if match:
@@ -4897,7 +4914,10 @@ class AcmerGroupBot(Star):
         # QQ 官方指令面板可能自动补上“/”；统一去掉一个前缀后再匹配。
         if raw_message.startswith("/"):
             raw_message = raw_message[1:].lstrip()
-        message_str = normalize_command(raw_message)
+        # 官方通道“必须先 @机器人 才会响应”，而机器人的 @ 可能是占位符且留在正文里。
+        # 统一清掉 @ 记号后再匹配指令，保证“@机器人 + 指令”也能被识别。
+        command_text = self._strip_any_mention_tokens(raw_message)
+        message_str = normalize_command(command_text)
         mention_target = self._mentioned_profile_target(event, raw_message)
         if mention_target is not None:
             async for result in self._reply_my_account(
@@ -4918,7 +4938,7 @@ class AcmerGroupBot(Star):
             return
         if not message_str:
             return
-        bind_match = ACCOUNT_BIND_RE.match(raw_message)
+        bind_match = ACCOUNT_BIND_RE.match(command_text)
         if bind_match:
             platform = normalize_platform(bind_match.group(1))
             if platform:
@@ -4927,7 +4947,7 @@ class AcmerGroupBot(Star):
                 ):
                     yield result
             return
-        bind_usage_match = ACCOUNT_BIND_USAGE_RE.match(raw_message)
+        bind_usage_match = ACCOUNT_BIND_USAGE_RE.match(command_text)
         if bind_usage_match:
             platform = normalize_platform(bind_usage_match.group(1))
             if platform:
@@ -4946,21 +4966,21 @@ class AcmerGroupBot(Star):
                     "再发送确认绑定指令。"
                 )
             return
-        if ACCOUNT_CONFIRM_USAGE_RE.match(raw_message):
+        if ACCOUNT_CONFIRM_USAGE_RE.match(command_text):
             yield event.plain_result(
                 "用法：确认绑定cf/确认绑定牛客/确认绑定洛谷/确认绑定atcoder <验证码>\n"
                 "例如：确认绑定cf ACM-ABCDEFGH\n"
                 "请先发送绑定指令拿到验证码，把它填进对应平台的公开资料字段后再确认。"
             )
             return
-        if ACCOUNT_UNBIND_USAGE_RE.match(raw_message):
+        if ACCOUNT_UNBIND_USAGE_RE.match(command_text):
             yield event.plain_result(
                 "用法：解绑cf / 解绑牛客 / 解绑洛谷 / 解绑atcoder\n"
                 "例如：解绑cf\n"
                 "请带上要解绑的平台名。"
             )
             return
-        confirm_match = ACCOUNT_CONFIRM_RE.match(raw_message)
+        confirm_match = ACCOUNT_CONFIRM_RE.match(command_text)
         if confirm_match:
             platform = normalize_platform(confirm_match.group(1))
             if platform:
@@ -4969,14 +4989,14 @@ class AcmerGroupBot(Star):
                 ):
                     yield result
             return
-        unbind_match = ACCOUNT_UNBIND_RE.match(raw_message)
+        unbind_match = ACCOUNT_UNBIND_RE.match(command_text)
         if unbind_match:
             platform = normalize_platform(unbind_match.group(1))
             if platform:
                 async for result in self._reply_account_unbind(event, platform):
                     yield result
             return
-        lookup_match = ACCOUNT_LOOKUP_RE.match(raw_message)
+        lookup_match = ACCOUNT_LOOKUP_RE.match(command_text)
         if lookup_match:
             platform = normalize_platform(lookup_match.group(1))
             if platform:
@@ -4985,7 +5005,7 @@ class AcmerGroupBot(Star):
                 ):
                     yield result
             return
-        lookup_usage_match = ACCOUNT_LOOKUP_USAGE_RE.match(raw_message)
+        lookup_usage_match = ACCOUNT_LOOKUP_USAGE_RE.match(command_text)
         if lookup_usage_match:
             platform = normalize_platform(lookup_usage_match.group(1))
             if platform:
