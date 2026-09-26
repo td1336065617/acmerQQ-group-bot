@@ -11,6 +11,20 @@
 
 ## 近期版本
 
+## [1.19.10] - 2026-09-26
+
+> 🧹 清理：删掉临时脚本、未被调用的 collectGroups 与重复取值的死变量（BUG-023/024/034）。
+
+### 🧹 清理
+- 删除仓库根目录的临时脚本 _smoke_slim.js（无人引用）。
+- 删除 pages/settings/index.html 里从未被调用的 collectGroups()（行内改动已由 syncGroupRowToState 承担）。
+- 删除 account_fetcher.py 里重复调用 _atcoder_table_value(text, "Rank") 的闲置变量（白跑一次解析，ruff F841）。
+
+### ✅ 验证
+- acmer 全量 399 条用例通过；页面 node --check 通过。
+
+---
+
 ## [1.19.9] - 2026-09-26
 
 > 🐛 修复：后台排行刷新缺少节流 —— 脏标记 + 失败重试会把「全量重算」打成高频循环（生产 CPU 长期打满的另一半，BUG-042 收尾）。

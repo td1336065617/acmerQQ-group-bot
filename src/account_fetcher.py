@@ -3396,7 +3396,6 @@ class AccountFetcher:
         canonical = unquote(canonical_match.group(1)) if canonical_match else handle
         rating_cell = self._atcoder_table_value(text, "Rating")
         highest_cell = self._atcoder_table_value(text, "Highest Rating")
-        rank_cell = self._atcoder_table_value(text, "Rank")
         rated_cell = self._atcoder_table_value(text, "Rated Matches")
         affiliation = self._atcoder_table_value(text, "Affiliation")
         # 用户页 Rank 行形如「48th (Top 0.04%)」→ 平台内排名

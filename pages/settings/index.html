@@ -877,25 +877,6 @@
     if (platforms.length) group.push_platforms = platforms;
   }
 
-  function collectGroups() {
-    var byKey = {};
-    $$('#groupBody tr[data-gid]').forEach(function (tr) {
-      byKey[tr.getAttribute('data-gid')] = tr;
-    });
-    return (state.config.groups || []).map(function (g) {
-      var tr = byKey[rowKey(g)];
-      if (!tr) return g;
-      var platforms = $$('.g-platform', tr).filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
-      var next = Object.assign({}, g, {
-        enabled: $('.g-enabled', tr).checked,
-        morning_push_time: $('.g-time', tr).value || '08:00',
-        reminder_enabled: $('.g-reminder', tr).checked,
-        settle_push_enabled: $('.g-settle', tr).checked
-      });
-      if (platforms.length) next.push_platforms = platforms;
-      return next;
-    });
-  }
   async function saveGroups() {
     var groups = (state.config.groups || []).slice();
     var noPlatform = groups.filter(function (g) { return !(g.push_platforms || []).length; });
