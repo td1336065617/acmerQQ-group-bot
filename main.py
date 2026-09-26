@@ -5803,9 +5803,9 @@ class AcmerGroupBot(Star):
                 user_id,
                 platform,
                 profile,
-                # 归属群不再走老路径（那里直接 enabled=1、无留痕、用户自己能退出），
-                # 改由下面的 add_rank_member 写覆盖表，与「群排行 → 排行成员」保持同一份数据
-                group_id=None,
+                # 新增时选的归属群＝普通加入（enabled=1），用户之后可自行「退出排行」；
+                # 需要“强制且留痕”的成员请用「群排行 → 排行成员」。
+                group_id=group_id or None,
                 qq_name=qq_name,
                 verified_at=reused_at,
             )
@@ -5814,21 +5814,6 @@ class AcmerGroupBot(Star):
         except Exception as exc:  # noqa: BLE001
             logger.error("后台绑定保存失败：%s", exc, exc_info=True)
             return error_response("绑定保存失败，请稍后重试")
-
-        membership_added = False
-        if group_id:
-            try:
-                await self.account_registry.add_rank_member(
-                    group_id, user_id, added_by="webui:binding"
-                )
-                membership_added = True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "加入群排行失败 group=%s user=%s: %s", group_id, user_id, exc
-                )
-                return error_response(
-                    "绑定已保存，但加入该群排行失败，请到「群排行 → 排行成员」重试"
-                )
 
         self._invalidate_all_rank_cache()
         replaced = ""
@@ -5860,7 +5845,6 @@ class AcmerGroupBot(Star):
                     },
                     "replaced": replaced or None,
                     "reused": bool(same_account),
-                    "membership_added": membership_added,
                 },
             }
         )
