@@ -130,6 +130,25 @@ def _member_fields(member: object) -> Optional[Tuple[str, str, str]]:
     return user_text, str(display or handle_text).strip(), handle_text
 
 
+def _cf_problem_key(problem: dict) -> str:
+    """CF 题目去重键：与 account_fetcher 的难度统计保持同一套口径（BUG-050）。
+
+    题库题（acmsguru 等）没有 contestId、只有 problemsetName，旧实现会把
+    「同 index 的不同题库题」折叠成一条 → 周报「通过题数」少算。
+    """
+    contest_id = problem.get("contestId")
+    index = problem.get("index")
+    problemset_name = problem.get("problemsetName")
+    if contest_id and index:
+        return f"contest:{contest_id}:{index}"
+    if problemset_name and index:
+        return f"set:{problemset_name}:{index}"
+    name = str(problem.get("name") or "").strip()
+    if name:
+        return f"name:{name}"
+    return "row:unknown"
+
+
 def summarize_cf_rows(rows: Iterable[object], since_ts: float) -> WeeklyActivity:
     """把 CF ``user.status`` 的提交行汇总成近 7 天活跃度（纯函数，便于单测）。"""
     days = set()
@@ -147,9 +166,7 @@ def summarize_cf_rows(rows: Iterable[object], since_ts: float) -> WeeklyActivity
             continue
         problem = row.get("problem")
         if isinstance(problem, dict):
-            solved.add(
-                f"{problem.get('contestId') or ''}{problem.get('index') or ''}"
-            )
+            solved.add(_cf_problem_key(problem))
     return WeeklyActivity(
         platform="codeforces",
         user_id="",

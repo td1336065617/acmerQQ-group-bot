@@ -376,3 +376,25 @@ def test_weekly_report_is_repushed_later_in_week(monkeypatch):
         assert await bot.tick_weekly_report(late) == 0
 
     asyncio.run(scenario())
+
+
+def test_cf_solved_key_keeps_problemset_problems_apart():
+    """BUG-050：题库题（无 contestId、有 problemsetName）不能因为 index 相同被折叠。"""
+    from src.weekly_stats import summarize_cf_rows
+
+    rows = [
+        {"creationTimeSeconds": 1_800_000_000, "verdict": "OK",
+         "problem": {"problemsetName": "acmsguru", "index": "A", "name": "SGU A"}},
+        {"creationTimeSeconds": 1_800_000_100, "verdict": "OK",
+         "problem": {"problemsetName": "other", "index": "A", "name": "Other A"}},
+        {"creationTimeSeconds": 1_800_000_200, "verdict": "OK",
+         "problem": {"contestId": 1900, "index": "A", "name": "CF1900A"}},
+        # 同一题重复提交只算一次
+        {"creationTimeSeconds": 1_800_000_300, "verdict": "OK",
+         "problem": {"contestId": 1900, "index": "A", "name": "CF1900A"}},
+        {"creationTimeSeconds": 1_800_000_400, "verdict": "WRONG_ANSWER",
+         "problem": {"contestId": 1900, "index": "B", "name": "CF1900B"}},
+    ]
+    activity = summarize_cf_rows(rows, since_ts=1_799_000_000)
+    assert activity.submissions == 5          # 窗口内提交都算
+    assert activity.solved == 3               # 两道题库 A 题 + 一道正式赛 A 题
