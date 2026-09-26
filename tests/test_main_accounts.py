@@ -1545,3 +1545,75 @@ def test_on_message_routes_literal_at_bind_to_hint():
     results = _collect(bot.on_message(event))
     assert results == ["HINT"]
     assert calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# 线上回归：官方通道的占位符 self_id 不能当作被 @ 目标
+# ---------------------------------------------------------------------------
+def test_bot_placeholder_mention_is_not_a_bind_target():
+    """@机器人 + /绑定cf X（官方通道 self_id 是占位符 qq_official）必须走自助绑定。
+
+    线上真实故障：这条消息被当成“@了某个成员”的代绑定请求，非管理员收到
+    “此指令仅限管理员”。
+    """
+    m = _load_main_module()
+    text = "绑定cf MaxBlazeIceInk"
+    at = types.SimpleNamespace(qq="qq_official", name="爱莉希雅", is_you=False, type="at")
+    raw = types.SimpleNamespace(
+        mentions=[], content="<@qq_official> /绑定cf MaxBlazeIceInk", self_id="qq_official"
+    )
+    event = FakeEvent(
+        group_id="g1",
+        message_str=text,
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="qq_official"),
+    )
+    event.get_messages = lambda: [at]
+
+    assert m.AcmerGroupBot._collect_mention_targets(event, text) == []
+    assert m.AcmerGroupBot._mentioned_admin_bind(event, text) is None
+    assert m.AcmerGroupBot._literal_at_admin_bind(event, text) is None
+
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    calls = []
+
+    async def fake_bind(ev, platform, identifier):
+        calls.append(("bind", platform, identifier))
+        yield "BIND"
+
+    async def fake_admin(ev, bind):
+        calls.append(("admin",))
+        yield "ADMIN"
+
+    bot._reply_account_bind = fake_bind
+    bot._reply_admin_bind = fake_admin
+    results = _collect(bot.on_message(event))
+
+    assert results == ["BIND"]
+    assert calls == [("bind", "codeforces", "MaxBlazeIceInk")]
+
+
+def test_placeholder_mention_alone_yields_no_target():
+    m = _load_main_module()
+    at = types.SimpleNamespace(qq="qq_official", name="爱莉希雅", is_you=False, type="at")
+    raw = types.SimpleNamespace(mentions=[], content="<@qq_official>", self_id="qq_official")
+    event = FakeEvent(
+        group_id="g1",
+        message_str="",
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="qq_official"),
+    )
+    event.get_messages = lambda: [at]
+    assert m.AcmerGroupBot._collect_mention_targets(event, "") == []
+
+
+def test_placeholder_in_mentions_list_is_skipped():
+    """mentions 列表里带占位符 id 时同样不能成为目标。"""
+    m = _load_main_module()
+    mention = types.SimpleNamespace(member_openid="qq_official", username="爱莉希雅", is_you=False)
+    raw = types.SimpleNamespace(mentions=[mention], content="<@qq_official> 绑定cf X", self_id="qq_official")
+    event = FakeEvent(
+        group_id="g1",
+        message_str="绑定cf X",
+        message_obj=types.SimpleNamespace(raw_message=raw, self_id="qq_official"),
+    )
+    assert m.AcmerGroupBot._collect_mention_targets(event, "绑定cf X") == []
+

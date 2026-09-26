@@ -163,6 +163,19 @@ SETTINGS_CACHE_TTL_SECONDS = 2.0
 GROUPS_CACHE_TTL_SECONDS = 30.0
 # 渲染并发上限：4C4G 上避免长消息/资料卡/排行卡同时起多个 Chromium/Pillow。
 RENDER_MAX_CONCURRENCY = 1
+#: 适配器拿不到真实用户 ID 时会塞的占位符（不是真实成员，不能当作被 @ 目标）。
+#: 典型：QQ 官方群消息里机器人自己被 @ 时，self_id / At 里是 "qq_official"。
+PLACEHOLDER_USER_IDS = {
+    "",
+    "qq_official",
+    "qq_official_webhook",
+    "unknown_selfid",
+    "unknown",
+    "self",
+    "bot",
+    "all",
+    "everyone",
+}
 
 
 def _format_signed_number(value: object) -> str:
@@ -927,6 +940,11 @@ class AcmerGroupBot(Star):
                 return text
         return ""
 
+    @staticmethod
+    def _is_placeholder_user(user_id: object) -> bool:
+        """占位符（如 qq_official）不是真实成员，不能作为被 @ 目标。"""
+        return str(user_id or "").strip().casefold() in PLACEHOLDER_USER_IDS
+
     @classmethod
     def _collect_mention_targets(
         cls,
@@ -954,6 +972,8 @@ class AcmerGroupBot(Star):
             user_id = cls._mention_user_id(mention)
             if not user_id or user_id in seen_ids:
                 continue
+            if cls._is_placeholder_user(user_id):
+                continue
             if user_id.casefold() in self_ids:
                 continue
             seen_ids.add(user_id)
@@ -980,6 +1000,9 @@ class AcmerGroupBot(Star):
                     continue
                 user_id = cls._mention_user_id(component)
                 if not user_id or user_id in seen_ids:
+                    continue
+                # 官方通道的 @机器人 会以占位符出现（qq_official），必须排除
+                if cls._is_placeholder_user(user_id):
                     continue
                 # 消息链里的 @机器人 有时不带 is_you，需要靠自身 id 识别
                 if bool(getattr(component, "is_you", False)):
@@ -1010,7 +1033,7 @@ class AcmerGroupBot(Star):
                     continue
                 if target_id.casefold() in self_ids:
                     continue
-                if target_id.casefold() in {"all", "everyone"}:
+                if cls._is_placeholder_user(target_id):
                     continue
                 seen_ids.add(target_id)
                 targets.append(
@@ -1146,7 +1169,6 @@ class AcmerGroupBot(Star):
         QQ 官方适配器有时把 `get_self_id()` 报成占位符（如 `qq_official`），
         只靠它会把"@机器人"误判成"@了某个成员"，因此多取几个来源并丢掉占位符。
         """
-        placeholders = {"", "qq_official", "unknown_selfid", "self", "bot", "unknown"}
         candidates = set()
         for value in (
             getattr(event, "get_self_id", lambda: "")(),
@@ -1154,7 +1176,7 @@ class AcmerGroupBot(Star):
             getattr(raw, "self_id", ""),
         ):
             text = str(value or "").strip()
-            if text and text.casefold() not in placeholders:
+            if text and text.casefold() not in PLACEHOLDER_USER_IDS:
                 candidates.add(text.casefold())
         return candidates
 
