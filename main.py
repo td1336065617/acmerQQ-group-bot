@@ -52,6 +52,7 @@ from .src.account_fetcher import (
     normalize_account_identifier,
 )
 from .src.account_models import (
+    AccountProfile,
     ACCOUNT_PLATFORMS,
     VERIFICATION_FIELD_LABELS,
     AccountFetchError,
@@ -5669,12 +5670,25 @@ class AcmerGroupBot(Star):
         counts: Dict[str, int] = {}
         for item in items:
             counts[item["platform"]] = counts.get(item["platform"], 0) + 1
+
+        page_items = items[offset: offset + limit]
+        # 归属群：一次批量查询，避免逐条 N+1
+        try:
+            group_map = await self.account_registry.get_groups_for_users(
+                [str(item["user_id"]) for item in page_items]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取用户归属群失败：%s", exc)
+            group_map = {}
+        for item in page_items:
+            item["groups"] = group_map.get(str(item["user_id"]), [])
+
         return json_response(
             {
                 "status": "success",
                 "data": {
                     "total": len(items),
-                    "items": items[offset: offset + limit],
+                    "items": page_items,
                     "platform_counts": counts,
                 },
             }
@@ -5731,33 +5745,58 @@ class AcmerGroupBot(Star):
             return error_response("不支持的平台")
         if not identifier:
             return error_response("请填写账号")
+        record: Dict[str, Any] = {}
+        try:
+            existing = (await self.account_registry.get_user_accounts(user_id)).get(
+                platform
+            )
+            if isinstance(existing, dict):
+                record = dict(existing)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取原绑定失败：%s", exc)
+        old_handle = str(record.get("handle") or record.get("platform_user_id") or "")
+        old_pid = str(record.get("platform_user_id") or "")
+        old_name = str(record.get("handle") or "")
+
         normalized = normalize_account_identifier(platform, identifier)
-        if not normalized:
+        raw_cf = str(identifier or "").strip().casefold()
+        # 账号未变：(a) 归一化结果等于现有 platform_user_id；(b) 前端回填的是展示名，
+        # 但恰好等于该绑定当前的值（牛客/洛谷的 handle != platform_user_id）。
+        # 两者都表示“这次编辑没有改账号”，不必重新校验、也不必联网抓取。
+        same_account = bool(record) and bool(raw_cf) and (
+            (bool(normalized) and normalized.casefold() == old_pid.casefold())
+            or raw_cf == old_pid.casefold()
+            or raw_cf == old_name.casefold()
+        )
+        if not normalized and not same_account:
             return error_response(
                 self.account_fetcher.invalid_identifier_message(platform)
             )
 
-        try:
-            profile = await self.account_fetcher.get_profile(
-                platform, normalized, detail=False, force=True
+        reused_at: Optional[float] = None
+        if same_account:
+            # 只改昵称/群语义：沿用现有资料，不重新校验、不联网
+            profile = AccountProfile(
+                platform=platform,
+                handle=old_name or old_pid,
+                platform_user_id=old_pid,
+                display_name=str(record.get("display_name") or old_name or old_pid),
+                profile_url=str(record.get("profile_url") or ""),
             )
-        except AccountFetchError as exc:
-            return error_response(self._account_error_text(platform, exc))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("后台绑定抓取失败：%s", exc)
-            return error_response(self._account_error_text(platform, exc))
-
-        old_handle = ""
-        try:
-            record = (await self.account_registry.get_user_accounts(user_id)).get(
-                platform
-            )
-            if isinstance(record, dict):
-                old_handle = str(
-                    record.get("handle") or record.get("platform_user_id") or ""
+            try:
+                reused_at = float(record.get("verified_at") or 0) or None
+            except (TypeError, ValueError):
+                reused_at = None
+        else:
+            try:
+                profile = await self.account_fetcher.get_profile(
+                    platform, normalized, detail=False, force=True
                 )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("读取原绑定失败：%s", exc)
+            except AccountFetchError as exc:
+                return error_response(self._account_error_text(platform, exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("后台绑定抓取失败：%s", exc)
+                return error_response(self._account_error_text(platform, exc))
 
         try:
             await self.account_registry.save_binding(
@@ -5766,6 +5805,7 @@ class AcmerGroupBot(Star):
                 profile,
                 group_id=group_id or None,
                 qq_name=qq_name,
+                verified_at=reused_at,
             )
         except ValueError:
             return error_response("这个平台账号已经绑定到其他 QQ 用户，请先删除原绑定")
@@ -5774,11 +5814,20 @@ class AcmerGroupBot(Star):
             return error_response("绑定保存失败，请稍后重试")
 
         self._invalidate_all_rank_cache()
+        replaced = ""
+        if (
+            not same_account
+            and old_handle
+            and old_handle.casefold() != profile.handle.casefold()
+        ):
+            replaced = old_handle
         logger.info(
-            "后台绑定 admin=web user=%s platform=%s handle=%s",
+            "后台绑定 admin=web user=%s platform=%s handle=%s reused=%s replaced=%s",
             user_id,
             platform,
             profile.handle,
+            same_account,
+            replaced or "-",
         )
         return json_response(
             {
@@ -5791,7 +5840,8 @@ class AcmerGroupBot(Star):
                         "handle": profile.handle,
                         "qq_name": qq_name,
                     },
-                    "replaced": old_handle or None,
+                    "replaced": replaced or None,
+                    "reused": bool(same_account),
                 },
             }
         )

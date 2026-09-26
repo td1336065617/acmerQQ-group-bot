@@ -239,7 +239,13 @@ def test_bindings_save_writes_target_and_invalidates_cache():
     result = asyncio.run(bot._web_bindings_write())
     assert result["status"] == "success"
     assert registry.saved == [
-        ("u1", "codeforces", "jiangly", {"group_id": "g1", "qq_name": "小明"})
+        (
+            "u1",
+            "codeforces",
+            "jiangly",
+            # verified_at=None 表示这次是真正校验过账号（账号有变化或首次绑定）
+            {"group_id": "g1", "qq_name": "小明", "verified_at": None},
+        )
     ]
     assert fetcher.calls[0][0] == "codeforces"
     assert bot.invalidated == [True]

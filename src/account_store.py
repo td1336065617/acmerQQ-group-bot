@@ -594,6 +594,45 @@ class AccountStore:
     # ------------------------------------------------------------------
     # group_members
     # ------------------------------------------------------------------
+    async def get_groups_for_users(
+        self, user_ids: List[str], *, chunk: int = 400
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """批量返回这些用户已加入的群排行（自然成员与强制加入都算）。
+
+        供后台绑定列表展示"归属群"用；分块 IN 查询，避免 SQLite 变量数上限。
+        """
+
+        def _query() -> Dict[str, List[Dict[str, Any]]]:
+            out: Dict[str, List[Dict[str, Any]]] = {}
+            ids = [str(uid) for uid in user_ids if str(uid or "").strip()]
+            if not ids:
+                return out
+            conn = self._connect()
+            try:
+                for start in range(0, len(ids), max(1, int(chunk))):
+                    part = ids[start: start + max(1, int(chunk))]
+                    marks = ",".join("?" for _ in part)
+                    rows = conn.execute(
+                        "SELECT user_id, group_id, 0 AS manual FROM group_members"
+                        " WHERE enabled=1 AND user_id IN (" + marks + ")"
+                        " UNION"
+                        " SELECT user_id, group_id, 1 AS manual FROM rank_member_overrides"
+                        " WHERE user_id IN (" + marks + ")",
+                        tuple(part) + tuple(part),
+                    ).fetchall()
+                    for row in rows:
+                        out.setdefault(str(row["user_id"]), []).append(
+                            {
+                                "group_id": str(row["group_id"]),
+                                "manual": bool(row["manual"]),
+                            }
+                        )
+            finally:
+                conn.close()
+            return out
+
+        return await asyncio.to_thread(_query)
+
     async def set_group_member(
         self,
         group_id: str,

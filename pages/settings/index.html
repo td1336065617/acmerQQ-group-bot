@@ -328,7 +328,7 @@
             <button class="btn small danger" id="bindBatchDelete">批量删除</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="bindHeadCheck"></th><th>QQ 用户</th><th>平台</th><th>账号</th><th>昵称</th><th>绑定时间</th><th>操作</th></tr></thead><tbody id="bindBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="bindHeadCheck"></th><th>QQ 用户</th><th>平台</th><th>账号</th><th>昵称</th><th>归属群</th><th>绑定时间</th><th>操作</th></tr></thead><tbody id="bindBody"></tbody></table></div>
         <div class="pager" id="bindPager"></div>
       </div>
     </section>
@@ -398,7 +398,8 @@
   </div></div>
   <div class="field"><label for="bfIdentifier">账号 *</label><div class="ctrl"><input type="text" class="wide" id="bfIdentifier" placeholder="用户名 / UID / 主页链接"><span class="desc" id="bfHint"></span></div></div>
   <div class="field"><label for="bfName">昵称（选填）</label><div class="ctrl"><input type="text" class="wide" id="bfName" placeholder="用于排行展示"></div></div>
-  <div class="field"><label for="bfGroup">归属群（选填）</label><div class="ctrl"><select id="bfGroup"><option value="">不加入群排行</option></select></div></div>
+  <div class="field"><label for="bfGroup">归属群</label><div class="ctrl"><select id="bfGroup"><option value="">不加入群排行</option></select></div></div>
+  <div class="muted" id="bfGroupsHint" style="font-size:12px;margin:-6px 0 10px 0"></div>
   <div class="modal-actions">
     <button class="btn ghost" id="bfCancel">取消</button>
     <button class="btn" id="bfSubmit">保存</button>
@@ -938,7 +939,7 @@
     var rows = items.slice((page - 1) * size, page * size);
     $('#bindCount').textContent = items.length + ' 条';
     if (!rows.length) {
-      $('#bindBody').innerHTML = '<tr><td colspan="7" class="muted">暂无绑定记录</td></tr>';
+      $('#bindBody').innerHTML = '<tr><td colspan="8" class="muted">暂无绑定记录</td></tr>';
     } else {
       $('#bindBody').innerHTML = rows.map(function (item) {
         var key = item.user_id + '|' + item.platform;
@@ -947,6 +948,7 @@
           '<td>' + esc(platformLabel(item.platform)) + '</td>' +
           '<td class="mono">' + esc(item.handle) + '</td>' +
           '<td>' + esc(item.qq_name || '-') + '</td>' +
+          '<td>' + renderBindingGroups(item.groups) + '</td>' +
           '<td class="muted">' + esc(fmtTs(item.verified_at)) + '</td>' +
           '<td><div class="row-actions"><button class="btn small secondary" data-edit-binding="' + esc(key) + '">编辑</button>' +
           '<button class="btn small danger" data-del-binding="' + esc(key) + '">删除</button></div></td></tr>';
@@ -964,25 +966,74 @@
       return item.user_id === parts[0] && item.platform === parts[1];
     })[0];
   }
+  function renderBindingGroups(groups) {
+    if (!groups || !groups.length) return '<span class="muted">—</span>';
+    return groups.map(function (g) {
+      return esc(groupLabel(g.group_id)) + (g.manual ? '<span class="badge warn">强制</span>' : '');
+    }).join('、');
+  }
+  function normalizeAccountInput(value) {
+    var text = String(value === null || value === undefined ? '' : value).trim();
+    if (text.indexOf('/') >= 0) {
+      var parts = text.split('/').filter(function (piece) { return piece; });
+      if (parts.length) text = parts[parts.length - 1];
+    }
+    return text.replace(/[?#].*$/, '').toLowerCase();
+  }
+  function fillBindingGroupOptions(item) {
+    var select = $('#bfGroup');
+    if (!select) return;
+    var options = ['<option value="">' + (item ? '保持不变（不改成员资格）' : '不加入群排行') + '</option>'];
+    (state.config.groups || []).forEach(function (g) {
+      var label = text(g.name).trim() ? (text(g.name) + ' · ' + shortId(g.group_id)) : shortId(g.group_id);
+      options.push('<option value="' + esc(g.group_id) + '">' + esc(label) + '</option>');
+    });
+    select.innerHTML = options.join('');
+    select.value = '';
+  }
+  function renderBindingGroupHint(item) {
+    var node = $('#bfGroupsHint');
+    if (!node) return;
+    if (!item) { node.textContent = ''; return; }
+    var groups = item.groups || [];
+    node.textContent = groups.length
+      ? '当前已在：' + groups.map(function (g) {
+          return groupLabel(g.group_id) + (g.manual ? '（强制加入）' : '（自然成员）');
+        }).join('、')
+      : '该用户当前不在任何群的排行榜里。';
+  }
   function openBindingForm(item) {
-    $('#drawerTitle').textContent = item ? '编辑绑定' : '新增绑定';
+    var editing = !!item;
+    state.bindingEdit = item || null;
+    $('#drawerTitle').textContent = editing ? '编辑绑定' : '新增绑定';
     $('#bfUser').value = item ? item.user_id : '';
+    $('#bfUser').readOnly = editing;
     $('#bfPlatform').value = item ? item.platform : 'codeforces';
-    $('#bfIdentifier').value = item ? item.handle : '';
+    $('#bfPlatform').disabled = editing;
+    // 牛客 / 洛谷的 handle 是展示名，真实账号标识在 platform_user_id —— 必须回填后者
+    $('#bfIdentifier').value = item ? (item.platform_user_id || item.handle) : '';
     $('#bfName').value = item ? (item.qq_name || '') : '';
-    $('#bfGroup').value = '';
+    fillBindingGroupOptions(item);
     updateBindHint();
+    renderBindingGroupHint(item);
     $('#drawer').hidden = false;
   }
   function closeBindingForm() { $('#drawer').hidden = true; }
   function updateBindHint() {
     var p = $('#bfPlatform').value;
-    $('#bfHint').textContent = ({
+    var text_ = ({
       codeforces: 'Codeforces 用户名或主页链接',
       atcoder: 'AtCoder 用户名或主页链接',
       nowcoder: '牛客数字 UID 或主页链接',
       luogu: '洛谷数字 UID 或主页链接'
     })[p] || '';
+    var item = state.bindingEdit;
+    if (item && item.platform === p && item.platform_user_id && item.handle
+      && String(item.platform_user_id).toLowerCase() !== String(item.handle).toLowerCase()) {
+      text_ += '；当前账号 ' + item.platform_user_id + '（展示名：' + item.handle + '）';
+    }
+    if (item) text_ += '。账号未变更时不会重新抓取，平台抖动也能改昵称。';
+    $('#bfHint').textContent = text_;
   }
   async function submitBinding() {
     var payload = {
@@ -1005,7 +1056,12 @@
       try {
         var data = await apiPost('bindings', payload);
         closeBindingForm();
-        toast(data && data.replaced ? ('已换绑，替换原账号 ' + data.replaced) : '绑定已保存', 'ok');
+        toast(
+          data && data.replaced
+            ? ('已换绑，替换原账号 ' + data.replaced)
+            : (data && data.reused ? '绑定已保存（账号未变更，未重新校验）' : '绑定已保存'),
+          'ok'
+        );
         await loadBindings();
       } catch (e) {
         toast('绑定失败：' + e.message, 'err');
@@ -1014,7 +1070,10 @@
         btn.textContent = '保存';
       }
     };
-    if (existing && existing.handle !== payload.identifier) {
+    var sameAccount = existing && (
+      normalizeAccountInput(existing.platform_user_id || existing.handle) === normalizeAccountInput(payload.identifier)
+    );
+    if (existing && !sameAccount) {
       confirmDialog('确认换绑', '该用户在此平台已有绑定（' + existing.handle + '），保存后将替换。继续吗？', run);
     } else {
       run();

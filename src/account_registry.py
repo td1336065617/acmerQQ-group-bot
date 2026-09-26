@@ -194,6 +194,7 @@ class AccountRegistry:
         *,
         group_id: Optional[str] = None,
         qq_name: str = "",
+        verified_at: Optional[float] = None,
     ) -> None:
         user_key = str(user_id)
         account = {
@@ -202,7 +203,8 @@ class AccountRegistry:
             "platform_user_id": profile.platform_user_id,
             "display_name": profile.display_name or profile.handle,
             "profile_url": profile.profile_url,
-            "verified_at": time.time(),
+            # verified_at 允许沿用旧值：只改昵称时并没有重新校验账号
+            "verified_at": float(verified_at) if verified_at else time.time(),
             "qq_name": str(qq_name or "").strip(),
         }
         if self._need_store():
@@ -384,6 +386,41 @@ class AccountRegistry:
         return await self._kv_set_group_member(
             gid, uid, enabled, preserve_opt_out=preserve_opt_out
         )
+
+    async def get_groups_for_users(
+        self, user_ids: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """批量返回这些用户已加入的群（自然成员 + 强制加入）。"""
+        ids = [str(uid) for uid in (user_ids or []) if str(uid or "").strip()]
+        if not ids:
+            return {}
+        if self._need_store():
+            try:
+                return await self.store.get_groups_for_users(ids)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite 批量读取用户群失败，回退 KV: %s", exc)
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        data = await self._get(GROUP_RANK_KEY, {})
+        if isinstance(data, dict):
+            for group_id, members in data.items():
+                if not isinstance(members, dict):
+                    continue
+                for uid, item in members.items():
+                    if str(uid) in ids and isinstance(item, dict) and item.get("enabled"):
+                        out.setdefault(str(uid), []).append(
+                            {"group_id": str(group_id), "manual": False}
+                        )
+        manual = await self._get(RANK_MEMBER_KEY, {})
+        if isinstance(manual, dict):
+            for item in manual.values():
+                if not isinstance(item, dict):
+                    continue
+                uid = str(item.get("user_id") or "")
+                if uid in ids:
+                    out.setdefault(uid, []).append(
+                        {"group_id": str(item.get("group_id") or ""), "manual": True}
+                    )
+        return out
 
     async def get_group_member_ids(self, group_id: str) -> List[str]:
         gid = str(group_id)
