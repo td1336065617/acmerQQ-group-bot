@@ -533,6 +533,7 @@ class ContestFetcher:
                     contest_id=str(item.get("id") or ""),
                 )
             )
+
         contests.sort(key=lambda c: c.start_time)
         return contests
 
@@ -821,7 +822,8 @@ class ContestFetcher:
             raise ValueError("未找到 AtCoder upcoming 赛程")
         section = match.group(1)
         contests: List[Contest] = []
-        for row in re.findall(r"<tr>(.*?)</tr>", section, re.S):
+        rows = re.findall(r"<tr>(.*?)</tr>", section, re.S)
+        for row in rows:
             link = re.search(r'href="(/contests/[^"]+)"[^>]*>([^<]+)</a>', row)
             time_tag = re.search(r"<time[^>]*>([^<]+)</time>", row)
             if not link or not time_tag:
@@ -852,6 +854,10 @@ class ContestFetcher:
                     contest_id=slug.split("/")[-1],
                 )
             )
+        if rows and not contests:
+            # 页面有行却一条都没解析出来：多半是时间格式/结构变了。
+            # 必须显式报错，否则空列表会被当成「成功结果」缓存整个 TTL（BUG-048）
+            raise ValueError("AtCoder 赛程解析为空（时间格式或页面结构可能已变化）")
         contests.sort(key=lambda c: c.start_time)
         return contests
 
