@@ -4550,17 +4550,8 @@ class AcmerGroupBot(Star):
         for group in await self.get_groups():
             if not group.enabled:
                 continue
-            key = f"weekly_{group.group_id}_{week_key}"
-            if await self.get_kv_data(key, False):
-                continue                                  # 本周已推过：静默
-            if late:
-                logger.info(
-                    "群 %s 周报补发（本周计划 %s）",
-                    group.group_id,
-                    scheduled.strftime("%Y-%m-%d %H:%M"),
-                )
             if await self._push_weekly_report_for_group(
-                group, moment, week_key=week_key
+                group, moment, week_key=week_key, late=late, scheduled_at=scheduled
             ):
                 pushed += 1
         return pushed
@@ -4572,6 +4563,8 @@ class AcmerGroupBot(Star):
         *,
         week_key: str = "",
         write_key: bool = True,
+        late: bool = False,
+        scheduled_at: "datetime | None" = None,
     ) -> bool:
         """推送单个群的训练周报；返回是否送达。
 
@@ -4588,6 +4581,13 @@ class AcmerGroupBot(Star):
             if not await self.push_attempt_allowed("weekly", attempt_key):
                 return False
             await self.note_push_attempt("weekly", attempt_key)
+            if late and scheduled_at is not None:
+                # 只在真的要建/推这一次时打印（同群同周最多 3 次），避免每 tick 刷屏（BUG-045）
+                logger.info(
+                    "群 %s 周报补发（本周计划 %s）",
+                    group.group_id,
+                    scheduled_at.strftime("%Y-%m-%d %H:%M"),
+                )
         try:
             report = await self.build_weekly_report(group)
         except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
