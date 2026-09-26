@@ -298,7 +298,7 @@
     <!-- 群推送配置 -->
     <section class="view" data-view="groups" hidden>
       <div class="card">
-        <h2>群推送配置<span class="spacer"><span class="badge warn" id="groupsDirty" hidden>未保存</span><button class="btn" id="groupsSave">保存群配置</button></span></h2>
+        <h2>群推送配置<span class="spacer"><button class="btn ghost" id="groupRefreshNames">刷新群名</button><span class="badge warn" id="groupsDirty" hidden>未保存</span><button class="btn" id="groupsSave">保存群配置</button></span></h2>
         <div class="muted" style="margin-bottom:10px">机器人收到过消息的群会自动出现在这里。批量操作只改本地，点“保存群配置”统一提交。</div>
         <div class="toolbar">
           <input type="text" id="groupSearch" placeholder="搜索群 ID / 平台">
@@ -310,7 +310,7 @@
             <button class="btn small secondary" id="groupTest">批量测试</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群 ID</th><th>平台</th><th>已激活</th><th>启用</th><th>早报时间</th><th>推送平台</th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th>已激活</th><th>启用</th><th>早报时间</th><th>推送平台</th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
         <div class="pager" id="groupPager"></div>
         <div id="groupTestResult"></div>
       </div>
@@ -469,6 +469,25 @@
     if (isNaN(d.getTime())) return text(iso);
     return d.toLocaleString('zh-CN', { hour12: false });
   }
+  function shortId(value) {
+    var t = text(value);
+    return t.length > 14 ? t.slice(0, 8) + '...' + t.slice(-4) : t;
+  }
+  function groupNameOf(gid) {
+    var target = text(gid);
+    var groups = (state.config && state.config.groups) || [];
+    var found = groups.filter(function (g) { return text(g.group_id) === target; })[0];
+    return found ? text(found.name) : '';
+  }
+  function groupLabel(gid) {
+    var name = groupNameOf(gid);
+    return name ? (name + ' · ' + shortId(gid)) : shortId(gid);
+  }
+  function groupCell(name, gid) {
+    var label = text(name).trim();
+    return '<div>' + (label ? esc(label) : '<span class="muted">未获取群名</span>') + '</div>' +
+      '<div class="muted mono" title="' + esc(text(gid)) + '">' + esc(shortId(gid)) + '</div>';
+  }
   function platformLabel(p) { return PLATFORM_LABELS[p] || text(p); }
 
   function toast(msg, type) {
@@ -572,7 +591,8 @@
         ? '<div class="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>群</th></tr></thead><tbody>' +
           next.map(function (item) {
             return '<tr><td>' + esc(fmtIso(item.at)) + '</td><td>' + esc(item.kind === 'morning' ? '早报' : '训练周报') +
-              '</td><td class="mono">' + esc(item.group_id || '全部启用群') + '</td></tr>';
+              '</td><td title="' + esc(text(item.group_id)) + '">' +
+              (item.group_id ? esc(groupLabel(item.group_id)) : '全部启用群') + '</td></tr>';
           }).join('') + '</tbody></table></div>'
         : '<div class="empty">暂无排期（可能所有群都未启用）</div>';
       renderPushLog(data.recent_pushes || []);
@@ -590,7 +610,8 @@
       return;
     }
     $('#ovLog').innerHTML = items.map(function (item) {
-      return '<tr><td>' + esc(fmtTs(item.ts)) + '</td><td class="mono">' + esc(item.group_id) + '</td><td>' +
+      return '<tr><td>' + esc(fmtTs(item.ts)) + '</td><td title="' + esc(text(item.group_id)) + '">' +
+        esc(groupLabel(item.group_id)) + '</td><td>' +
         esc(kindLabel(item.kind)) + '</td><td>' + (item.ok ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>') +
         '</td><td>' + esc(item.detail) + '</td></tr>';
     }).join('');
@@ -601,7 +622,8 @@
   function fillGroupSelectors() {
     var groups = state.config.groups || [];
     var opts = groups.map(function (g) {
-      return '<option value="' + esc(g.group_id) + '">' + esc(g.group_id) + '（' + esc(platformLabel(g.platform_id)) + '）</option>';
+      var label = text(g.name).trim() ? (text(g.name) + ' · ' + shortId(g.group_id)) : shortId(g.group_id);
+      return '<option value="' + esc(g.group_id) + '">' + esc(label) + '（' + esc(platformLabel(g.platform_id)) + '）</option>';
     }).join('');
     ['#runGroup', '#rankGroup'].forEach(function (sel) {
       var node = $(sel);
@@ -610,6 +632,26 @@
       node.innerHTML = opts || '<option value="">（暂无群）</option>';
       if (keep) node.value = keep;
     });
+    var refreshNames = $('#groupRefreshNames');
+    if (refreshNames && !refreshNames.dataset.bound) {
+      refreshNames.dataset.bound = '1';
+      refreshNames.onclick = async function () {
+        refreshNames.disabled = true;
+        try {
+          var result = await apiPost('groups/refresh-names', { limit: 50 });
+          var data = (result && result.data) || result || {};
+          toast('群名已更新 ' + text(data.updated) + ' 个' +
+            (data.failed ? ('，失败 ' + text(data.failed) + ' 个') : '') +
+            (data.skipped ? ('，还剩 ' + text(data.skipped) + ' 个未处理') : ''), 'ok');
+          state.config = null;
+          await loadConfig(true);
+          renderGroups();
+        } catch (e) {
+          toast('刷新群名失败：' + e.message, 'err');
+        }
+        refreshNames.disabled = false;
+      };
+    }
     var bf = $('#bfGroup');
     if (bf) {
       bf.innerHTML = '<option value="">不加入群排行</option>' + opts;
@@ -748,7 +790,7 @@
     var q = state.groupPage.query.trim().toLowerCase();
     return (state.config.groups || []).filter(function (g) {
       if (!q) return true;
-      return (text(g.group_id) + ' ' + text(g.platform_id)).toLowerCase().indexOf(q) >= 0;
+      return (text(g.group_id) + ' ' + text(g.platform_id) + ' ' + text(g.name)).toLowerCase().indexOf(q) >= 0;
     }).sort(function (a, b) { return text(a.group_id).localeCompare(text(b.group_id)); });
   }
   function renderGroups() {
@@ -765,7 +807,7 @@
         var checked = (g.push_platforms || []).map(function (p) { return platformLabel(p); }).join('/');
         return '<tr data-gid="' + esc(g.group_id) + '">' +
           '<td><input type="checkbox" class="group-row-check" data-gid="' + esc(g.group_id) + '"></td>' +
-          '<td class="mono">' + esc(g.group_id) + '</td>' +
+          '<td>' + groupCell(g.name, g.group_id) + '</td>' +
           '<td>' + esc(platformLabel(g.platform_id)) + (g.umo ? '' : ' <span class="badge info">未记录会话</span>') + '</td>' +
           '<td>' + (g.activated ? '<span class="badge ok">已激活</span>' : '<span class="badge warn">待激活</span>') + '</td>' +
           '<td><label class="switch"><input type="checkbox" class="g-enabled" data-gid="' + esc(g.group_id) + '"' + (g.enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +

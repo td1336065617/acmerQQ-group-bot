@@ -11,6 +11,25 @@
 
 ## 近期版本
 
+## [1.18.0] - 2026-09-26
+
+> ✨ 后台改为「群名优先」，官方渠道也能看到群名；🐛 顺带修复「保存群配置」一直失败。
+
+### 🐛 修复
+- **后台「保存群配置」永远失败**：前端整行回传的群对象自带 `group_id`，而 `_build_groups_payload` 又写了一遍
+  `GroupConfig(group_id=gid, **item)` → `TypeError: got multiple values for keyword argument 'group_id'`，
+  接口只会返回“群 xxx 配置不合法”。现在先剔除 `group_id` 再构造，保存恢复正常（群名等字段也随之保留）。
+
+### ✨ 新增
+- **群名缓存与补全**（`src/group_names.py` + `GroupConfig.name`）：
+  - 被动：OneBot 事件自带 `group_name`，随 `remember_group` 写入（同会话同群名不重复写 KV）；
+  - 主动：后台新增**「刷新群名」**按钮 → OneBot 走 `get_group_info`，**官方走开放接口**
+    `GET /v2/groups/{group_openid}/info`（复用 botpy 已持有的 access_token，无需另配 appid/secret）；
+    新增接口 `POST /acmer_qq_group_bot/groups/refresh-names`。
+- 后台展示统一为「群名 + ID 简写」（悬停看完整 ID）：群推送配置表、群选择器、概览「下次推送」、推送日志；搜索支持群名。
+
+---
+
 ## [1.17.3] - 2026-09-26
 
 > 🐛 修复：官方通道“必须先 @机器人 才能唤醒”时，正文里残留的机器人 @ 会让指令匹配失败。

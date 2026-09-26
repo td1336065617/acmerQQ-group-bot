@@ -106,6 +106,8 @@ class GroupConfig(BaseModel):
 
     group_id: str
     platform_id: Optional[str] = None
+    #: 群名称（OneBot 事件被动补全；官方适配器不带，需主动拉取）
+    name: str = ""
     umo: Optional[str] = None
     activated: bool = False
     enabled: bool = True

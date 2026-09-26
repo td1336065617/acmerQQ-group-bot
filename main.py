@@ -37,6 +37,7 @@ from .src.contest_fetcher import (
 )
 from .src.plugin_paths import migrate_known_caches, plugin_cache_dir
 from .src.rank_service import RankService
+from .src.group_names import event_group_name, fetch_group_name
 from .src.settlement import SETTLE_PLATFORMS, SettlementService
 from .src.problem_service import ProblemService, weak_tags_from_analysis
 from .src.account_cards import (
@@ -541,6 +542,12 @@ class AcmerGroupBot(Star):
                 self._web_push_log,
                 ["GET"],
                 "定时推送日志",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/groups/refresh-names",
+                self._web_refresh_group_names,
+                ["POST"],
+                "刷新群名称",
             )
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/bindings",
@@ -3379,17 +3386,20 @@ class AcmerGroupBot(Star):
         group_id: str,
         platform_id: Optional[str] = None,
         umo: Optional[str] = None,
+        name: str = "",
     ) -> None:
         gid = str(group_id)
         pid = str(platform_id or "")
+        gname = str(name or "").strip()
         key = platform_compat.scoped_key(pid, gid)
         now = time.monotonic()
-        # 常见路径：内存缓存新鲜且已注册该群、会话未变化 → 不读 KV、不写 KV。
+        # 常见路径：内存缓存新鲜且已注册该群、会话与群名都没变化 → 不读 KV、不写 KV。
         cached = self._groups_cache
         if cached is not None and now - cached[0] < GROUPS_CACHE_TTL_SECONDS:
             cfg = (cached[1] or {}).get(key)
             if isinstance(cfg, dict) and (not umo or cfg.get("umo") == umo):
-                return
+                if not gname or str(cfg.get("name") or "") == gname:
+                    return
         # 未知群/平台变化：读取权威数据后决定是否写回。
         raw = await self._raw_groups(fresh=True)
         cfg = raw.get(key)
@@ -3401,10 +3411,14 @@ class AcmerGroupBot(Star):
             if umo and cfg.get("umo") != umo:
                 cfg["umo"] = umo
                 changed = True
+            if gname and str(cfg.get("name") or "") != gname:
+                cfg["name"] = gname
+                changed = True
         else:
             raw[key] = {
                 "group_id": gid,
                 "platform_id": pid,
+                "name": gname,
                 "umo": umo or "",
                 "activated": False,
                 "enabled": True,
@@ -5083,6 +5097,7 @@ class AcmerGroupBot(Star):
             str(group_id),
             platform_id=platform_id,
             umo=str(getattr(event, "unified_msg_origin", "") or ""),
+            name=event_group_name(event),
         )
         # 已激活的群：重复发送激活命令不再回复，静默忽略
         current = next(
@@ -5138,6 +5153,7 @@ class AcmerGroupBot(Star):
                 gid,
                 platform_id=platform_id,
                 umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                name=event_group_name(event),
             )
             if first_this_run:
                 raw = await self._raw_groups()
@@ -5261,6 +5277,55 @@ class AcmerGroupBot(Star):
                 )
         entries.sort(key=lambda item: item["at"])
         return entries[:20]
+
+    async def refresh_group_names(self, *, limit: int = 50) -> dict:
+        """给还没有名字的群补一次群名：OneBot 走 get_group_info，官方走开放接口。"""
+        raw = await self._raw_groups(fresh=True)
+        pending = [
+            (key, cfg)
+            for key, cfg in raw.items()
+            if isinstance(cfg, dict) and not str(cfg.get("name") or "").strip()
+        ]
+        if not pending:
+            return {"updated": 0, "failed": 0, "skipped": 0, "pending": 0}
+        updated = failed = 0
+        for key, cfg in pending[:limit]:
+            pid, gid = platform_compat.split_scoped(str(key))
+            pid = str(pid or cfg.get("platform_id") or "")
+            channel = platform_compat.channel_of_platform_id(self.context, pid)
+            name = await fetch_group_name(self.context, pid, str(gid), channel)
+            if not name:
+                failed += 1
+                continue
+            cfg["name"] = name
+            updated += 1
+        if updated:
+            await self.put_kv_data("groups", raw)
+            self._groups_cache = None
+            logger.info("acmerQQ群机器人 已补全 %d 个群名", updated)
+        return {
+            "updated": updated,
+            "failed": failed,
+            "skipped": max(0, len(pending) - limit),
+            "pending": len(pending),
+        }
+
+    async def _web_refresh_group_names(self):
+        """后台「刷新群名」：补齐缺失的群名称。"""
+        payload = await request.json(default=None)
+        limit = 50
+        if isinstance(payload, dict) and payload.get("limit") is not None:
+            try:
+                limit = int(payload["limit"])
+            except (TypeError, ValueError):
+                limit = 50
+        limit = max(1, min(200, limit))
+        try:
+            data = await self.refresh_group_names(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("刷新群名失败：%s", exc, exc_info=True)
+            return error_response(f"刷新群名失败：{exc}")
+        return json_response({"status": "success", "data": data})
 
     async def _web_overview(self):
         """后台概览：计数、平台实例、存储后端、最近推送、下次推送。"""
@@ -5525,8 +5590,11 @@ class AcmerGroupBot(Star):
                 continue
             gid = str(item["group_id"])
             pid = str(item.get("platform_id") or "")
+            # 注意：payload 里本来就带 group_id（前端回传整行），
+            # 不能直接 GroupConfig(group_id=gid, **item)，否则重复关键字必报 TypeError。
+            fields = {key: value for key, value in item.items() if key != "group_id"}
             try:
-                cfg = GroupConfig(group_id=gid, **item)
+                cfg = GroupConfig(group_id=gid, **fields)
             except Exception as exc:
                 raise ValueError(f"群 {gid} 配置不合法：{exc}") from exc
             raw[platform_compat.scoped_key(pid, gid)] = cfg.model_dump()
