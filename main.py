@@ -2654,6 +2654,29 @@ class AcmerGroupBot(Star):
                     exc,
                 )
 
+    def _spawn(self, coro, *, label: str = "bg") -> None:
+        """投递后台任务并持有引用：避免被 GC 回收、异常也不会被吞（BUG-044）。"""
+        tasks = getattr(self, "_bg_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._bg_tasks = tasks
+        try:
+            task = asyncio.get_running_loop().create_task(coro, name="acmer-" + label)
+        except RuntimeError:                      # 没有事件循环（同步上下文）：放弃但不报错
+            coro.close()
+            return
+        tasks.add(task)
+
+        def _done(finished: "asyncio.Task") -> None:
+            tasks.discard(finished)
+            if finished.cancelled():
+                return
+            exc = finished.exception()
+            if exc is not None:
+                logger.warning("后台任务 %s 失败：%s", label, exc)
+
+        task.add_done_callback(_done)
+
     def _invalidate_rank_cache(self, group_id: str) -> None:
         """成员绑定/退出或昵称更新后，让对应群排行立即重新计算。"""
         group_key = str(group_id)
@@ -2661,12 +2684,7 @@ class AcmerGroupBot(Star):
             if key[0] == group_key:
                 self._rank_cache.pop(key, None)
         self._rank_dirty_pending.add(group_key)
-        try:
-            asyncio.get_running_loop().create_task(
-                self._mark_group_rank_dirty(str(group_id))
-            )
-        except RuntimeError:
-            pass
+        self._spawn(self._mark_group_rank_dirty(str(group_id)), label="rank-dirty")
 
     async def _mark_group_rank_dirty(self, group_id: str) -> None:
         """让 SQLite 快照对该群所有平台标记脏（rank + progress）。"""
@@ -2686,10 +2704,7 @@ class AcmerGroupBot(Star):
     def _invalidate_all_rank_cache(self) -> None:
         """账号关系或展示名称变化时清理所有群的排行缓存。"""
         self._rank_cache.clear()
-        try:
-            asyncio.get_running_loop().create_task(self._mark_all_ranks_dirty())
-        except RuntimeError:
-            pass
+        self._spawn(self._mark_all_ranks_dirty(), label="rank-dirty-all")
 
     async def _mark_all_ranks_dirty(self) -> None:
         for group in await self.get_groups():
