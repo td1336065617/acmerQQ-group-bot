@@ -57,6 +57,11 @@ class FakeRegistry:
         self.existing = dict(existing or {})
         self.saved = []
         self.groups_calls = []
+        self.rank_members = []
+
+    async def add_rank_member(self, group_id, user_id, *, added_by="", note=""):
+        self.rank_members.append((group_id, user_id, added_by))
+        return {"group_id": group_id, "user_id": user_id, "preexisting": False}
 
     async def get_user_accounts(self, user_id):
         return {platform: dict(record) for platform, record in self.existing.items()}
@@ -250,8 +255,11 @@ def test_save_changed_account_fetches_and_reports_replaced():
         assert fetcher.calls == [("nowcoder", "999888777")]
         assert result["json"]["data"]["reused"] is False
         assert result["json"]["data"]["replaced"] == "td1336065617"
-        assert registry.saved[0]["group_id"] == "g9"
+        # 归属群不再传给 save_binding，而是走覆盖表（带留痕）
+        assert registry.saved[0]["group_id"] is None
         assert registry.saved[0]["verified_at"] is None
+        assert registry.rank_members == [("g9", "u1", "webui:binding")]
+        assert result["json"]["data"]["membership_added"] is True
 
     asyncio.run(scenario())
 
@@ -314,5 +322,63 @@ def test_bindings_list_attaches_groups():
         item = result["json"]["data"]["items"][0]
         assert item["groups"] == [{"group_id": "g1", "manual": False}]
         assert registry.groups_calls == [["u1"]]
+
+    asyncio.run(scenario())
+
+
+def test_save_without_group_does_not_touch_membership():
+    """新增/编辑不带归属群 → 不写覆盖表，成员资格完全不动。"""
+
+    async def scenario():
+        m = _load_main_module()
+        _patch_response(m)
+        registry = FakeRegistry({})
+        bot = _bot(m, registry=registry)
+        m.request = _body(
+            {
+                "action": "save",
+                "user_id": "u7",
+                "platform": "codeforces",
+                "identifier": "newbie",
+                "qq_name": "新人",
+                "group_id": "",
+            }
+        )
+        result = await m.AcmerGroupBot._web_bindings_write(bot)
+        assert "error" not in result, result
+        assert registry.rank_members == []
+        assert result["json"]["data"]["membership_added"] is False
+
+    asyncio.run(scenario())
+
+
+def test_save_join_group_failure_is_reported_after_binding_saved():
+    """加群排行失败时：绑定已保存，但明确告知去「排行成员」重试。"""
+
+    async def scenario():
+        m = _load_main_module()
+        _patch_response(m)
+        registry = FakeRegistry({})
+
+        async def boom(group_id, user_id, **kwargs):
+            raise RuntimeError("db busy")
+
+        registry.add_rank_member = boom
+        bot = _bot(m, registry=registry)
+        m.request = _body(
+            {
+                "action": "save",
+                "user_id": "u8",
+                "platform": "codeforces",
+                "identifier": "newbie2",
+                "qq_name": "",
+                "group_id": "g1",
+            }
+        )
+        result = await m.AcmerGroupBot._web_bindings_write(bot)
+        assert "error" in result, result
+        assert "排行成员" in result["error"]
+        # 绑定本身已经写进去了
+        assert registry.saved and registry.saved[0]["user_id"] == "u8"
 
     asyncio.run(scenario())

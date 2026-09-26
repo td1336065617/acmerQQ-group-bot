@@ -62,12 +62,18 @@ class FakeRegistry:
         self.conflict = conflict
         self.saved = []
         self.removed = []
+        self.rank_members = []
 
     async def get_all_accounts(self):
         return self.accounts
 
     async def get_user_accounts(self, user_id):
         return self.accounts.get(user_id, {})
+
+    async def add_rank_member(self, group_id, user_id, *, added_by="", note=""):
+        # 后台「归属群」现在走覆盖表（带留痕），便于在「群排行 → 排行成员」管理
+        self.rank_members.append((group_id, user_id, added_by))
+        return {"group_id": group_id, "user_id": user_id, "preexisting": False}
 
     async def save_binding(self, user_id, platform, profile, **kwargs):
         if self.conflict:
@@ -243,10 +249,13 @@ def test_bindings_save_writes_target_and_invalidates_cache():
             "u1",
             "codeforces",
             "jiangly",
-            # verified_at=None 表示这次是真正校验过账号（账号有变化或首次绑定）
-            {"group_id": "g1", "qq_name": "小明", "verified_at": None},
+            # group_id=None：归属群不再走老路径；verified_at=None 表示这次真正校验过账号
+            {"group_id": None, "qq_name": "小明", "verified_at": None},
         )
     ]
+    # 归属群改由覆盖表承接（带 added_by 留痕）
+    assert registry.rank_members == [("g1", "u1", "webui:binding")]
+    assert result["data"]["membership_added"] is True
     assert fetcher.calls[0][0] == "codeforces"
     assert bot.invalidated == [True]
     assert result["data"]["replaced"] is None
