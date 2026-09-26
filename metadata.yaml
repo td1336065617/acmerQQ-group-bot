@@ -9,7 +9,7 @@ desc: |
   后台可视化管理（账号绑定增删改查、运行状态、立即试跑、配置导入导出）。
   数据来自各平台公开接口/页面，无需第三方 SDK 或登录 Cookie。
   支持 QQ 官方机器人（qq_official / qq_official_webhook）与 OneBot v11（aiocqhttp）。
-version: 1.19.5
+version: 1.19.6
 author: td1336065617
 repo: https://github.com/td1336065617/acmerQQ-group-bot/tree/master
 astrbot_version: ">=4.13.0,<5"

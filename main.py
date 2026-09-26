@@ -141,6 +141,12 @@ NOWCODER_SCOPE_LABELS = {
 AT_ALL_BLOCK_SECONDS = 6 * 3600
 # 后台「运行状态」用的推送日志：KV 环形保留最近 N 条，避免无限增长。
 PUSH_LOG_KEY = "push_log"
+
+#: 推送失败退避：同一目标连续失败到该次数后进入冷却，避免掉线期间每轮重试（BUG-042）
+PUSH_FAIL_MAX_ATTEMPTS = 3
+PUSH_FAIL_COOLDOWN_SECONDS = 900
+#: 同类告警的最小间隔（避免掉线时"会话未就绪"等日志刷屏）
+WARN_THROTTLE_SECONDS = 600
 PUSH_LOG_MAX = 200
 # 「立即试跑」支持的类型（早报 / 训练周报 / 赛后赛果 / 报名提醒）。
 RUN_NOW_KINDS = ("morning", "weekly", "settle", "signup")
@@ -3479,14 +3485,71 @@ class AcmerGroupBot(Star):
             self.context, str(group_id), str(platform_id or "")
         )
 
+    def _warn_throttled(self, key: str, message: str, *args: Any) -> None:
+        """同一 key 的告警在 WARN_THROTTLE_SECONDS 内只打一次（BUG-042）。"""
+        state = getattr(self, "_warn_throttle", None)
+        if state is None:
+            state = {}
+            self._warn_throttle = state
+        now = time.time()
+        if now - float(state.get(key, 0.0)) < WARN_THROTTLE_SECONDS:
+            return
+        state[key] = now
+        logger.warning(message, *args)
+
+    async def _push_retry_allowed(self, kind: str, key: str) -> bool:
+        """失败退避闸门：连续失败达到上限后，冷却期内不再重试。"""
+        try:
+            info = await self.get_kv_data(f"pushfail_{kind}_{key}", {}) or {}
+        except Exception:  # noqa: BLE001 - 读不到计数就按允许处理
+            return True
+        if not isinstance(info, dict):
+            return True
+        if int(info.get("n") or 0) < PUSH_FAIL_MAX_ATTEMPTS:
+            return True
+        return time.time() - float(info.get("ts") or 0.0) >= PUSH_FAIL_COOLDOWN_SECONDS
+
+    async def _note_push_failure(self, kind: str, key: str) -> int:
+        """记一次推送失败，返回累计次数；达到上限时提示进入冷却。"""
+        store_key = f"pushfail_{kind}_{key}"
+        try:
+            info = await self.get_kv_data(store_key, {}) or {}
+        except Exception:  # noqa: BLE001
+            info = {}
+        if not isinstance(info, dict):
+            info = {}
+        count = int(info.get("n") or 0) + 1
+        try:
+            await self.put_kv_data(store_key, {"n": count, "ts": time.time()})
+        except Exception as exc:  # noqa: BLE001 - 计数写失败不影响主流程
+            logger.warning("写推送失败计数失败：%s（%s）", store_key, exc)
+            return count
+        if count >= PUSH_FAIL_MAX_ATTEMPTS:
+            logger.warning(
+                "目标 %s 推送连续失败 %d 次，%d 秒内不再重试（请检查协议端登录与发送权限）",
+                key,
+                count,
+                PUSH_FAIL_COOLDOWN_SECONDS,
+            )
+        return count
+
+    async def _clear_push_failure(self, kind: str, key: str) -> None:
+        try:
+            await self.put_kv_data(f"pushfail_{kind}_{key}", {})
+        except Exception:  # noqa: BLE001 - 清理失败不影响发送
+            pass
+
     async def send_notification(self, group: GroupConfig, text: str) -> bool:
         """发送通知；返回是否发送成功。@全体成员 开启且无权限时自动降级。"""
         if not self._group_scene_ready(group.group_id, group.platform_id):
-            logger.warning(
+            self._warn_throttled(
+                "scene:" + str(group.group_id),
                 "群 %s 主动推送会话未就绪（本次运行该群还没给机器人发过消息），"
                 "跳过发送；请先让群内发一条消息",
                 group.group_id,
             )
+            return False
+        if not await self._push_retry_allowed("group", str(group.group_id)):
             return False
         settings = await self.get_settings()
         channel = platform_compat.channel_of_platform_id(
@@ -3507,6 +3570,7 @@ class AcmerGroupBot(Star):
             )
             if sent:
                 logger.info("已向群 %s 提交 @全体成员 标记", group.group_id)
+                await self._clear_push_failure("group", str(group.group_id))
                 return True
             logger.warning(
                 "群 %s 发送 @全体成员 失败，自动降级为普通通知", group.group_id
@@ -3523,6 +3587,9 @@ class AcmerGroupBot(Star):
         )
         if sent:
             logger.info("已向群 %s 发送普通通知", group.group_id)
+            await self._clear_push_failure("group", str(group.group_id))
+        else:
+            await self._note_push_failure("group", str(group.group_id))
         return sent
 
     async def _post_to_group(
