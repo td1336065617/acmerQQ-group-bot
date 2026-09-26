@@ -32,6 +32,11 @@ def _mode_of(progress: bool) -> str:
     return "progress" if progress else "rank"
 
 
+#: 后台刷新最小间隔 / 失败退避：脏标记与失败重试不得把全量重算打成高频循环（BUG-042 后半）
+MIN_REFRESH_INTERVAL_SECONDS = 120.0
+REFRESH_FAIL_BACKOFF_SECONDS = 600.0
+
+
 def _max_age_of(mode: str) -> float:
     return (
         PROGRESS_SNAPSHOT_MAX_AGE
@@ -46,6 +51,9 @@ class RankService:
         self._jobs: Dict[tuple, asyncio.Task] = {}
         self._refresh_semaphore = asyncio.Semaphore(2)
         self._closing = False
+        #: 上次投递时间 / 上次失败时间（按 (group, platform, progress) 维度）
+        self._last_refresh: dict[tuple, float] = {}
+        self._refresh_failed_at: dict[tuple, float] = {}
 
     def _store(self):
         registry = getattr(self.plugin, "account_registry", None)
@@ -182,11 +190,17 @@ class RankService:
         *,
         progress: bool = False,
     ) -> None:
-        """投递一次后台刷新；同 (group, platform) 只保留一个任务。"""
+        """投递一次后台刷新；同 (group, platform) 只保留一个任务，并做间隔/失败退避。"""
         key = (str(group_id), str(platform), bool(progress))
         task = self._jobs.get(key)
         if task is not None and not task.done():
             return
+        now = time.time()
+        if now - float(self._last_refresh.get(key) or 0.0) < MIN_REFRESH_INTERVAL_SECONDS:
+            return
+        if now - float(self._refresh_failed_at.get(key) or 0.0) < REFRESH_FAIL_BACKOFF_SECONDS:
+            return
+        self._last_refresh[key] = now
         task = asyncio.create_task(
             self._refresh(key), name=f"acmer-rank-{key[0]}-{key[1]}"
         )
@@ -216,18 +230,28 @@ class RankService:
                     )
             if errors:
                 logger.warning(
-                    "群 %s %s %s 后台刷新有 %d 个账号失败",
+                    "群 %s %s %s 后台刷新有 %d 个账号失败，%d 秒内不再重试",
                     group_id,
                     platform,
                     mode,
                     len(errors),
+                    int(REFRESH_FAIL_BACKOFF_SECONDS),
                 )
+                self._refresh_failed_at[key] = time.time()
+            else:
+                self._refresh_failed_at.pop(key, None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 后台刷新失败不影响主流程
             logger.warning(
-                "群 %s %s %s 后台刷新失败: %s", group_id, platform, mode, exc
+                "群 %s %s %s 后台刷新失败: %s（%d 秒内不再重试）",
+                group_id,
+                platform,
+                mode,
+                exc,
+                int(REFRESH_FAIL_BACKOFF_SECONDS),
             )
+            self._refresh_failed_at[key] = time.time()
         finally:
             self._jobs.pop(key, None)
 

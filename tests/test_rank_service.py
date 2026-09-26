@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from src.account_store import AccountStore
 from src.rank_service import RankService
@@ -92,6 +93,8 @@ def test_progress_read_persists_and_uses_snapshot(tmp_path):
 
         # 标脏后 progress 也应失效（rank 的脏标记不影响 progress 快照表）
         await store.mark_rank_dirty("g1", "codeforces", mode="progress")
+        # 后台刷新有最小间隔（BUG-042 后半），测试里模拟「间隔已过」再触发
+        service._last_refresh.clear()
         rows3, _ = await service.read("g1", "codeforces", progress=True)
         assert rows3
         meta = None
@@ -186,5 +189,51 @@ def test_read_with_meta_reports_fresh_and_snapshot_at(tmp_path):
         assert rows2
         assert meta2["fresh"] is False
         assert meta2["snapshot_at"] == float((await store.get_rank_meta("g1", "codeforces")).get("refreshed_at") or 0.0)
+
+    asyncio.run(scenario())
+
+
+def test_request_refresh_is_throttled_and_backs_off(tmp_path):
+    """BUG-042 后半：后台刷新要有最小间隔与失败退避，不能被打成高频全量重算。"""
+
+    async def scenario():
+        store = AccountStore(tmp_path / "rank.db")
+        await store.initialize()
+        plugin = FakePlugin(store)
+        service = RankService(plugin)
+        calls = {"n": 0}
+        inner = plugin._collect_rank_rows_uncached
+
+        async def counting(*args, **kwargs):
+            calls["n"] += 1
+            return await inner(*args, **kwargs)
+
+        plugin._collect_rank_rows_uncached = counting
+        key = ("g1", "codeforces", False)
+
+        await service.request_refresh("g1", "codeforces")
+        task = service._jobs.get(key)
+        assert task is not None
+        await task
+        assert calls["n"] == 1
+
+        # 最小间隔内再次投递 -> 不产生新任务
+        await service.request_refresh("g1", "codeforces")
+        assert calls["n"] == 1
+
+        # 越过最小间隔、但上一次失败仍在退避窗口 -> 不投递
+        service._last_refresh.clear()
+        service._refresh_failed_at[key] = time.time()
+        await service.request_refresh("g1", "codeforces")
+        assert calls["n"] == 1
+
+        # 退避窗口过后 -> 允许再刷
+        service._refresh_failed_at[key] = time.time() - 10_000
+        service._last_refresh.clear()
+        await service.request_refresh("g1", "codeforces")
+        task2 = service._jobs.get(key)
+        assert task2 is not None
+        await task2
+        assert calls["n"] == 2
 
     asyncio.run(scenario())
