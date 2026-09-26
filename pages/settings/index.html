@@ -400,6 +400,7 @@
   <div class="field"><label for="bfName">昵称（选填）</label><div class="ctrl"><input type="text" class="wide" id="bfName" placeholder="用于排行展示"></div></div>
   <div class="field" id="bfGroupField"><label for="bfGroup">归属群（选填）</label><div class="ctrl"><select id="bfGroup"><option value="">不加入群排行</option></select></div></div>
   <div class="muted" id="bfGroupHint" style="font-size:12px;margin:-6px 0 10px 0">新增时可顺带把 TA 加入某个群的排行；之后的查看与调整都在「群排行 → 排行成员」。</div>
+  <div class="muted" id="bfGroupsHint" style="font-size:12px;margin:-6px 0 10px 0"></div>
   <div class="modal-actions">
     <button class="btn ghost" id="bfCancel">取消</button>
     <button class="btn" id="bfSubmit">保存</button>
@@ -973,6 +974,18 @@
     }
     return text.replace(/[?#].*$/, '').toLowerCase();
   }
+  function renderBindingGroupsHint(item) {
+    var node = $('#bfGroupsHint');
+    if (!node) return;
+    if (!item) { node.textContent = ''; return; }
+    var groups = item.groups || [];
+    var text_ = groups.length
+      ? '当前已在：' + groups.map(function (g) {
+          return groupLabel(g.group_id) + (g.manual ? '（强制加入）' : '（自然成员）');
+        }).join('、')
+      : '该用户当前不在任何群的排行榜里。';
+    node.textContent = text_ + '（查看与调整请在「群排行 → 排行成员」）';
+  }
   function openBindingForm(item) {
     var editing = !!item;
     state.bindingEdit = item || null;
@@ -984,7 +997,7 @@
     // 牛客 / 洛谷的 handle 是展示名，真实账号标识在 platform_user_id —— 必须回填后者
     $('#bfIdentifier').value = item ? (item.platform_user_id || item.handle) : '';
     $('#bfName').value = item ? (item.qq_name || '') : '';
-    // 归属群只在“新增”时可设；编辑与展示统一在「群排行 → 排行成员」
+    // 归属群：新增时可选；编辑时不显示输入，只读提示“当前已在哪些群排行”
     var groupField = $('#bfGroupField');
     var groupHint = $('#bfGroupHint');
     if (groupField) groupField.hidden = editing;
@@ -993,10 +1006,14 @@
       var groupSelect = $('#bfGroup');
       if (groupSelect) groupSelect.value = '';
     }
+    renderBindingGroupsHint(item);
     updateBindHint();
     $('#drawer').hidden = false;
   }
-  function closeBindingForm() { $('#drawer').hidden = true; }
+  function closeBindingForm() {
+    $('#drawer').hidden = true;
+    state.bindingEdit = null;
+  }
   function updateBindHint() {
     var p = $('#bfPlatform').value;
     var text_ = ({
