@@ -2667,7 +2667,7 @@ class AcmerGroupBot(Star):
             return
         tasks.add(task)
 
-        def _done(finished: "asyncio.Task") -> None:
+        def _done(finished: asyncio.Task) -> None:
             tasks.discard(finished)
             if finished.cancelled():
                 return
