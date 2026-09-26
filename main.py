@@ -4457,7 +4457,7 @@ class AcmerGroupBot(Star):
             item["user_id"] for item in deltas if item["delta"] != 0
         } | active_users
         if not participants:
-            logger.info("群 %s 本周无训练数据，跳过周报", group.group_id)
+            logger.debug("群 %s 本周无训练数据，跳过周报", group.group_id)
             return None
 
         lines = [
@@ -4579,20 +4579,23 @@ class AcmerGroupBot(Star):
         """
         week = week_key or self._iso_week_key(moment)
         key = f"weekly_{group.group_id}_{week}"
+        attempt_key = f"{group.group_id}_{week}"
         if write_key and await self.get_kv_data(key, False):
             return False
+        if write_key:
+            # 补发护栏放在构建之前：「无数据」也算一次尝试，
+            # 否则每个没有训练数据的群会每 30 秒重算一次周报（生产实测 CPU 持续占用，BUG-046）
+            if not await self.push_attempt_allowed("weekly", attempt_key):
+                return False
+            await self.note_push_attempt("weekly", attempt_key)
         try:
             report = await self.build_weekly_report(group)
         except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
             logger.warning("群 %s 周报构建失败：%s", group.group_id, exc)
             return False
         if not report:
+            logger.debug("群 %s 本周无训练数据，跳过周报", group.group_id)
             return False
-        if write_key:
-            # 补发护栏：真的要有内容推送了才计一次尝试（避免「无数据」也消耗次数，BUG-026）
-            if not await self.push_attempt_allowed("weekly", key):
-                return False
-            await self.note_push_attempt("weekly", key)
         text = str(report.get("text") or "").strip()
         text_sent = True
         if text:

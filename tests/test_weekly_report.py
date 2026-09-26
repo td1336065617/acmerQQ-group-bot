@@ -194,8 +194,10 @@ def test_no_data_is_silent(monkeypatch):
         bot = _build_bot(main_module, rank_rows={})
         assert await bot.build_weekly_report(GROUP) is None
         assert await bot.tick_weekly_report(MONDAY) == 0
-        assert bot._kv == {}
+        assert "weekly_g1_2026-W39" not in bot._kv      # 无数据不写幂等键
         assert bot._sent == []
+        # 但「无数据」也要计一次尝试：否则每个群每 tick 都会重算周报（BUG-046）
+        assert bot._kv.get("pushattempt_weekly_g1_2026-W39", {}).get("n") == 1
 
     asyncio.run(scenario())
 

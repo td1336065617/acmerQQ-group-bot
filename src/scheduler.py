@@ -185,7 +185,8 @@ class PushScheduler:
             logger.debug("群 %s 今日早报已发送过，跳过", group.group_id)
             return
         # 补发窗口的护栏：同一天最多尝试 3 次，且两次间隔 >= 10 分钟（BUG-026）
-        if not await self.plugin.push_attempt_allowed("morning", sent_key):
+        attempt_key = f"{group.group_id}_{date_key}"
+        if not await self.plugin.push_attempt_allowed("morning", attempt_key):
             return
         late = now.strftime("%H:%M") != push_time
         logger.info(
@@ -194,7 +195,7 @@ class PushScheduler:
             push_time,
             "，补发" if late else "",
         )
-        await self.plugin.note_push_attempt("morning", sent_key)
+        await self.plugin.note_push_attempt("morning", attempt_key)
         text = await self.plugin.build_morning_text(group)
         # 早报正文保持原样（有比赛才发）；随后无论有没有比赛，都追加两张周榜图片
         # （本周进步榜、本周退步榜）。周榜属于早报的一部分，不单独设开关。
