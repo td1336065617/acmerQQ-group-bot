@@ -280,7 +280,7 @@ def _gate_once(bot, *, hours_ago=0.5, marker_key="settle_g1_codeforces_2264", se
 
 
 def test_ready_state_defers_recheck():
-    """就绪后短时间内再评估：直接 wait，不再探测，并排好 30 分钟复评。"""
+    """就绪后短时间内再评估：跳过探测但仍放行推送（多群场景关键），并排好 30 分钟复评。"""
     m = _load_main_module()
     settlement = GateSettlement(
         [Sample(rows=7474, fingerprint="rows:7474:FINISHED", hint_ready=True)]
@@ -289,7 +289,8 @@ def test_ready_state_defers_recheck():
     verdict1, poll_key = _gate_once(bot)
     verdict2, _ = _gate_once(bot)
     assert verdict1 == "ready"
-    assert verdict2 == "wait"           # 复评间隔内不再探测
+    # 复评间隔内：不再探测，但仍返回 ready —— 否则同一 tick 里只有第一个群能推卡
+    assert verdict2 == "ready"
     assert settlement.probe_calls == 1  # 关键：没有第二次抓榜单
     state = bot._kv[poll_key]
     assert state["ready_logged"] is True
@@ -360,4 +361,62 @@ def test_timeout_history_zero_but_current_rows_notifies():
     assert verdict == "abandoned"
     assert [t for _, t in bot._sent if "结算异常" in t]
     assert bot._kv[poll_key]["abandoned_reason"] != "no-participants"
+
+
+
+def test_ready_state_still_pushes_for_every_group_in_same_tick():
+    """多群共用一个轮询键：就绪后同一 tick 里每个群都要各自拿到卡。
+
+    回归背景：1.20.6 给 READY 写 next_poll_at=+30 分钟后，同 tick 的第二个群
+    会命中早退 wait → 卡一个群一个群地被拖 30 分钟（单群用例抓不到）。
+    """
+    from src.models import GroupConfig
+    from test_settlement_tick import _build_bot
+
+    async def scenario():
+        m = _load_main_module()
+        settlement = GateSettlement(
+            [Sample(rows=7474, fingerprint="rows:7474:FINISHED", hint_ready=True)]
+        )
+        groups = [
+            GroupConfig(group_id=f"g{i}", push_platforms=["codeforces"])
+            for i in (1, 2, 3)
+        ]
+        bot = _build_bot(
+            m,
+            groups=groups,
+            contests={"codeforces": [_contest(hours_ago=0.5)]},
+            members={g.group_id: ["u1"] for g in groups},
+            accounts=ACCOUNTS,
+            settlement=settlement,
+            settings={"settle_strict_enabled": True},
+        )
+        pushed = await bot.tick_settlements()
+        assert pushed == 3, f"三个群应各自推一次，实际 {pushed}"
+        assert settlement.probe_calls == 1  # 复评节流仍生效：只探测一次
+
+    asyncio.run(scenario())
+
+
+def test_shared_abandoned_without_participants_sends_no_notice():
+    """共享的 ABANDONED(no-participants) 终态不给别的群发误报；真超时仍提示。"""
+    m = _load_main_module()
+    settlement = GateSettlement([Sample(rows=0, fingerprint="rows:0:none", hint_ready=False)])
+    bot = _bot(m, settlement, settings={"settle_strict_enabled": True})
+    bot._kv["settle_poll_codeforces_2264"] = {
+        "state": "ABANDONED",
+        "abandoned_reason": "no-participants",
+        "samples": [{"ts": 1, "rows": 0, "fp": "rows:0"}],
+    }
+    verdict, _ = _gate_once(bot)
+    assert verdict == "abandoned"
+    assert bot._sent == []          # 静默终态：不发"结算异常"
+
+    bot._kv["settle_poll_codeforces_2264"] = {
+        "state": "ABANDONED",
+        "abandoned_reason": "cf:preliminary",
+        "samples": [{"ts": 1, "rows": 5, "fp": "rows:5"}],
+    }
+    _gate_once(bot)
+    assert [t for _, t in bot._sent if "结算异常" in t]
 

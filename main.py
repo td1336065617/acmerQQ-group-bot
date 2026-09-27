@@ -4461,11 +4461,18 @@ class AcmerGroupBot(Star):
         if current_state == "PUSHED":
             return "ready", poll_key
         if current_state == "ABANDONED":
-            # poll 状态跨群共享（CF/AtCoder）：其他群本轮也要各自收到一次提示
-            await self._settle_abandon_notice(group, platform, contest, settings)
+            # poll 状态跨群共享（CF/AtCoder）：其他群本轮也要各自收到一次提示；
+            # 但"本群无人参赛"是静默终态，不能给别的群发误报。
+            if str(state.get("abandoned_reason") or "") != "no-participants":
+                await self._settle_abandon_notice(group, platform, contest, settings)
             return "abandoned", poll_key
         try:
             if float(state.get("next_poll_at") or 0) > now_ts:
+                # 已判定就绪的场次：本轮直接放行去推送（不再探测）。
+                # 关键：poll_key 跨群共享，若 READY 也返回 wait，同一 tick 里
+                # 只有第一个群能推卡，其余群要等下一个复评窗口（一个群一个群地拖）。
+                if current_state == "READY":
+                    return "ready", poll_key
                 return "wait", poll_key
         except (TypeError, ValueError):
             pass
