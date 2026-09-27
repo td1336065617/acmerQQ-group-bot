@@ -221,6 +221,77 @@ def test_signup_gate_blocks_scheduled_bypass_passes():
     assert sent == ["报名提醒"]
 
 
+
+
+def _tick_bot():
+    settlement = FakeSettlement(_result())
+    bot = _build_bot(
+        m,
+        groups=[TICK_GROUP],
+        contests={"codeforces": [_contest()]},
+        members=MEMBERS,
+        accounts=ACCOUNTS,
+        settlement=settlement,
+    )
+    return bot, settlement
+
+
+def test_blocked_marker_same_fingerprint_skips():
+    """被拒场次：成员指纹没变 → 不评估不推送、标记保留（台账 M4.2）。"""
+    bot, settlement = _tick_bot()
+    contest = _contest()
+    key = f"settle_{TICK_GROUP.group_id}_codeforces_{contest.contest_id}"
+    # 指纹要用运行时口径（_settlement_members 返回的是 (id, 名, handle) 元组表）
+    fp = bot._members_fingerprint(
+        asyncio.run(bot._settlement_members(TICK_GROUP.group_id, "codeforces"))
+    )
+    bot._kv[key] = {"blocked": True, "reason": push_health.K_PERMISSION, "members": fp}
+    assert asyncio.run(bot.tick_settlements()) == 0
+    assert settlement.calls == 0  # 门禁与采集都没跑
+    assert bot._kv[key].get("blocked") is True  # 标记仍在
+
+
+def test_blocked_marker_changed_fingerprint_repushes():
+    """成员指纹变了 → blocked 失效，重新评估并推送（标记被 pushed 覆盖）。"""
+    bot, settlement = _tick_bot()
+    contest = _contest()
+    key = f"settle_{TICK_GROUP.group_id}_codeforces_{contest.contest_id}"
+    bot._kv[key] = {
+        "blocked": True,
+        "reason": push_health.K_PERMISSION,
+        "members": "rows:stale-fingerprint",
+    }
+    assert asyncio.run(bot.tick_settlements()) == 1
+    marker = bot._kv[key]
+    assert isinstance(marker, dict) and marker.get("state") == "pushed"
+    assert bot._sent  # 真的发出去了
+
+
+def test_push_failure_after_denial_writes_blocked():
+    """真实尝试失败且群已进入暂停 → 写 blocked（reason 取自健康状态，台账 M4.1）。"""
+    bot, settlement = _tick_bot()
+
+    async def denying_send(group, text, **kwargs):
+        bot._cache_health(
+            KEY,
+            {
+                "suspended_until": time.time() + 600,
+                "state": "denied",
+                "count": 1,
+                "last_error_class": push_health.K_PERMISSION,
+            },
+        )
+        return False
+
+    bot.send_notification = denying_send
+    contest = _contest()
+    key = f"settle_{TICK_GROUP.group_id}_codeforces_{contest.contest_id}"
+    assert asyncio.run(bot.tick_settlements()) == 0
+    marker = bot._kv.get(key)
+    assert isinstance(marker, dict) and marker.get("blocked") is True
+    assert marker.get("reason") == push_health.K_PERMISSION
+    assert str(marker.get("members") or "")  # 带成员指纹（指纹变化才重评的依据）
+
 def test_threshold_warn_once_per_day(caplog):
     """达阈值后每群每日只告警一次；进程内记忆清空（次日）才再告警。"""
     bot, kv, sent = _send_bot(suspended=False)

@@ -4628,10 +4628,15 @@ class AcmerGroupBot(Star):
                     key = f"settle_{group.group_id}_{platform}_{contest.contest_id}"
                     marker = await self.get_kv_data(key, False)
                     if marker:
-                        if not (isinstance(marker, dict) and marker.get("skipped")):
+                        # 三种形态优先级：pushed（真 dict 但非 skipped/blocked）> blocked > skipped。
+                        # blocked 不能当成 pushed：否则被拒场次连成员变化都永远不再重评。
+                        if not isinstance(marker, dict) or not (
+                            marker.get("skipped") or marker.get("blocked")
+                        ):
                             continue  # 已正式推送过：幂等
-                        # 跳过过的场次：只有「成员集合变了」才重新评估一次，
-                        # 既保留「稍后有人绑定就能补推」，又不再每 tick 空转（BUG-039）
+                        # skipped（人数不足）与 blocked（推送被拒）同规则：
+                        # 只有「成员集合变了」才重新评估一次，既保留补推机会，
+                        # 又不再每 tick 空转（BUG-039）
                         current = self._members_fingerprint(
                             await self._settlement_members(group.group_id, platform)
                         )
