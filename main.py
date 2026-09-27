@@ -42,6 +42,7 @@ from .src.settlement import (
     MAX_WAIT_MINUTES as SETTLE_MAX_WAIT_MINUTES,
     POLL_SAMPLE_KEEP,
     SETTLE_PLATFORMS,
+    STABLE_SPAN_MINUTES as SETTLE_STABLE_SPAN_MINUTES,
     SettlementService,
     evaluate_readiness,
     new_poll_state,
@@ -4414,11 +4415,13 @@ class AcmerGroupBot(Star):
         state["samples"] = samples[-POLL_SAMPLE_KEEP:]
         if not ready:
             night = 0 <= getattr(moment, "hour", 12) < 7
+            span = SETTLE_STABLE_SPAN_MINUTES.get(str(platform)) or None
             delay = self.settlement.next_poll_delay_minutes(
                 platform,
                 int(state.get("attempts") or 0),
                 night=night,
                 night_scale=float(settings.get("settle_night_scale") or 2),
+                max_delay_minutes=span,
             )
             state.update(
                 attempts=int(state.get("attempts") or 0) + 1,

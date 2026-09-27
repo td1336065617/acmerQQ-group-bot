@@ -243,14 +243,25 @@ def evaluate_readiness(
 
 
 def next_poll_delay_minutes(
-    platform: str, attempts: int, *, night: bool = False, night_scale: float = 1.0
+    platform: str,
+    attempts: int,
+    *,
+    night: bool = False,
+    night_scale: float = 1.0,
+    max_delay_minutes: Optional[float] = None,
 ) -> float:
-    """按下标取轮询间隔（超出序列则固定最后一档），夜间可整体放大。"""
+    """按下标取轮询间隔（超出序列则固定最后一档），夜间可整体放大。
+
+    max_delay_minutes：未就绪期间的上限，必须 ≤ 稳定窗口，否则「看起来 30 分钟没变」
+    可能只由两次相隔很远的采样支撑，稳定性不可信。
+    """
     seq = PROBE_INTERVALS.get(str(platform)) or (10,)
     index = max(0, min(int(attempts), len(seq) - 1))
     delay = float(seq[index])
     if night:
         delay *= max(1.0, float(night_scale))
+    if max_delay_minutes is not None:
+        delay = min(delay, float(max_delay_minutes))
     return delay
 
 

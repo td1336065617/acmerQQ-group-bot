@@ -133,3 +133,83 @@ def test_strict_disabled_keeps_legacy_behaviour():
         assert "settle_g1_codeforces_2264" in bot._kv
 
     asyncio.run(scenario())
+
+
+def test_replay_real_abc477_through_tick():
+    """端到端回放：用真实 abc477 样本驱动 tick，半截数据绝不推卡。
+
+    时间线（比赛结束 T+0）：
+    T+37/T+40 半截榜（3594 行）→ 不推
+    T+100 数据发布完成（11547 行）→ 计数与稳定窗口重置 → 不推
+    T+140 稳定窗口（30 分钟）与 MinAge（45 分钟）均满足 → 推一次
+    """
+    import gzip
+    import json
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from src.models import Contest, GroupConfig
+    from src.settlement import Sample
+
+    from test_main_accounts import _load_main_module
+    from test_settlement_tick import _build_bot
+
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+
+    def _load(name):
+        with gzip.open(fixtures / name, "rt", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    partial = _load("atcoder_abc477_partial.json.gz")
+    full = _load("atcoder_abc477_full.json.gz")
+    half = f"rows:{len(partial)}"
+    done = f"rows:{len(full)}"
+    samples = [
+        Sample(rows=len(partial), fingerprint=half),
+        Sample(rows=len(partial), fingerprint=half),
+        Sample(rows=len(full), fingerprint=done),
+        Sample(rows=len(full), fingerprint=done),
+        Sample(rows=len(full), fingerprint=done),
+    ]
+
+    async def scenario():
+        m = _load_main_module()
+        end = datetime.now(timezone.utc) - timedelta(minutes=37)
+        contest = Contest(
+            platform="atcoder",
+            name="ABC477",
+            start_time=end - timedelta(minutes=100),
+            end_time=end,
+            duration_minutes=100,
+            url="https://atcoder.jp/contests/abc477",
+            contest_id="abc477",
+        )
+        group = GroupConfig(group_id="g1", push_platforms=["atcoder"])
+        bot = _build_bot(
+            m,
+            groups=[group],
+            contests={"atcoder": [contest]},
+            members={"g1": ["u1"]},
+            accounts={"u1": {"atcoder": {"handle": "starsilk", "display_name": "星"}}},
+            settlement=GateSettlement(samples),
+            settings={
+                "settle_strict_enabled": True,
+                "settle_atcoder_min_age_minutes": 45,
+                "push_platforms": ["atcoder"],
+            },
+        )
+        push_points = []
+        # offset 必须大于 GateSettlement 的 5 分钟间隔，否则该次 tick 会被 next_poll_at 跳过
+        for offset in (0, 6, 12, 40, 75):
+            await bot.tick_settlements(now=end + timedelta(minutes=37 + offset))
+            push_points.append(1 if bot._kv.get("settle_g1_atcoder_abc477") else 0)
+        # 只有最后一次（T+140）允许推
+        assert push_points == [0, 0, 0, 0, 1]
+        state = bot._kv["settle_poll_atcoder_abc477"]
+        assert state["state"] == "PUSHED"
+        assert len(state["samples"]) >= 5
+        # 推送发生在最后一次 tick（T+37+75 = T+112），且必须已越过 MinAge
+        assert state["elapsed_minutes"] >= 100
+
+    asyncio.run(scenario())
+
