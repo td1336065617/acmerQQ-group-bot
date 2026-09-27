@@ -20,8 +20,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
+import logging
+
 from .account_models import AccountProfile, platform_label
 from .models import CN_TZ
+logger = logging.getLogger(__name__)
+
 from .output_renderer import (
     OUTPUT_CACHE_MAX_BYTES,
     AdaptiveOutputRenderer,
@@ -1336,10 +1340,12 @@ class AccountCardRenderer:
                         return None
                     return image_path
 
+            last_error: Optional[BaseException] = None
             try:
                 image_tmp.unlink(missing_ok=True)
                 fallback_success = fallback(*fallback_args, image_tmp)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
                 fallback_success = False
             if fallback_success:
                 try:
@@ -1347,6 +1353,13 @@ class AccountCardRenderer:
                 except OSError:
                     return None
                 return image_path
+            # 外部渲染器与兜底全都失败：必须留痕，否则调用方只会"静默改发文字"，
+            # 线上表现为"卡片突然变文字"而日志里什么都看不到（2026-09-27 实际故障）。
+            logger.warning(
+                "卡片渲染不可用（外部渲染器与兜底均失败，kind=%s）：%s",
+                source.get("kind"),
+                last_error,
+            )
         return None
 
     @staticmethod

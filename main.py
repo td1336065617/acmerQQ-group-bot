@@ -4760,6 +4760,15 @@ class AcmerGroupBot(Star):
         if image_path is not None and Path(image_path).is_file():
             ok = await self._send_group_image(group, image_path, caption=title)
         else:
+            # 渲染不可用时改发纯文字是设计内的降级，但必须留痕：
+            # 否则线上表现为"卡片悄悄变文字"（2026-09-27 的事故就是这样藏了两小时）。
+            self._warn_throttled(
+                "settle_render:" + str(platform),
+                "群 %s 的 %s %s 赛果卡渲染不可用，本次改发纯文字（请检查渲染器/Pillow）",
+                group.group_id,
+                platform,
+                contest.contest_id,
+            )
             ok = await self.send_notification(
                 group,
                 self._settlement_text(result, unofficial_label=unofficial_label),
