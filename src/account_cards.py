@@ -1322,6 +1322,7 @@ class AccountCardRenderer:
                 renderers = AdaptiveOutputRenderer._find_renderers()
             except Exception:
                 renderers = []
+            renderer_errors: List[str] = []
             for kind, executable in renderers:
                 try:
                     image_tmp.unlink(missing_ok=True)
@@ -1331,7 +1332,10 @@ class AccountCardRenderer:
                         success = AdaptiveOutputRenderer._run_external_renderer(
                             kind, executable, html_path, image_tmp, height
                         )
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
+                    # 逐个渲染器的失败要留痕：否则只能看到"改了文字"，
+                    # 查不出是哪种渲染器、因为什么失败。
+                    renderer_errors.append(f"{kind}: {type(exc).__name__}: {exc}")
                     success = False
                 if success:
                     try:
@@ -1356,8 +1360,9 @@ class AccountCardRenderer:
             # 外部渲染器与兜底全都失败：必须留痕，否则调用方只会"静默改发文字"，
             # 线上表现为"卡片突然变文字"而日志里什么都看不到（2026-09-27 实际故障）。
             logger.warning(
-                "卡片渲染不可用（外部渲染器与兜底均失败，kind=%s）：%s",
+                "卡片渲染不可用（kind=%s）：外部渲染器 %s；兜底失败原因 %s",
                 source.get("kind"),
+                renderer_errors or "无可用渲染器",
                 last_error,
             )
         return None

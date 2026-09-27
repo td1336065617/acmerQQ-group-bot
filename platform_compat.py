@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from astrbot.api.message_components import At, Plain
@@ -15,6 +16,8 @@ from astrbot.api.message_components import At, Plain
 OFFICIAL_NAMES = {"qq_official", "qq_official_webhook"}
 ONEBOT_NAMES = {"aiocqhttp"}
 SEP = ":"
+
+logger = logging.getLogger(__name__)
 
 
 def channel_by_name(name: str) -> str:
@@ -141,7 +144,16 @@ def warm_scene(context, group_id: str, platform_id: str) -> bool:
             continue
         try:
             remember(gid, "group")
-        except Exception:  # noqa: BLE001 - 单个实例失败不影响其他群
+        except Exception as exc:  # noqa: BLE001 - 单个实例失败不影响其他群
+            # 必须留痕：会话场景恢复失败会导致该群静默收不到推送，
+            # 没日志就只能看到现象、查不出原因。
+            logger.warning(
+                "恢复群 %s 的会话场景失败（平台实例 %s，%s）：%s",
+                gid,
+                getattr(meta, "id", "") or getattr(meta, "name", ""),
+                type(exc).__name__,
+                exc,
+            )
             continue
         return True
     return False

@@ -5307,6 +5307,8 @@ class AcmerGroupBot(Star):
                     platform, max_age=TEST_PUSH_CACHE_MAX_AGE
                 )
             except Exception as exc:  # noqa: BLE001 - 单平台异常不影响预览
+                # 降级要留痕：异常文本进消息只是给使用者看的，排查看日志
+                logger.warning("测试推送预览读取 %s 缓存失败：%s", platform, exc)
                 contests, err = [], f"读取缓存失败：{exc}"
             out.append((platform, list(contests or []), err))
         return out
