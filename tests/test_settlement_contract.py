@@ -63,6 +63,27 @@ def test_poll_delay_helper_contract():
     assert night == next_poll_delay_minutes("nowcoder", 0) * 3
 
 
+def test_test_fakes_do_not_invent_service_methods():
+    """测试用的 fake 不得定义真实服务没有的方法。
+
+    真实事故（2026-09-27）：两个 fake 都定义了 next_poll_delay_minutes，而真实
+    SettlementService 没有该方法（它是模块级函数）→ main.py 写错调用点后
+    455 个用例仍然全绿，生产每 tick 崩了 9 小时。
+    """
+    from test_settle_gate import GateSettlement
+    from test_settlement_tick import FakeSettlement
+
+    for cls in (FakeSettlement, GateSettlement):
+        invented = sorted(
+            name
+            for name, value in vars(cls).items()
+            if not name.startswith("_")
+            and callable(value)
+            and not hasattr(SettlementService, name)
+        )
+        assert not invented, f"{cls.__name__} 定义了真实服务没有的方法：{invented}"
+
+
 def test_gate_wait_path_with_real_service():
     """用真实 SettlementService 走一遍"未就绪 → 等待"分支（生产在此崩过）。"""
     m = _load_main_module()

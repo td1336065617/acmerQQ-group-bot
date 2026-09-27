@@ -41,9 +41,6 @@ class GateSettlement(FakeSettlement):
         self.probe_calls += 1
         return self._samples[index]
 
-    def next_poll_delay_minutes(self, platform, attempts, **kwargs):
-        return 5.0
-
 
 
 
@@ -252,4 +249,115 @@ def test_abandon_notice_is_per_group():
         assert len([t for _, t in bot._sent if "结算异常" in t]) == 2
 
     asyncio.run(scenario())
+
+
+
+# ---------------------------------------------------------------------------
+# P2：READY 复评节流（1.20.6）
+# ---------------------------------------------------------------------------
+
+GATE_SETTINGS = {
+    "settle_strict_enabled": True,
+    "settle_stable_samples": 2,
+    "settle_atcoder_min_age_minutes": 45,
+    "settle_night_scale": 2,
+    "settle_cf_max_wait_minutes": 1440,
+}
+
+
+def _gate_once(bot, *, hours_ago=0.5, marker_key="settle_g1_codeforces_2264", settings=None):
+    from datetime import datetime, timezone
+
+    st = dict(GATE_SETTINGS)
+    st.update(settings or {})
+    moment = datetime.now(timezone.utc)
+    return asyncio.run(
+        bot._settle_gate(
+            GROUP, "codeforces", _contest(hours_ago=hours_ago), st, moment,
+            marker_key=marker_key,
+        )
+    )
+
+
+def test_ready_state_defers_recheck():
+    """就绪后短时间内再评估：直接 wait，不再探测，并排好 30 分钟复评。"""
+    m = _load_main_module()
+    settlement = GateSettlement(
+        [Sample(rows=7474, fingerprint="rows:7474:FINISHED", hint_ready=True)]
+    )
+    bot = _bot(m, settlement, settings={"settle_strict_enabled": True})
+    verdict1, poll_key = _gate_once(bot)
+    verdict2, _ = _gate_once(bot)
+    assert verdict1 == "ready"
+    assert verdict2 == "wait"           # 复评间隔内不再探测
+    assert settlement.probe_calls == 1  # 关键：没有第二次抓榜单
+    state = bot._kv[poll_key]
+    assert state["ready_logged"] is True
+    assert state["next_poll_at"] - state["ready_at"] == 30 * 60
+
+
+def test_ready_log_emitted_once(caplog):
+    """「已结算完成」只在状态迁移时打一次，复评不再刷屏。"""
+    import logging
+
+    m = _load_main_module()
+    settlement = GateSettlement(
+        [Sample(rows=7474, fingerprint="rows:7474:FINISHED", hint_ready=True)]
+    )
+    bot = _bot(m, settlement, settings={"settle_strict_enabled": True})
+    with caplog.at_level(logging.INFO):
+        _gate_once(bot)
+        _gate_once(bot)
+    hits = [r for r in caplog.records if "已结算完成" in r.getMessage()]
+    assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# P3：无人参赛静默跳过（1.20.6）
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_without_participants_is_silent():
+    """全场 0 行（本群无人参赛）+ 超时：不发提示、不记失败，只落 skipped 标记。"""
+    m = _load_main_module()
+    settlement = GateSettlement([Sample(rows=0, fingerprint="rows:0:none", hint_ready=False)])
+    bot = _bot(m, settlement, settings={"settle_strict_enabled": True})
+    verdict, poll_key = _gate_once(bot, hours_ago=30.0)
+    assert verdict == "abandoned"
+    state = bot._kv[poll_key]
+    assert state["state"] == "ABANDONED"
+    assert state["abandoned_reason"] == "no-participants"
+    assert bot._sent == []                                   # 群内没有任何提示
+    assert not [i for i in bot._kv.get("push_log", []) if i.get("kind") == "settle"]
+    marker = bot._kv["settle_g1_codeforces_2264"]
+    assert marker["skipped"] is True and marker["members"]   # 带成员指纹，便于日后补评估
+
+
+def test_timeout_with_current_rows_still_notifies():
+    """回归：首轮评估就超时时，本次样本的 rows 必须参与判定（否则漏发真数据）。"""
+    m = _load_main_module()
+    settlement = GateSettlement([Sample(rows=5, fingerprint="rows:5:real", hint_ready=False)])
+    bot = _bot(m, settlement, settings={"settle_strict_enabled": True})
+    verdict, poll_key = _gate_once(bot, hours_ago=30.0)
+    assert verdict == "abandoned"
+    assert [t for _, t in bot._sent if "结算异常" in t]
+    assert bot._kv[poll_key]["abandoned_reason"] != "no-participants"
+    assert bot._kv["push_log"][-1]["ok"] is False
+
+
+def test_timeout_history_zero_but_current_rows_notifies():
+    """历史样本全 0、本次有行：仍按"有数据"处理（发提示）。"""
+    m = _load_main_module()
+    settlement = GateSettlement([Sample(rows=7, fingerprint="rows:7:real", hint_ready=False)])
+    bot = _bot(m, settlement, settings={"settle_strict_enabled": True})
+    bot._kv["settle_poll_codeforces_2264"] = {
+        "state": "POLLING",
+        "attempts": 2,
+        "samples": [{"ts": 1, "rows": 0, "fp": "rows:0"}],
+        "next_poll_at": 0,
+    }
+    verdict, poll_key = _gate_once(bot, hours_ago=30.0)
+    assert verdict == "abandoned"
+    assert [t for _, t in bot._sent if "结算异常" in t]
+    assert bot._kv[poll_key]["abandoned_reason"] != "no-participants"
 

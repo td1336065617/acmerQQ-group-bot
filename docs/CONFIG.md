@@ -19,6 +19,8 @@
 | `settle_poll_<平台>_<contestID>` | 结算轮询状态（CF/AtCoder 跨群共享）：`{state, attempts, samples, next_poll_at, stable_count, stable_since, ready_at, elapsed_minutes, abandoned_reason}` |
 | `settle_poll_<群ID>_<平台>_<contestID>` | 同上，但用于牛客/洛谷（样本依赖本群成员，必须按群隔离） |
 | `settle_notice_<群ID>_<平台>_<contestID>` | 超时异常提示是否已发过（每群每场一次） |
+
+> **关于 READY 复评**：判定"已结算完成"（state=READY）但本群没有内容可推时（例如无人参赛），轮询状态里的 `next_poll_at` 会被设为 30 分钟后（常量 `READY_RECHECK_MINUTES`），避免每 30 秒重复抓榜单、刷日志；同一状态只在首次打一条 INFO。
 | `weekly_<群ID>_<YYYY-Www>` | 训练周报是否已推送（每群每 ISO 周一次） |
 | `signup_<contestID>_<24h\|2h>` | 报名截止提醒是否已推送（全局，不按群） |
 | `at_all_blocked_until_<群ID>` | @全体失败后的冷却截止时间 |

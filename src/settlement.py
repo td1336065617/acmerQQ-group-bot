@@ -112,6 +112,10 @@ MAX_PROBES_PER_TICK = 3
 SETTLE_PROBE_TTL = 30
 #: 采样轨迹保留条数（防 KV 键膨胀）
 POLL_SAMPLE_KEEP = 20
+#: READY 状态的复评间隔（分钟）：已就绪但本群没内容可推（例如无人参赛）时，
+#: 不再每 tick 复评——否则会重复探测（CF 榜单 307KB/次、约 36MB/小时）并刷日志
+#: （生产实测 2026-09-27：12:00-22:18 产生 1617 行「已结算完成」）。
+READY_RECHECK_MINUTES = 30
 #: 结算候选窗口（小时）：严格门禁下按平台区分
 SETTLE_WINDOW_HOURS: Dict[str, float] = {
     "codeforces": 24.0,

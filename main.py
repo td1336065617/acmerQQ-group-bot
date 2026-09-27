@@ -46,6 +46,7 @@ from .platform_compat import (
 from .src.settlement import (
     MAX_PROBES_PER_TICK as SETTLE_MAX_PROBES_PER_TICK,
     MAX_WAIT_MINUTES as SETTLE_MAX_WAIT_MINUTES,
+    READY_RECHECK_MINUTES as SETTLE_READY_RECHECK_MINUTES,
     POLL_SAMPLE_KEEP,
     SETTLE_PLATFORMS,
     STABLE_SPAN_MINUTES as SETTLE_STABLE_SPAN_MINUTES,
@@ -4376,7 +4377,12 @@ class AcmerGroupBot(Star):
                     strict_poll_key = ""
                     if strict_mode:
                         verdict, strict_poll_key = await self._settle_gate(
-                            group, platform, contest, settings, moment
+                            group,
+                            platform,
+                            contest,
+                            settings,
+                            moment,
+                            marker_key=key,
                         )
                         if verdict != "ready":
                             continue  # wait / abandoned：本 tick 不推送
@@ -4434,8 +4440,13 @@ class AcmerGroupBot(Star):
         contest,
         settings: dict,
         moment: datetime,
+        *,
+        marker_key: str = "",
     ) -> Tuple[str, str]:
         """严格完整门禁：返回 (verdict, poll_key)，verdict ∈ ready/wait/abandoned。
+
+        marker_key：本群本场的幂等键（调用方已算好）。"无人参赛"静默跳过时
+        用它落一条 skipped 标记，避免后续 tick 再评估。
 
         - 就绪判据：CF phase=FINISHED 且无 PRELIMINARY；其余平台"稳定窗口 + 最小等待"
         - 未就绪：写轮询状态并排队下次探测（间隔按平台序列推进，夜间放大）
@@ -4492,12 +4503,37 @@ class AcmerGroupBot(Star):
         )
         max_wait = self._settle_max_wait_minutes(platform, settings)
         if not ready and elapsed_minutes > max_wait:
+            # 超时也分两种：全场没有本群成员（无人参赛）→ 静默跳过；
+            # 有数据但一直没稳定 → 才发"结算异常"提示。
+            # 注意 samples 是在本分支之后才 append 本次样本的，这里必须把
+            # 本次样本的 rows 一起算进来，否则"首轮评估就超时"会被误判成无人参赛。
+            rows_seen = [
+                int(item.get("rows") or 0) for item in (state.get("samples") or [])
+            ]
+            rows_seen.append(int(getattr(sample, "rows", 0) or 0))
+            silent = not any(rows_seen)
             state.update(
                 state="ABANDONED",
-                abandoned_reason=reason,
+                abandoned_reason=("no-participants" if silent else reason),
                 elapsed_minutes=elapsed_minutes,
             )
             await self.put_kv_data(poll_key, state)
+            if silent:
+                if marker_key:
+                    await self.put_kv_data(
+                        marker_key,
+                        {
+                            "skipped": True,
+                            "members": self._members_fingerprint(members),
+                            "ts": time.time(),
+                        },
+                    )
+                logger.info(
+                    "赛果门禁：%s %s 本群无人参赛，静默跳过（不推送、不提示）",
+                    platform,
+                    contest.contest_id,
+                )
+                return "abandoned", poll_key
             await self._settle_abandon_notice(group, platform, contest, settings)
             await self._log_push(group.group_id, "settle", False, "数据未结算完成")
             logger.warning(
@@ -4541,18 +4577,32 @@ class AcmerGroupBot(Star):
                 delay,
             )
             return "wait", poll_key
-        state.update(state="READY", ready_at=now_ts, elapsed_minutes=elapsed_minutes)
+        # 已就绪但本轮没推出去（例如本群无人参赛）时不要每 tick 复评：
+        # 用 next_poll_at 把它降为"每 30 分钟复评一次"（既有早退逻辑自动生效）。
+        logged_before = bool(state.get("ready_logged"))
+        state.update(
+            state="READY",
+            ready_at=now_ts,
+            elapsed_minutes=elapsed_minutes,
+            ready_logged=True,
+            next_poll_at=now_ts + SETTLE_READY_RECHECK_MINUTES * 60.0,
+        )
         await self.put_kv_data(poll_key, state)
         # 判定用的这份数据直接进 final_cache：省一次重复抓取，且卡片与判定同源
         self.settlement.adopt_probe(platform, contest.contest_id, sample)
-        logger.info(
-            "赛果门禁：%s %s 已结算完成（%s；样本 %s 行；T+%.0f 分钟）",
-            platform,
-            contest.contest_id,
-            reason,
-            sample.rows,
-            elapsed_minutes,
-        )
+        if logged_before:
+            logger.debug(
+                "赛果门禁：%s %s 复评仍为已结算完成", platform, contest.contest_id
+            )
+        else:
+            logger.info(
+                "赛果门禁：%s %s 已结算完成（%s；样本 %s 行；T+%.0f 分钟）",
+                platform,
+                contest.contest_id,
+                reason,
+                sample.rows,
+                elapsed_minutes,
+            )
         return "ready", poll_key
 
     async def _settle_mark_pushed(self, poll_key: str) -> None:
