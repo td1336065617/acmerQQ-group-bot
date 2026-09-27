@@ -328,8 +328,9 @@ class SettlementService:
         #: 原始数据缓存（榜单等与"哪些群"无关的数据，跨群共享，避免每个群重复拉取）。
         #: 严格门禁下它只服务"已就绪"的最终数据；探测样本必须绕过它（见 probe()）。
         self._raw_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
-        #: 探测短缓存（30 秒）：只用于同一 tick 内多群复用，绝不参与完整性判定
-        self._probe_cache: Dict[Tuple[str, str], Tuple[float, Sample]] = {}
+        #: 探测短缓存（30 秒）：只用于同一 tick 内多群复用，绝不参与完整性判定。
+        #: 键含作用域：牛客/洛谷的样本依赖"本群成员"，必须按群隔离，否则会串群。
+        self._probe_cache: Dict[Tuple[str, str, str], Tuple[float, Sample]] = {}
         self._nowcoder_history: Dict[str, Tuple[float, List[dict]]] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
         #: {(platform, contest_id): {...}}：赛程接口只给未开始的比赛，
@@ -585,15 +586,17 @@ class SettlementService:
         members: Sequence[Tuple[str, str, str]],
         *,
         force: bool = False,
+        group_id: Optional[str] = None,
     ) -> Sample:
         """探测一次"平台侧是否已结算完成"（严格完整门禁的输入）。
 
         同一 tick 内多群复用 30 秒的 probe_cache；探测路径**不读 final_cache**，
-        否则重测前后的数据会互相污染。
+        否则重测前后的数据会互相污染。牛客/洛谷的样本与"本群成员"有关，按群隔离。
         """
         platform = str(platform)
         cid = str(getattr(contest, "contest_id", "") or "")
-        key = (platform, cid)
+        scope = str(group_id or "") if platform in ("nowcoder", "luogu") else ""
+        key = (platform, cid, scope)
         cached = self._probe_cache.get(key)
         if cached is not None and not force and time.time() - cached[0] < SETTLE_PROBE_TTL:
             return cached[1]
@@ -618,7 +621,8 @@ class SettlementService:
             if not index and not total_rows:
                 return Sample()
             rows = int(total_rows or len(index))
-            return Sample(rows=rows, fingerprint=f"rows:{rows}")
+            # payload 留作 final_cache 复用：避免"判定用一份、渲染再抓一份"
+            return Sample(rows=rows, fingerprint=f"rows:{rows}", payload=(index, total_rows))
         if platform == "codeforces":
             data = await self._cf_standings_meta(cid, fresh=True)
             if not data["rows"]:
@@ -642,6 +646,23 @@ class SettlementService:
         ) or [str(result.extra_note or "")]
         digest = hashlib.sha1("|".join(keys).encode("utf-8")).hexdigest()[:12]
         return Sample(rows=len(keys), fingerprint=f"set:{digest}", payload=result)
+
+    def adopt_probe(self, platform: str, contest_id: str, sample: Sample) -> None:
+        """就绪后把探测拿到的数据写进 final_cache。
+
+        好处：① 省掉一次重复抓取（AtCoder ~460KB / CF ~307KB）；
+        ② 保证"被判定为完整的那份数据"就是渲染用的那份，不会中途换成新样本。
+        """
+        payload = getattr(sample, "payload", None)
+        if payload is None:
+            return
+        cid = str(contest_id)
+        if platform == "atcoder":
+            index, total_rows = payload
+            if index:
+                self._raw_cache[("atcoder", cid)] = (time.time(), (index, total_rows))
+        elif platform == "codeforces":
+            self._raw_cache[("codeforces", cid)] = (time.time(), payload)
 
     # ------------------------------------------------------------------
     # Codeforces

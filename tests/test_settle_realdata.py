@@ -164,3 +164,36 @@ def test_real_fixture_atcoder_includes_unrated():
     assert by_handle["moran36"].rank == 782
     assert by_handle["StarSilk"].user_count == len(rows)
     assert "ghost" not in by_handle
+
+
+def test_probe_payload_is_reused_by_collect():
+    """probe → adopt_probe → collect 不应重复抓取（且卡片与判定同源）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.settlement import SettlementService
+
+    class Fetcher:
+        def __init__(self, rows) -> None:
+            self.rows = rows
+            self.calls = 0
+
+        async def _fetch_json(self, url, timeout=None):
+            self.calls += 1
+            return self.rows
+
+    rows = _load("atcoder_abc477_full.json.gz")
+    fetcher = Fetcher(rows)
+    service = SettlementService(fetcher)
+    contest = SimpleNamespace(contest_id="abc477", name="ABC477")
+    sample = asyncio.run(service.probe("atcoder", contest, []))
+    assert sample.rows == len(rows)
+    assert fetcher.calls == 1
+    service.adopt_probe("atcoder", "abc477", sample)
+    result = asyncio.run(
+        service.collect("atcoder", contest, [("u1", "StarSilk", "StarSilk")])
+    )
+    assert result is not None
+    assert result.rows[0].rank == 4102
+    assert fetcher.calls == 1, "就绪后 collect 复用了探测数据，不应再抓一次"
+

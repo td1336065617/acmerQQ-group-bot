@@ -39,6 +39,7 @@ from .src.plugin_paths import migrate_known_caches, plugin_cache_dir
 from .src.rank_service import RankService
 from .src.group_names import event_group_name, fetch_group_name
 from .src.settlement import (
+    MAX_PROBES_PER_TICK as SETTLE_MAX_PROBES_PER_TICK,
     MAX_WAIT_MINUTES as SETTLE_MAX_WAIT_MINUTES,
     POLL_SAMPLE_KEEP,
     SETTLE_PLATFORMS,
@@ -4197,12 +4198,12 @@ class AcmerGroupBot(Star):
         return "|".join(handles)
 
     @staticmethod
-    def _settlement_text(result) -> str:
+    def _settlement_text(result, unofficial_label: str = "打星") -> str:
         """赛果卡的纯文本兜底（渲染不可用时使用）。"""
         lines = [f"🏁 {result.contest_name} 赛果"]
         for row in result.rows:
             if getattr(row, "unofficial", False):
-                rank = "打星"
+                rank = str(unofficial_label or "打星")
             else:
                 rank = f"#{row.rank}" if row.rank else "—"
             solved = (
@@ -4228,6 +4229,8 @@ class AcmerGroupBot(Star):
         delay_minutes = int(settings.get("settle_delay_minutes") or 0)
         min_participants = int(settings.get("settle_min_participants") or 1)
         show_unsolved = bool(settings.get("settle_show_unsolved", True))
+        # 每 tick 的探测预算：防止多场同时轮询打满网络（设计 §4）
+        self._settle_probe_budget = SETTLE_MAX_PROBES_PER_TICK
         pushed = 0
         for group in await self.get_groups():
             if not group.enabled or not getattr(
@@ -4357,15 +4360,24 @@ class AcmerGroupBot(Star):
         if current_state == "PUSHED":
             return "ready", poll_key
         if current_state == "ABANDONED":
+            # poll 状态跨群共享（CF/AtCoder）：其他群本轮也要各自收到一次提示
+            await self._settle_abandon_notice(group, platform, contest, settings)
             return "abandoned", poll_key
         try:
             if float(state.get("next_poll_at") or 0) > now_ts:
                 return "wait", poll_key
         except (TypeError, ValueError):
             pass
+        budget = getattr(self, "_settle_probe_budget", None)
+        if budget is not None and budget <= 0:
+            return "wait", poll_key  # 本 tick 预算用尽：留到下个 tick
+        if budget is not None:
+            self._settle_probe_budget = budget - 1
         members = await self._settlement_members(group.group_id, platform)
         try:
-            sample = await self.settlement.probe(platform, contest, members)
+            sample = await self.settlement.probe(
+                platform, contest, members, group_id=group.group_id
+            )
         except Exception as exc:  # noqa: BLE001 - 探测失败等同于"未就绪"
             logger.warning(
                 "赛果门禁探测失败（%s %s）：%s", platform, contest.contest_id, exc
@@ -4396,8 +4408,7 @@ class AcmerGroupBot(Star):
                 elapsed_minutes=elapsed_minutes,
             )
             await self.put_kv_data(poll_key, state)
-            if settings.get("settle_abandon_notice", True):
-                await self._notify_settle_abandoned(group, contest)
+            await self._settle_abandon_notice(group, platform, contest, settings)
             await self._log_push(group.group_id, "settle", False, "数据未结算完成")
             logger.warning(
                 "群 %s 的 %s %s 未在 %d 分钟内结算完成，本次不推送"
@@ -4414,7 +4425,10 @@ class AcmerGroupBot(Star):
         samples.append(sample.brief())
         state["samples"] = samples[-POLL_SAMPLE_KEEP:]
         if not ready:
-            night = 0 <= getattr(moment, "hour", 12) < 7
+            try:
+                night = 0 <= moment.astimezone(CN_TZ).hour < 7
+            except Exception:  # noqa: BLE001 - 时区异常按原值兜底
+                night = 0 <= getattr(moment, "hour", 12) < 7
             span = SETTLE_STABLE_SPAN_MINUTES.get(str(platform)) or None
             delay = self.settlement.next_poll_delay_minutes(
                 platform,
@@ -4439,6 +4453,8 @@ class AcmerGroupBot(Star):
             return "wait", poll_key
         state.update(state="READY", ready_at=now_ts, elapsed_minutes=elapsed_minutes)
         await self.put_kv_data(poll_key, state)
+        # 判定用的这份数据直接进 final_cache：省一次重复抓取，且卡片与判定同源
+        self.settlement.adopt_probe(platform, contest.contest_id, sample)
         logger.info(
             "赛果门禁：%s %s 已结算完成（%s；样本 %s 行；T+%.0f 分钟）",
             platform,
@@ -4456,8 +4472,25 @@ class AcmerGroupBot(Star):
             state["state"] = "PUSHED"
             await self.put_kv_data(poll_key, state)
 
+    async def _settle_abandon_notice(
+        self, group: GroupConfig, platform: str, contest, settings: dict
+    ) -> None:
+        """每群每场只提示一次。
+
+        poll 状态是跨群共享的（CF/AtCoder），不能用它判断"这个群提示过了"，
+        因此单独用 per-group 标记键去重。
+        """
+        notice_key = (
+            f"settle_notice_{group.group_id}_{platform}_{contest.contest_id}"
+        )
+        if await self.get_kv_data(notice_key, False):
+            return
+        await self.put_kv_data(notice_key, True)
+        if settings.get("settle_abandon_notice", True):
+            await self._notify_settle_abandoned(group, contest)
+
     async def _notify_settle_abandoned(self, group: GroupConfig, contest) -> None:
-        """超时未结算：给群发一句纯文本提示（每群每场一次）。"""
+        """超时未结算：给群发一句纯文本提示。"""
         name = str(getattr(contest, "name", "") or getattr(contest, "contest_id", ""))
         text = f"【{name}】本场数据结算异常，本次不推送。"
         try:
@@ -4581,7 +4614,8 @@ class AcmerGroupBot(Star):
             ok = await self._send_group_image(group, image_path, caption=title)
         else:
             ok = await self.send_notification(
-                group, self._settlement_text(result)
+                group,
+                self._settlement_text(result, unofficial_label=unofficial_label),
             )
         if not ok:
             logger.warning(

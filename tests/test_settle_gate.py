@@ -213,3 +213,43 @@ def test_replay_real_abc477_through_tick():
 
     asyncio.run(scenario())
 
+
+
+def test_abandon_notice_is_per_group():
+    """poll 状态跨群共享：同一场超时后，每个群各收到一次提示（且仅一次）。"""
+    from src.models import GroupConfig
+
+    async def scenario():
+        m = _load_main_module()
+        settlement = GateSettlement(
+            [Sample(rows=7474, fingerprint="rows:7474:SYSTEM_TEST", hint_ready=False)]
+        )
+        groups = [
+            GroupConfig(group_id="g1", push_platforms=["codeforces"]),
+            GroupConfig(group_id="g2", push_platforms=["codeforces"]),
+        ]
+        bot = _build_bot(
+            m,
+            groups=groups,
+            contests={"codeforces": [_contest(hours_ago=2.0)]},
+            members={"g1": ["u1"], "g2": ["u2"]},
+            accounts={
+                "u1": {"codeforces": {"handle": "zhangsan", "display_name": "张三"}},
+                "u2": {"codeforces": {"handle": "lisi", "display_name": "李四"}},
+            },
+            settlement=settlement,
+            settings={
+                "settle_strict_enabled": True,
+                "settle_cf_max_wait_minutes": 60,
+            },
+        )
+        assert await bot.tick_settlements() == 0
+        noticed = sorted(gid for gid, text in bot._sent if "结算异常" in text)
+        assert noticed == ["g1", "g2"], noticed
+        assert bot._kv["settle_poll_codeforces_2264"]["state"] == "ABANDONED"
+        # 终态 + per-group 去重：再来一轮不重复提示
+        assert await bot.tick_settlements() == 0
+        assert len([t for _, t in bot._sent if "结算异常" in t]) == 2
+
+    asyncio.run(scenario())
+

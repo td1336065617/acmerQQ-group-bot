@@ -315,3 +315,54 @@ def test_probe_marks_cf_ready_only_when_finished():
     sample2 = asyncio.run(svc2.probe("codeforces", FakeContest(), []))
     assert sample2.hint_ready is True
 
+
+
+def test_probe_cache_is_scoped_for_member_dependent_platforms():
+    """牛客/洛谷的样本依赖本群成员：不同群的探测结果不得互相复用（回归：曾串群）。"""
+    import asyncio
+    import json as _json
+    from types import SimpleNamespace
+
+    from src.settlement import SettlementService
+
+    class NcFetcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def _fetch_text(self, url, headers=None, retries=2, timeout=10.0):
+            self.calls += 1
+            return _json.dumps(
+                {
+                    "data": {
+                        "dataList": [
+                            {
+                                "contestId": "140737",
+                                "rank": 7,
+                                "acceptedCount": 3,
+                                "problemCount": 6,
+                                "teamName": "",
+                                "isTeamSignUp": False,
+                            }
+                        ],
+                        "pageInfo": {"pageCount": 1},
+                    }
+                }
+            )
+
+    fetcher = NcFetcher()
+    service = SettlementService(fetcher)
+    contest = SimpleNamespace(contest_id="140737", url="", name="牛客周赛 Round 163")
+    sample_a = asyncio.run(
+        service.probe("nowcoder", contest, [("u1", "甲", "uid-a")], group_id="gA")
+    )
+    calls_after_a = fetcher.calls
+    sample_b = asyncio.run(
+        service.probe("nowcoder", contest, [("u2", "乙", "uid-b")], group_id="gB")
+    )
+    assert sample_a.fingerprint != sample_b.fingerprint, "不同群的样本被错误复用"
+    again_a = asyncio.run(
+        service.probe("nowcoder", contest, [("u1", "甲", "uid-a")], group_id="gA")
+    )
+    assert again_a.fingerprint == sample_a.fingerprint
+    assert fetcher.calls == calls_after_a + 1, "同群重复探测应命中 30 秒短缓存"
+

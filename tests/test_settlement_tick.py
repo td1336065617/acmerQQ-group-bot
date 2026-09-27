@@ -66,6 +66,9 @@ class FakeSettlement:
     def next_poll_delay_minutes(self, platform, attempts, **kwargs):
         return self._real.next_poll_delay_minutes(platform, attempts, **kwargs)
 
+    def adopt_probe(self, platform, contest_id, sample):
+        return None  # 假实现没有真实缓存，直接忽略
+
 
     def remember_contests(self, platform, contests, **kwargs):
         return self._real.remember_contests(platform, contests, **kwargs)
