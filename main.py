@@ -4173,10 +4173,15 @@ class AcmerGroupBot(Star):
                 return False
             return True
         except Exception as exc:  # noqa: BLE001 - 发送失败按 False 处理
-            err = push_health.classify(
-                exc,
-                platform_compat.channel_of_platform_id(self.context, platform_id or ""),
-            )
+            # 复审加固：通道查询本身也可能抛（context 异常）——分类绝不能反过来
+            # 破坏发送失败路径，查不到就按宽松通道继续分类。
+            try:
+                channel = platform_compat.channel_of_platform_id(
+                    self.context, platform_id or ""
+                )
+            except Exception:  # noqa: BLE001
+                channel = ""
+            err = push_health.classify(exc, channel)
             logger.error(
                 "发送到群 %s 失败: %s（分类 %s，匹配 %s）",
                 group_id,
@@ -4425,10 +4430,13 @@ class AcmerGroupBot(Star):
         try:
             ok = await self.context.send_message(session, chain)
         except Exception as exc:  # noqa: BLE001 - 图片推送失败由调用方决定后续
-            err = push_health.classify(
-                exc,
-                platform_compat.channel_of_platform_id(self.context, group.platform_id),
-            )
+            try:
+                channel = platform_compat.channel_of_platform_id(
+                    self.context, group.platform_id
+                )
+            except Exception:  # noqa: BLE001
+                channel = ""
+            err = push_health.classify(exc, channel)
             logger.error(
                 "群 %s 图片推送异常（%s）：%s（分类 %s，匹配 %s）",
                 group.group_id,

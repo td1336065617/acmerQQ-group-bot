@@ -855,7 +855,8 @@
       var err = health.last_error ? ('；最近错误：' + health.last_error) : '';
       var tip = reason + '，' + cnt + '，' + untilText + err +
         '。建议：确认机器人是否仍在群内、该群是否授予主动消息权限；任意一次推送成功会自动解除（也可用「测试推送」验证）。' + hist;
-      var threshold = (state.settings && state.settings.push_denied_threshold) || 5;
+      var cfgSettings = (state.config && state.config.settings) || {};
+      var threshold = cfgSettings.push_denied_threshold || 5;
       if ((health.count || 0) >= threshold) return '<span class="badge err" title="' + esc(tip) + '">推送被拒</span>';
       return '<span class="badge warn" title="' + esc(tip + '（尚未达到告警阈值，持续观察中）') + '">推送被拒</span>';
     }
