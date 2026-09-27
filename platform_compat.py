@@ -147,6 +147,17 @@ def warm_scene(context, group_id: str, platform_id: str) -> bool:
     return False
 
 
+def has_official_instance(context) -> bool:
+    """是否已存在官方族平台实例（用于判断"平台适配器是否加载完成"）。"""
+    for inst in _insts(context):
+        meta = _meta(inst)
+        if meta is None:
+            continue
+        if channel_by_name(str(getattr(meta, "name", "") or "")) == "official":
+            return True
+    return False
+
+
 def at_all_prefix(channel: str) -> list:
     """@全体成员前缀：OneBot 用 At(all)，官方族沿用文本标记。"""
     if channel == "onebot":

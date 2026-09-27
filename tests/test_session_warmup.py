@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -105,8 +106,72 @@ def test_ensure_session_scenes_retries_until_platform_loaded():
     ]
     bot = _bot_with([], groups)  # 平台实例还没加载
     assert asyncio.run(bot.ensure_session_scenes()) == 0
-    assert getattr(bot, "_session_warm_done", False) is False  # 未放弃，下个 tick 继续
+    # 未完成 → 不写入"已预热时间"，下个 tick 继续
+    assert float(getattr(bot, "_session_warm_at", 0.0) or 0.0) == 0.0
     official = FakeInst("爱莉希雅", "qq_official")
     bot.context = FakeContext([official])
     assert asyncio.run(bot.ensure_session_scenes()) == 1
     assert official._session_scene == {"G1": "group"}
+    assert float(getattr(bot, "_session_warm_at", 0.0) or 0.0) > 0.0
+
+
+def test_ensure_session_scenes_skips_onebot_only_and_stops_retrying():
+    """纯 OneBot 部署：不做预热、直接收工，不空转重试。"""
+    calls = {"n": 0}
+
+    class CountingContext(FakeContext):
+        pass
+
+    bot = _bot_with([FakeInst("爱莉希雅2", "aiocqhttp")],
+                    [GroupConfig(group_id="100", platform_id="爱莉希雅2", umo="爱莉希雅2:GroupMessage:100")])
+    original_get_groups = bot.get_groups
+
+    async def counting_get_groups():
+        calls["n"] += 1
+        return await original_get_groups()
+
+    bot.get_groups = counting_get_groups
+    assert asyncio.run(bot.ensure_session_scenes()) == 0
+    assert float(getattr(bot, "_session_warm_at", 0.0) or 0.0) > 0.0  # 已完成本轮
+    first_calls = calls["n"]
+    assert asyncio.run(bot.ensure_session_scenes()) == 0
+    assert calls["n"] == first_calls  # 刷新间隔内不再扫描群
+
+
+def test_ensure_session_scenes_warns_when_platform_mismatch(caplog):
+    """官方实例在、但群配置的平台 ID 对不上：给出诊断日志而不是静默放弃。"""
+    import logging
+
+    bot = _bot_with(
+        [FakeInst("其它平台实例", "qq_official")],
+        [GroupConfig(group_id="G1", platform_id="爱莉希雅", umo="爱莉希雅:GroupMessage:G1")],
+    )
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(bot.ensure_session_scenes()) == 0
+    assert any("未能恢复" in rec.getMessage() for rec in caplog.records)
+
+
+def test_ensure_session_scenes_repeats_after_refresh_window():
+    official = FakeInst("爱莉希雅", "qq_official")
+    groups = [GroupConfig(group_id="G1", platform_id="爱莉希雅", umo="爱莉希雅:GroupMessage:G1")]
+    bot = _bot_with([official], groups)
+    assert asyncio.run(bot.ensure_session_scenes()) == 1
+    official._session_scene.clear()  # 模拟平台适配器被重建
+    assert asyncio.run(bot.ensure_session_scenes()) == 0        # 刷新间隔内不动
+    assert official._session_scene == {}
+    bot._session_warm_at = time.time() - 10 ** 4                 # 超过刷新间隔
+    assert asyncio.run(bot.ensure_session_scenes()) == 1
+    assert official._session_scene == {"G1": "group"}
+
+
+def test_ensure_session_scenes_gives_up_with_warning(caplog):
+    import logging
+
+    bot = _bot_with(
+        [FakeInst("其它实例", "qq_official")],
+        [GroupConfig(group_id="G1", platform_id="爱莉希雅", umo="u")],
+    )
+    bot._session_warm_tries = 10 ** 6  # 已超过尝试上限
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(bot.ensure_session_scenes()) == 0
+    assert any("未能完成" in rec.getMessage() for rec in caplog.records)

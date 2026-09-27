@@ -38,7 +38,11 @@ from .src.contest_fetcher import (
 from .src.plugin_paths import migrate_known_caches, plugin_cache_dir
 from .src.rank_service import RankService
 from .src.group_names import event_group_name, fetch_group_name
-from .platform_compat import warm_scene as warm_group_scene
+from .platform_compat import (
+    channel_of_platform_id as platform_channel_of,
+    has_official_instance,
+    warm_scene as warm_group_scene,
+)
 from .src.settlement import (
     MAX_PROBES_PER_TICK as SETTLE_MAX_PROBES_PER_TICK,
     MAX_WAIT_MINUTES as SETTLE_MAX_WAIT_MINUTES,
@@ -185,6 +189,8 @@ PUSH_FAIL_COOLDOWN_SECONDS = 900
 WARN_THROTTLE_SECONDS = 600
 #: 会话场景预热最多尝试的 tick 次数（每 tick 30 秒，20 次≈10 分钟）
 SESSION_WARM_MAX_TRIES = 20
+#: 预热刷新间隔：进程内定期重补一次场景（防平台适配器被重建后再次失联）
+SESSION_WARM_REFRESH_SECONDS = 3600
 PUSH_LOG_MAX = 200
 # 「立即试跑」支持的类型（早报 / 训练周报 / 赛后赛果 / 报名提醒）。
 RUN_NOW_KINDS = ("morning", "weekly", "settle", "signup")
@@ -3608,18 +3614,25 @@ class AcmerGroupBot(Star):
         必须由群内发消息才能恢复；本方法用配置里保存的群号直接补写，
         避免重启后一群静默失联。仅处理"曾与机器人交互过"（有 umo）的群。
         """
-        if getattr(self, "_session_warm_done", False):
+        now = time.time()
+        last_at = float(getattr(self, "_session_warm_at", 0.0) or 0.0)
+        if last_at and now - last_at < SESSION_WARM_REFRESH_SECONDS:
             return 0
         try:
             settings = await self.get_settings()
         except Exception:  # noqa: BLE001 - 读设置失败时保守跳过
             return 0
         if not settings.get("session_warmup_enabled", True):
-            self._session_warm_done = True
+            self._session_warm_at = now
             return 0
         tries = int(getattr(self, "_session_warm_tries", 0) or 0)
         if tries >= SESSION_WARM_MAX_TRIES:
-            self._session_warm_done = True
+            self._session_warm_at = now
+            self._session_warm_tries = 0
+            logger.warning(
+                "会话场景预热未能完成（尝试 %d 次仍失败）：相关群在收到消息前无法主动推送",
+                tries,
+            )
             return 0
         self._session_warm_tries = tries + 1
         warmed = 0
@@ -3629,6 +3642,11 @@ class AcmerGroupBot(Star):
                 continue
             if not str(group.umo or "").strip():
                 continue  # 从未交互过的群：不预热
+            # OneBot 无会话限制：直接跳过（不计 pending）。
+            # 注意：重启初期平台实例还没加载，channel 会解析成空串——
+            # 那种情况必须算作 pending 并下个 tick 重试，不能跳过。
+            if platform_channel_of(self.context, group.platform_id or "") == "onebot":
+                continue
             if warm_group_scene(
                 self.context, group.group_id, group.platform_id or ""
             ):
@@ -3640,9 +3658,16 @@ class AcmerGroupBot(Star):
                 "会话场景预热：已恢复 %d 个群的主动推送会话（官方通道，重启后无需群友发言）",
                 warmed,
             )
-        if warmed == 0 and pending > 0:
-            return 0  # 官方平台实例还没加载完 → 下个 tick 继续尝试
-        self._session_warm_done = True
+        if pending and not has_official_instance(self.context):
+            return 0  # 官方平台适配器还没加载完 → 下个 tick 继续尝试
+        self._session_warm_at = now
+        self._session_warm_tries = 0
+        if pending:
+            logger.warning(
+                "会话场景预热：%d 个官方群未能恢复（平台实例或群号不匹配），"
+                "这些群仍需群内发一条消息才能主动推送",
+                pending,
+            )
         return warmed
 
     async def _push_retry_allowed(self, kind: str, key: str) -> bool:
