@@ -17,6 +17,8 @@ from typing import Any, Dict, Tuple
 #: 连续被拒 1/2/3/4+ 次的暂停时长（分钟）
 DENIED_BACKOFF_MINUTES: Tuple[int, ...] = (30, 360, 720, 1440)
 HEALTH_TTL_DAYS = 90
+#: 进程内健康状态缓存时长（秒）：与群配置缓存同策略，防读放大
+HEALTH_CACHE_TTL_SECONDS = 30
 BLOCKED_MARKER_TTL_HOURS = 72
 LAST_ERROR_MAX_CHARS = 120
 SAMPLE_MAX_CHARS = 200

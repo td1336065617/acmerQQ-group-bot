@@ -56,6 +56,7 @@ from .src.settlement import (
     new_poll_state,
     poll_key as settle_poll_key,
 )
+from .src import push_health
 from .src.problem_service import ProblemService, weak_tags_from_analysis
 from .src.account_cards import (
     SETTLE_CARD_MAX_ROWS,
@@ -187,6 +188,9 @@ PUSH_LOG_KEY = "push_log"
 #: 推送失败退避：同一目标连续失败到该次数后进入冷却，避免掉线期间每轮重试（BUG-042）
 PUSH_FAIL_MAX_ATTEMPTS = 3
 PUSH_FAIL_COOLDOWN_SECONDS = 900
+#: blocked 标记清理年龄（秒）：必须小于结算最近记录保留期 48 小时，
+#: 否则键名不可知、永远清不掉（实现文档 §1.6，台账 M2.6）
+BLOCKED_PRUNE_AGE_SECONDS = 36 * 3600
 #: 同类告警的最小间隔（避免掉线时"会话未就绪"等日志刷屏）
 WARN_THROTTLE_SECONDS = 600
 #: 预览类路径（测试推送）只读缓存、绝不触网：
@@ -3735,6 +3739,152 @@ class AcmerGroupBot(Star):
             await self.put_kv_data(f"pushfail_{kind}_{key}", {})
         except Exception:  # noqa: BLE001 - 清理失败不影响发送
             pass
+
+
+    # ------------------------------------------------------------------
+    # 群推送健康状态（主动消息被拒的暂停与自愈；实现文档 §1.6 / §2，台账 M2）
+    # ------------------------------------------------------------------
+    def _health_cache_store(self) -> dict:
+        store = getattr(self, "_health_cache", None)
+        if store is None:
+            store = {}
+            self._health_cache = store
+        return store
+
+    def _cache_health(self, key: str, value) -> None:
+        """写入或清除状态后同步刷新进程缓存（否则会出现刚自愈却仍被跳过的假象）。"""
+        self._health_cache_store()[key] = (time.time(), value)
+
+    async def _health_of(self, group_id: str, platform_id: str) -> Optional[dict]:
+        """读群的推送健康状态：进程内 30 秒缓存；读失败返回 None（不阻塞发送）。"""
+        key = push_health.health_key(platform_id or "", str(group_id))
+        store = self._health_cache_store()
+        cached = store.get(key)
+        if cached is not None and time.time() - cached[0] < push_health.HEALTH_CACHE_TTL_SECONDS:
+            return cached[1] or None
+        value = None
+        try:
+            value = await self.get_kv_data(key, None)
+        except Exception:  # noqa: BLE001 - 状态读失败不能阻断推送
+            value = None
+        if not isinstance(value, dict):
+            value = None
+        store[key] = (time.time(), value)
+        return value
+
+    async def push_suspended(self, group: GroupConfig) -> bool:
+        """层 A 统一入口：该群是否处于暂停窗口（只读缓存，几乎零成本）。"""
+        health = await self._health_of(group.group_id, group.platform_id or "")
+        if not health:
+            return False
+        try:
+            return float(health.get("suspended_until") or 0) > time.time()
+        except (TypeError, ValueError):
+            return False
+
+    async def _note_push_denied(
+        self,
+        group: GroupConfig,
+        platform: str,
+        err: dict,
+        now: Optional[float] = None,
+    ) -> None:
+        """记一次权限类失败：写 push_health（含退避）并同步 pushfail 计数。
+
+        写前读改写并比对 last_at：若已有更晚的写入（并发或乱序）则丢弃本次。
+        """
+        moment = time.time() if now is None else now
+        key = push_health.health_key(group.platform_id or "", group.group_id)
+        current = None
+        try:
+            current = await self.get_kv_data(key, None)
+        except Exception:  # noqa: BLE001 - 状态读失败按首次处理
+            current = None
+        if not isinstance(current, dict):
+            current = {}
+        if float(current.get("last_at") or 0) > moment:
+            return  # 已有更晚的写入：丢弃本次，防乱序覆盖
+        count = int(current.get("count") or 0) + 1
+        kind = str(err.get("kind") or push_health.K_PERMISSION)
+        state = {
+            "state": "muted" if kind == push_health.K_MUTED else "denied",
+            "since": current.get("since") or moment,
+            "count": count,
+            "suspended_until": moment + push_health.next_suspend_minutes(count) * 60.0,
+            "probe_at": current.get("probe_at") or moment,
+            "success_at": current.get("success_at"),
+            "last_error_class": kind,
+            "last_error": (str(err.get("raw") or ""))[: push_health.LAST_ERROR_MAX_CHARS],
+            "last_at": moment,
+            "platform_id": str(group.platform_id or ""),
+        }
+        try:
+            await self.put_kv_data(key, state)
+        except Exception as exc:  # noqa: BLE001 - 写失败不能阻断发送
+            logger.warning("写群推送健康状态失败（%s）：%s", key, exc)
+        self._cache_health(key, state)
+        # pushfail 扩字段（仅计数与展示；权限类主要靠暂停闸门，不依赖它的 900 秒冷却）
+        fail_key = f"pushfail_group_{group.group_id}"
+        try:
+            info = await self.get_kv_data(fail_key, {}) or {}
+            if not isinstance(info, dict):
+                info = {}
+            info["n"] = int(info.get("n") or 0) + 1
+            info["ts"] = moment
+            info["error_class"] = kind
+            info["last_error"] = state["last_error"]
+            await self.put_kv_data(fail_key, info)
+        except Exception as exc:  # noqa: BLE001 - 计数写失败不影响主流程
+            logger.warning("写 pushfail 扩展字段失败（%s）：%s", group.group_id, exc)
+
+    async def _clear_push_health(self, group: GroupConfig) -> None:
+        """推送成功即自愈：删除健康状态键（AstrBot KV 提供 delete_kv_data）。"""
+        key = push_health.health_key(group.platform_id or "", group.group_id)
+        try:
+            await self.delete_kv_data(key)
+        except Exception as exc:  # noqa: BLE001 - 清理失败不影响发送
+            logger.warning("清除群推送健康状态失败（%s）：%s", key, exc)
+        self._cache_health(key, None)
+
+    async def _prune_blocked_markers(self) -> int:
+        """每日清理已出窗的 blocked 标记（实现文档 R26，台账 M2.6）。
+
+        只能按"结算最近比赛记录"里的平台与场次计算键名（否则键名不可知），
+        因此阈值 36 小时 < 记录保留期 48 小时，保证出窗前必然可达；
+        且先 get 确认存在 blocked 才 delete，绝不凭空造键。
+        """
+        try:
+            payloads = list(getattr(self.settlement, "_recent", {}).values())
+            groups = await self.get_groups()
+        except Exception as exc:  # noqa: BLE001 - 清理失败不影响任何推送
+            logger.warning("清理 blocked 标记前置读取失败：%s", exc)
+            return 0
+        now = time.time()
+        removed = 0
+        for group in groups:
+            for payload in payloads:
+                platform = str(payload.get("platform") or "")
+                cid = str(payload.get("contest_id") or "")
+                end_time = float(payload.get("end_time") or 0)
+                if not platform or not cid or not end_time:
+                    continue
+                if now - end_time <= BLOCKED_PRUNE_AGE_SECONDS:
+                    continue
+                key = f"settle_{group.group_id}_{platform}_{cid}"
+                try:
+                    marker = await self.get_kv_data(key, None)
+                    if isinstance(marker, dict) and marker.get("blocked"):
+                        await self.delete_kv_data(key)
+                        removed += 1
+                except Exception as exc:  # noqa: BLE001 - 单键失败不阻断
+                    logger.warning("清理 blocked 标记失败（%s）：%s", key, exc)
+        if removed:
+            logger.info(
+                "已清理 %d 个过期 blocked 标记（比赛出窗超 %d 小时）",
+                removed,
+                BLOCKED_PRUNE_AGE_SECONDS // 3600,
+            )
+        return removed
 
     async def send_notification(self, group: GroupConfig, text: str) -> bool:
         """发送通知；返回是否发送成功。@全体成员 开启且无权限时自动降级。"""
