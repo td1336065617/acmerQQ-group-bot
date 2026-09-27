@@ -189,6 +189,10 @@ PUSH_FAIL_MAX_ATTEMPTS = 3
 PUSH_FAIL_COOLDOWN_SECONDS = 900
 #: 同类告警的最小间隔（避免掉线时"会话未就绪"等日志刷屏）
 WARN_THROTTLE_SECONDS = 600
+#: 后台「测试推送」预览的整体超时与单平台超时（秒）：
+#: 网络慢时必须让预览尽快返回，否则表现为「点了没反应」（2026-09-27 实际故障）。
+TEST_PUSH_TOTAL_TIMEOUT = 12.0
+TEST_PUSH_PLATFORM_TIMEOUT = 6.0
 #: 会话场景预热最多尝试的 tick 次数（每 tick 30 秒，20 次≈10 分钟）
 SESSION_WARM_MAX_TRIES = 20
 #: 预热刷新间隔：进程内定期重补一次场景（防平台适配器被重建后再次失联）
@@ -5234,14 +5238,15 @@ class AcmerGroupBot(Star):
         与真实早报保持一致：末尾同样附加本周进步榜/退步榜，
         方便在 WebUI 里直接预览早报的完整形态。
         """
-        boards = ""
-        try:
-            boards = await self.build_weekly_boards_text(group)
-        except Exception:  # noqa: BLE001 - 预览周榜失败不影响测试推送
-            logger.warning("构建测试推送周榜失败", exc_info=True)
-            boards = ""
         parts: List[str] = []
-        morning = await self.build_morning_text(group)
+        # 预览有硬超时：网络慢（例如某个平台网关超时）时不能把后台请求挂住，
+        # 否则表现为「点测试推送没反应」（2026-09-27 实际故障）。
+        try:
+            morning = await asyncio.wait_for(
+                self.build_morning_text(group), TEST_PUSH_TOTAL_TIMEOUT
+            )
+        except Exception:  # noqa: BLE001 - 超时/抓取失败都降级到"最近一场"
+            morning = None
         if morning:
             parts.append(morning)
         else:
@@ -5250,9 +5255,10 @@ class AcmerGroupBot(Star):
                 p for p in settings["push_platforms"] if p in group.push_platforms
             ] or list(DEFAULT_PLATFORMS)
             best = None
-            for platform in platforms:
-                contests, err = await self.fetcher.fetch_platform(platform)
-                if err or not contests:
+            timed_out = False
+            for platform, contests, err in await self._preview_contests(platforms):
+                if err:
+                    timed_out = timed_out or ("超时" in str(err))
                     continue
                 for contest in contests:
                     if not contest.is_upcoming():
@@ -5262,12 +5268,30 @@ class AcmerGroupBot(Star):
             lines = ["🧪 测试推送（今日无比赛，展示最近一场）"]
             if best is not None:
                 lines.append(best.format_detail())
+            elif timed_out:
+                lines.append("（赛程数据正在刷新，稍后重试即可）")
             else:
                 lines.append("（当前没有查到未开始的比赛）")
             parts.append("\n".join(lines))
-        if boards:
-            parts.append(boards)
         return "\n\n".join(parts)
+
+    async def _preview_contests(
+        self, platforms: List[str]
+    ) -> List[Tuple[str, list, Optional[str]]]:
+        """并发预览各平台赛程，单平台有超时上限，避免后台请求被慢网络挂住。"""
+
+        async def one(platform: str):
+            try:
+                contests, err = await asyncio.wait_for(
+                    self.fetcher.fetch_platform(platform), TEST_PUSH_PLATFORM_TIMEOUT
+                )
+                return (platform, list(contests or []), err)
+            except asyncio.TimeoutError:
+                return (platform, [], "数据刷新超时")
+            except Exception as exc:  # noqa: BLE001 - 单平台失败不影响预览
+                return (platform, [], f"抓取失败：{exc}")
+
+        return list(await asyncio.gather(*(one(p) for p in platforms)))
 
     async def _adaptive_results(
         self, event: AstrMessageEvent, text: str
