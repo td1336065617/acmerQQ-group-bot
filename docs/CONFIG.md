@@ -63,6 +63,8 @@
 | 文字转图片最大字符数 `settings.max_plain_text_chars` | `1800` | 文字超过此字符数时转图，范围 200～10000 |
 | 文字转图片最大行数 `settings.max_plain_text_lines` | `36` | 文字超过此行数时转图，范围 10～200 |
 | 群启用 `groups[].enabled` | 开 | 是否向该群推送 |
+
+> **关于「推送就绪」列**：WebUI 群列表用「已就绪 / 待群内发言 / 无需会话 / 已停用」表示真实的主动推送能力（官方通道要求该群给机器人发过消息，插件默认会自动预热；OneBot 通道无此限制）。旧版「已激活」标记只表示该群发过 acmer激活 命令（groups[].activated），**与能否推送无关**。
 | 群早报时间 `groups[].morning_push_time` | `08:00` | 覆盖全局时间 |
 | 群推送平台 `groups[].push_platforms` | 全部 | 早报取“全局 ∩ 群”平台 |
 | 群赛前提醒 `groups[].reminder_enabled` | 开 | 该群是否发送提醒 |

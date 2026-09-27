@@ -310,7 +310,7 @@
             <button class="btn small secondary" id="groupTest">批量测试</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th>已激活</th><th>启用</th><th>早报时间</th><th>推送平台<span class="muted" style="font-weight:400">（与全局取交集，提醒除外）</span></th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th title="决定能否主动推送的是「群会话是否就绪」：官方通道需要该群给机器人发过消息（插件已支持自动预热）；OneBot 通道无此限制。历史「已激活」标记只表示该群发过 acmer激活 命令，不影响推送。">推送就绪</th><th>启用</th><th>早报时间</th><th>推送平台<span class="muted" style="font-weight:400">（与全局取交集，提醒除外）</span></th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
         <div class="pager" id="groupPager"></div>
         <div id="groupTestResult"></div>
       </div>
@@ -838,6 +838,13 @@
       return (text(g.group_id) + ' ' + text(g.platform_id) + ' ' + text(g.name)).toLowerCase().indexOf(q) >= 0;
     }).sort(function (a, b) { return text(a.group_id).localeCompare(text(b.group_id)); });
   }
+  function readinessCell(g) {
+    var hist = '历史：' + (g.activated ? '该群发过 acmer激活' : '该群未发过 acmer激活') + '（不影响推送）';
+    if (g.enabled === false) return '<span class="badge info" title="该群已停用，不参与推送。' + hist + '">已停用</span>';
+    if (g.channel === 'onebot') return '<span class="badge ok" title="OneBot 通道无会话限制。' + hist + '">无需会话</span>';
+    if (g.scene_ready) return '<span class="badge ok" title="会话已就绪，可以主动推送。' + hist + '">已就绪</span>';
+    return '<span class="badge warn" title="官方通道要求该群给机器人发过消息；插件默认开启自动预热，通常无需人工处理。' + hist + '">待群内发言</span>';
+  }
   function renderGroups() {
     var list = filteredGroups();
     var size = state.groupPage.size;
@@ -858,7 +865,7 @@
           '<td><input type="checkbox" class="group-row-check" data-gid="' + esc(key) + '"></td>' +
           '<td>' + groupCell(g.name, g.group_id) + '</td>' +
           '<td>' + esc(platformLabel(g.platform_id)) + (g.umo ? '' : ' <span class="badge info">未记录会话</span>') + '</td>' +
-          '<td>' + (g.activated ? '<span class="badge ok">已激活</span>' : '<span class="badge warn">待激活</span>') + '</td>' +
+          '<td>' + readinessCell(g) + '</td>' +
           '<td><label class="switch"><input type="checkbox" class="g-enabled" data-gid="' + esc(key) + '"' + (g.enabled ? ' checked' : '') + '><span class="track"></span></label></td>' +
           '<td><input type="time" class="g-time" data-gid="' + esc(key) + '" value="' + esc(g.morning_push_time || '08:00') + '"></td>' +
           '<td><div class="row" style="gap:8px;flex-wrap:wrap">' + platformCell + '</div></td>' +

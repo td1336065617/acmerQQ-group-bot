@@ -175,3 +175,50 @@ def test_ensure_session_scenes_gives_up_with_warning(caplog):
     with caplog.at_level(logging.WARNING):
         assert asyncio.run(bot.ensure_session_scenes()) == 0
     assert any("未能完成" in rec.getMessage() for rec in caplog.records)
+
+
+def test_group_readiness_reports_real_capability():
+    """WebUI「推送就绪」列取的是会话能力，与历史 activated 标记无关。"""
+    official = FakeInst("爱莉希雅", "qq_official")
+    onebot = FakeInst("爱莉希雅2", "aiocqhttp")
+    bot = _bot_with([official, onebot], [])
+
+    g_off = GroupConfig(group_id="G1", platform_id="爱莉希雅", umo="u")
+    assert bot._group_readiness(g_off) == {"channel": "official", "scene_ready": False}
+    official._session_scene["G1"] = "group"
+    assert bot._group_readiness(g_off) == {"channel": "official", "scene_ready": True}
+
+    g_ob = GroupConfig(group_id="100", platform_id="爱莉希雅2", umo="u")
+    assert bot._group_readiness(g_ob) == {"channel": "onebot", "scene_ready": True}
+
+    g_unknown = GroupConfig(group_id="X", platform_id="不存在的平台", umo="u")
+    assert bot._group_readiness(g_unknown) == {"channel": "", "scene_ready": False}
+
+
+def test_config_api_merges_readiness_fields():
+    """/config 返回的每个群要带 channel / scene_ready，供前端渲染。"""
+    official = FakeInst("爱莉希雅", "qq_official")
+    groups = [GroupConfig(group_id="G1", platform_id="爱莉希雅", umo="umo1", activated=True)]
+    bot = _bot_with([official], groups)
+    m = _load_main_module()
+    captured = {}
+
+    def fake_json_response(payload):
+        captured.update(payload)
+        return payload
+
+    m.json_response = fake_json_response  # 打桩模块级 json_response（实例属性无效）
+
+    async def get_admins():
+        return []
+
+    bot._get_admins = get_admins
+    bot._default_platform_id = lambda: "爱莉希雅"
+    asyncio.run(bot._web_config_get())
+    rows = captured["data"]["groups"]
+    assert rows and rows[0]["group_id"] == "G1"
+    assert rows[0]["channel"] == "official"
+    assert rows[0]["scene_ready"] is False
+    # 历史激活标记仍在，但不参与就绪判断
+    assert rows[0]["activated"] is True
+

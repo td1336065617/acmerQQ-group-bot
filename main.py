@@ -3595,6 +3595,22 @@ class AcmerGroupBot(Star):
             self.context, str(group_id), str(platform_id or "")
         )
 
+    def _group_readiness(self, group: GroupConfig) -> dict:
+        """WebUI「推送就绪」列用的真实状态。
+
+        说明：历史字段 activated 只记录"该群是否发过 acmer激活 命令"，
+        与能否主动推送无关；这里给出真正决定推送能力的会话信息。
+        - channel=official：需要该群在本次运行给机器人发过消息（插件会自动预热）
+        - channel=onebot：无会话限制，恒为就绪
+        """
+        channel = platform_channel_of(self.context, group.platform_id or "")
+        return {
+            "channel": channel,
+            "scene_ready": bool(
+                self._group_scene_ready(group.group_id, group.platform_id)
+            ),
+        }
+
     def _warn_throttled(self, key: str, message: str, *args: Any) -> None:
         """同一 key 的告警在 WARN_THROTTLE_SECONDS 内只打一次（BUG-042）。"""
         state = getattr(self, "_warn_throttle", None)
@@ -5989,7 +6005,10 @@ class AcmerGroupBot(Star):
                 "data": {
                     "admin_users": await self._get_admins(),
                     "settings": await self.get_settings(),
-                    "groups": [g.model_dump() for g in await self.get_groups()],
+                    "groups": [
+                        {**g.model_dump(), **self._group_readiness(g)}
+                        for g in await self.get_groups()
+                    ],
                     "platform_id": self._default_platform_id(),
                 },
             }

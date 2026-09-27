@@ -223,6 +223,8 @@ XCPC Link（线下赛）
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `groups[].enabled` | 开 | 是否向该群推送 |
+
+> **关于「推送就绪」列**：WebUI 群列表用「已就绪 / 待群内发言 / 无需会话 / 已停用」表示真实的主动推送能力（官方通道要求该群给机器人发过消息，插件默认会自动预热；OneBot 通道无此限制）。旧版「已激活」标记只表示该群发过 acmer激活 命令（groups[].activated），**与能否推送无关**。
 | `groups[].morning_push_time` | `08:00` | 覆盖全局早报时间 |
 | `groups[].push_platforms` | 全部 | 早报实际取“全局 ∩ 群”的平台 |
 | `groups[].reminder_enabled` | 开 | 该群是否发送赛前提醒 |
