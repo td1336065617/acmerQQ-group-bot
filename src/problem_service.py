@@ -239,6 +239,16 @@ class ProblemService:
             except OSError:
                 pass
 
+    def peek_index(self, platform: str) -> List[Problem]:
+        """只读题目池：**不触网、不建索引**，没有就返回空列表。
+
+        供「测试推送」这类必须毫秒级返回的预览路径使用
+        （ensure_index 可能触发整库构建，数百次请求）。
+        """
+        if platform == "nowcoder":
+            return self.nowcoder_pool()
+        return self._load_disk_index(platform)
+
     async def ensure_index(self, platform: str) -> List[Problem]:
         """取（必要时构建）某平台题目池；失败返回空列表。"""
         if platform == "nowcoder":

@@ -189,10 +189,12 @@ PUSH_FAIL_MAX_ATTEMPTS = 3
 PUSH_FAIL_COOLDOWN_SECONDS = 900
 #: 同类告警的最小间隔（避免掉线时"会话未就绪"等日志刷屏）
 WARN_THROTTLE_SECONDS = 600
-#: 后台「测试推送」预览的整体超时与单平台超时（秒）：
-#: 网络慢时必须让预览尽快返回，否则表现为「点了没反应」（2026-09-27 实际故障）。
-TEST_PUSH_TOTAL_TIMEOUT = 12.0
-TEST_PUSH_PLATFORM_TIMEOUT = 6.0
+#: 预览类路径（测试推送）只读缓存、绝不触网：
+#: 缓存有 300 秒新鲜期，过期后 fetch_platform 会在请求路径里同步抓取，
+#: 网络慢（如 CF 网关 504）就会把后台请求挂住 → 表现为「点了没反应」。
+#: 正确做法是 cache-first（允许 stale）+ 刷新交给每 tick 的后台预热，
+#: 而不是给请求加超时（超时只会把"慢"变成"内容缺失"）。
+TEST_PUSH_CACHE_MAX_AGE: Optional[float] = None
 #: 会话场景预热最多尝试的 tick 次数（每 tick 30 秒，20 次≈10 分钟）
 SESSION_WARM_MAX_TRIES = 20
 #: 预热刷新间隔：进程内定期重补一次场景（防平台适配器被重建后再次失联）
@@ -3883,7 +3885,14 @@ class AcmerGroupBot(Star):
                 )
         return all_ok
 
-    async def build_morning_text(self, group: GroupConfig) -> Optional[str]:
+    async def build_morning_text(
+        self, group: GroupConfig, *, cached_only: bool = False
+    ) -> Optional[str]:
+        """今日早报正文。
+
+        cached_only=True 时只读缓存（允许过期）、绝不触网——供 WebUI 预览使用，
+        避免后台请求被慢网络挂住；真实早报仍走 fetch_platform（允许耐心刷新）。
+        """
         settings = await self.get_settings()
         platforms = [p for p in settings["push_platforms"] if p in group.push_platforms]
         if not platforms:
@@ -3893,7 +3902,10 @@ class AcmerGroupBot(Star):
         lines = ["🌅 今日比赛早报"]
         found = False
         for platform in platforms:
-            contests, err = await self.fetcher.fetch_platform(platform)
+            if cached_only:
+                contests, err = self.fetcher.cached_platform(platform)
+            else:
+                contests, err = await self.fetcher.fetch_platform(platform)
             label = PLATFORM_LABELS.get(platform, platform)
             if err:
                 lines.append(f"{label}：{err}")
@@ -3912,13 +3924,15 @@ class AcmerGroupBot(Star):
                 lines.append(f"{contest.start_cn():%H:%M} {contest.name}")
         if not found:
             return None
-        daily = await self._daily_problem_lines(group, settings)
+        daily = await self._daily_problem_lines(
+            group, settings, cached_only=cached_only
+        )
         if daily:
             lines.extend(daily)
         return "\n".join(lines)
 
     async def _daily_problem_lines(
-        self, group: GroupConfig, settings: dict
+        self, group: GroupConfig, settings: dict, *, cached_only: bool = False
     ) -> List[str]:
         """早报末尾的"今日一题"行；关闭开关或题目池不可用时返回空列表。"""
         if not settings.get("daily_problem_enabled", True):
@@ -3928,9 +3942,16 @@ class AcmerGroupBot(Star):
             return []
         count = int(settings.get("daily_problem_count") or 1)
         day = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        pool = None
+        if cached_only:
+            # 预览路径：只读已有题目池；没有就跳过，绝不触发建库（数百次请求）
+            service = getattr(self, "problem_service", None)
+            pool = service.peek_index(platform) if service is not None else None
+            if not pool:
+                return []
         try:
             problem = await self._daily_problem_for_group(
-                group.group_id, platform, day
+                group.group_id, platform, day, pool=pool
             )
         except Exception as exc:  # noqa: BLE001 - 抽题失败不影响早报
             logger.warning("群 %s 抽取每日一题失败：%s", group.group_id, exc)
@@ -4148,10 +4169,14 @@ class AcmerGroupBot(Star):
         return out
 
     async def _daily_problem_for_group(
-        self, group_id: str, platform: str, day: str
+        self, group_id: str, platform: str, day: str, *, pool: Optional[list] = None
     ):
-        """取（必要时抽取并缓存）当天的每日一题；索引不可用时返回 None。"""
-        pool = await self.problem_service.ensure_index(platform)
+        """取（必要时抽取并缓存）当天的每日一题；索引不可用时返回 None。
+
+        pool 由调用方传入时不触网（预览路径用 peek_index 的结果）。
+        """
+        if pool is None:
+            pool = await self.problem_service.ensure_index(platform)
         if not pool:
             return None
         cache_key = f"daily_{group_id or 'private'}_{day}"
@@ -5239,14 +5264,10 @@ class AcmerGroupBot(Star):
         方便在 WebUI 里直接预览早报的完整形态。
         """
         parts: List[str] = []
-        # 预览有硬超时：网络慢（例如某个平台网关超时）时不能把后台请求挂住，
-        # 否则表现为「点测试推送没反应」（2026-09-27 实际故障）。
-        try:
-            morning = await asyncio.wait_for(
-                self.build_morning_text(group), TEST_PUSH_TOTAL_TIMEOUT
-            )
-        except Exception:  # noqa: BLE001 - 超时/抓取失败都降级到"最近一场"
-            morning = None
+        # 预览一律只读缓存：绝不触网、不排队等锁、不加超时。
+        # 缓存有 300 秒新鲜期，过期后 fetch_platform 会同步抓取，
+        # 慢网络下就会把后台请求挂住（2026-09-27 故障）；刷新交由每 tick 的后台预热。
+        morning = await self.build_morning_text(group, cached_only=True)
         if morning:
             parts.append(morning)
         else:
@@ -5255,10 +5276,10 @@ class AcmerGroupBot(Star):
                 p for p in settings["push_platforms"] if p in group.push_platforms
             ] or list(DEFAULT_PLATFORMS)
             best = None
-            timed_out = False
-            for platform, contests, err in await self._preview_contests(platforms):
+            stale = False
+            for platform, contests, err in self._preview_contests(platforms):
                 if err:
-                    timed_out = timed_out or ("超时" in str(err))
+                    stale = stale or ("刷新" in str(err))
                     continue
                 for contest in contests:
                     if not contest.is_upcoming():
@@ -5268,30 +5289,27 @@ class AcmerGroupBot(Star):
             lines = ["🧪 测试推送（今日无比赛，展示最近一场）"]
             if best is not None:
                 lines.append(best.format_detail())
-            elif timed_out:
-                lines.append("（赛程数据正在刷新，稍后重试即可）")
+            elif stale:
+                lines.append("（赛程缓存正在后台刷新，稍后重试即可）")
             else:
                 lines.append("（当前没有查到未开始的比赛）")
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
 
-    async def _preview_contests(
+    def _preview_contests(
         self, platforms: List[str]
     ) -> List[Tuple[str, list, Optional[str]]]:
-        """并发预览各平台赛程，单平台有超时上限，避免后台请求被慢网络挂住。"""
-
-        async def one(platform: str):
+        """只读缓存地预览各平台赛程（同步、零网络），供后台预览使用。"""
+        out: List[Tuple[str, list, Optional[str]]] = []
+        for platform in platforms:
             try:
-                contests, err = await asyncio.wait_for(
-                    self.fetcher.fetch_platform(platform), TEST_PUSH_PLATFORM_TIMEOUT
+                contests, err = self.fetcher.cached_platform(
+                    platform, max_age=TEST_PUSH_CACHE_MAX_AGE
                 )
-                return (platform, list(contests or []), err)
-            except asyncio.TimeoutError:
-                return (platform, [], "数据刷新超时")
-            except Exception as exc:  # noqa: BLE001 - 单平台失败不影响预览
-                return (platform, [], f"抓取失败：{exc}")
-
-        return list(await asyncio.gather(*(one(p) for p in platforms)))
+            except Exception as exc:  # noqa: BLE001 - 单平台异常不影响预览
+                contests, err = [], f"读取缓存失败：{exc}"
+            out.append((platform, list(contests or []), err))
+        return out
 
     async def _adaptive_results(
         self, event: AstrMessageEvent, text: str

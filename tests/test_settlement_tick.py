@@ -43,6 +43,13 @@ class FakeContestFetcher:
         self.calls += 1
         return list(self._contests.get(platform, [])), None
 
+    def cached_platform(self, platform, *, max_age=None):
+        """与真实 ContestFetcher.cached_platform 对齐：只读缓存、零网络。"""
+        cached = self._cache.get(platform)
+        if not cached:
+            return [], "暂无缓存（后台正在刷新）"
+        return list(cached[1]), None
+
 
 class FakeSettlement:
     """只替换 collect；最近比赛记录委托给真实的 SettlementService（纯内存逻辑）。"""

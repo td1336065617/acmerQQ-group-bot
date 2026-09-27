@@ -11,6 +11,24 @@
 
 ## 近期版本
 
+## [1.20.12] - 2026-09-27
+
+> 🔁 重做 1.20.11 的修法：预览不该「加超时」，而该**请求路径里不触网**。
+
+### ⚙️ 变更
+- 新增只读接口：`ContestFetcher.cached_platform()`（允许 stale、零网络、不排队等锁）、`ProblemService.peek_index()`（只读题库索引，绝不触发建库）。
+- `build_morning_text(cached_only=True)` 与 `build_test_text` 改为只读缓存：**零网络、零超时**；真实早报仍走 `fetch_platform`（允许耐心刷新），刷新交给每 tick 的后台预热。
+- 移除 1.20.11 引入的 `TEST_PUSH_TOTAL_TIMEOUT` / `TEST_PUSH_PLATFORM_TIMEOUT`。
+
+### 🐛 修复（延续 1.20.11）
+- 删除对不存在方法 `build_weekly_boards_text` 的调用：周榜自 1.11.0 起由 `push_weekly_boards` 以图片追加（真实早报与测试推送都会调用它），该调用只是历史残留。
+
+### ✅ 测试与规范
+- 用例 4 条：源码守卫 / 预览绝不触网且 1s 内返回 / stale 缓存可用 / **真实早报仍走网络**（防误改）；全量 **469 passed**。
+- 规范：新增 §4.10（预览/UI 路径禁止触网；不要用超时兜慢网络）；CASE-10 补记「第一次修复为何不够」。
+
+---
+
 ## [1.20.11] - 2026-09-27
 
 > 🐛 修复 WebUI「测试推送」没反应：调用了一个不存在的周榜方法（被 try/except 吞掉）+ 预览被慢网络挂住。

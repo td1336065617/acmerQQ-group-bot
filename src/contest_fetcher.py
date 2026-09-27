@@ -260,6 +260,23 @@ class ContestFetcher:
     def _cache_ttl(self, platform: str) -> int:
         return self.offline_cache_ttl if platform == OFFLINE_PLATFORM else self.cache_ttl
 
+    def cached_platform(
+        self, platform: str, *, max_age: Optional[float] = None
+    ) -> Tuple[list, Optional[str]]:
+        """只读缓存（**允许过期**）：给预览/UI 这类不能被网络阻塞的路径使用。
+
+        与 fetch_platform 的区别：这里**绝不发起网络请求**，也不排队等锁。
+        缓存缺失或过旧时返回空列表 + 提示；真正的刷新交给后台预热（每 tick 的 warm）。
+        """
+        self._load_persistent_cache()
+        cached = self._cache.get(platform)
+        if not cached:
+            return [], "暂无缓存（后台正在刷新）"
+        age = time.time() - cached[0]
+        if max_age is not None and age > max_age:
+            return [], "缓存过旧（后台正在刷新）"
+        return self._apply_scope(platform, cached[1]), None
+
     def _is_cache_fresh(
         self,
         platform: str,
