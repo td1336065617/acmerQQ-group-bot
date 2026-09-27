@@ -446,6 +446,7 @@
       { key: 'settle_nowcoder_max_wait_minutes', label: '牛客最长等待（分钟）', type: 'number', min: 60, max: 1440, desc: '默认 720（12 小时）' },
       { key: 'settle_luogu_max_wait_minutes', label: '洛谷最长等待（分钟）', type: 'number', min: 60, max: 1440, desc: '默认 360（6 小时）' },
       { key: 'settle_include_unofficial', label: '补 CF 打星（榜外）成员', type: 'bool', desc: '默认开。打星成员没有官方名次，卡上显示“打星 · 通过 x 题”' },
+      { key: 'settle_unofficial_label', label: '打星标注文案', type: 'text', placeholder: '打星', desc: '默认“打星”；显示在名次列' },
       { key: 'settle_abandon_notice', label: '超时未结算时群内提示', type: 'bool', desc: '默认开：发一句“本场数据结算异常，本次不推送”' },
       { key: 'settle_night_scale', label: '夜间轮询间隔倍数', type: 'number', min: 1, max: 4, desc: '默认 2；00:30–07:00 把轮询间隔放大，减少无谓请求' }
     ] },
@@ -745,6 +746,9 @@
       ctrl = '<input type="time" data-key="' + f.key + '" value="' + esc(value || '08:00') + '">';
     } else if (f.type === 'number') {
       ctrl = '<input type="number" data-key="' + f.key + '" value="' + esc(value) + '" min="' + f.min + '" max="' + f.max + '" step="1" inputmode="numeric">';
+    } else if (f.type === 'text') {
+      ctrl = '<input type="text" data-key="' + f.key + '" value="' + esc(value || f.placeholder || '') + '">' +
+        (f.placeholder ? '<span class="desc">示例：' + esc(f.placeholder) + '</span>' : '');
     } else if (f.type === 'select') {
       ctrl = '<select data-key="' + f.key + '">' + f.options.map(function (opt) {
         return '<option value="' + esc(opt[0]) + '"' + (text(value) === opt[0] ? ' selected' : '') + '>' + esc(opt[1]) + '</option>';
