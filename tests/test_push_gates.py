@@ -349,6 +349,106 @@ def test_group_readiness_carries_push_health():
     assert health_view["push_health"]["count"] == 6
     assert health_view["channel"] == "official"
 
+
+
+def _seed(bot, kv, key, value):
+    """缓存与 KV 同步播种（_cache_health 只写缓存，断言读的是 KV）。"""
+    kv[key] = value
+    bot._cache_health(key, value)
+
+
+def test_probe_on_message_lifts_then_throttles():
+    """群消息探测：首次放行窗口并写节流；节流内不再放行；已到期不写（台账 M6.1）。"""
+    bot, kv, sent = _send_bot(suspended=True)
+    key = KEY
+    pid = TICK_GROUP.platform_id or ""
+    # 1) 首次：放行窗口 + 默认 60 分钟节流
+    asyncio.run(bot._probe_on_group_message(TICK_GROUP.group_id, pid))
+    state = kv[key]
+    assert state["suspended_until"] <= time.time()  # 窗口已放行
+    assert state["probe_at"] >= time.time() + 59 * 60
+    assert asyncio.run(bot.push_suspended(TICK_GROUP)) is False
+    # 2) 节流内：重新立起暂停后再来消息 → 不再放行
+    _seed(bot, kv, key, dict(state, suspended_until=time.time() + 500))
+    asyncio.run(bot._probe_on_group_message(TICK_GROUP.group_id, pid))
+    assert kv[key]["suspended_until"] > time.time()
+    # 3) 暂停已到期：什么都不写
+    _seed(bot, kv, key, dict(state, suspended_until=time.time() - 1, probe_at=0))
+    asyncio.run(bot._probe_on_group_message(TICK_GROUP.group_id, pid))
+    assert kv[key]["probe_at"] == 0
+
+
+def test_success_self_heals_and_logs_recovery(caplog):
+    """bypass 放行后发送成功 → 删除状态（自愈）并打恢复 INFO（M6.2）。"""
+    bot, kv, sent = _send_bot(suspended=True)
+    original = m.platform_compat.channel_of_platform_id
+    m.platform_compat.channel_of_platform_id = lambda context, pid: "onebot"
+    try:
+        with caplog.at_level(logging.INFO, logger="astrbot"):
+            assert (
+                asyncio.run(bot.send_notification(TICK_GROUP, "hello", bypass_suspend=True))
+                is True
+            )
+    finally:
+        m.platform_compat.channel_of_platform_id = original
+    assert KEY not in kv  # 键已删
+    assert any("推送恢复正常" in r.getMessage() for r in caplog.records)
+    assert sent == ["hello"]
+
+
+def test_enable_transition_clears_state_only_on_false_to_true():
+    """后台停用→启用 = 人工恢复：清暂停；原本就启用的保存不清（台账 M6.3）。"""
+    bot, kv, sent = _send_bot(suspended=False)
+    bot.settlement = types.SimpleNamespace(_recent={})
+    k = push_health.health_key("爱莉希雅", "G1")
+    old_key = "爱莉希雅:G1"
+    _seed(bot, kv, k, {"state": "denied", "count": 3, "suspended_until": time.time() + 999})
+
+    async def raw_old(fresh=False):
+        return {old_key: {"group_id": "G1", "platform_id": "爱莉希雅", "enabled": False}}
+
+    bot._raw_groups = raw_old
+    asyncio.run(
+        bot._handle_group_enable_transitions(
+            {old_key: {"group_id": "G1", "platform_id": "爱莉希雅", "enabled": True}}
+        )
+    )
+    assert k not in kv  # 停用→启用：清掉了
+    # 反例：原本就启用 → 不动状态
+    _seed(bot, kv, k, {"state": "denied", "count": 2, "suspended_until": time.time() + 999})
+
+    async def raw_same(fresh=False):
+        return {old_key: {"group_id": "G1", "platform_id": "爱莉希雅", "enabled": True}}
+
+    bot._raw_groups = raw_same
+    asyncio.run(
+        bot._handle_group_enable_transitions(
+            {old_key: {"group_id": "G1", "platform_id": "爱莉希雅", "enabled": True}}
+        )
+    )
+    assert k in kv  # 非启用转换：保留
+
+
+def test_maybe_prune_blocked_runs_once_per_day():
+    """每日清理按日期去重：同日只跑一次，次日再跑（台账 M6.4）。"""
+    from datetime import datetime
+
+    from src.models import CN_TZ
+    from src.scheduler import PushScheduler
+
+    runs = []
+
+    class FakePlugin:
+        async def _prune_blocked_markers(self):
+            runs.append(1)
+
+    sch = PushScheduler(FakePlugin())
+    asyncio.run(sch._maybe_prune_blocked(datetime(2026, 9, 28, 1, 0, tzinfo=CN_TZ)))
+    asyncio.run(sch._maybe_prune_blocked(datetime(2026, 9, 28, 23, 59, tzinfo=CN_TZ)))
+    assert runs == [1]
+    asyncio.run(sch._maybe_prune_blocked(datetime(2026, 9, 29, 0, 1, tzinfo=CN_TZ)))
+    assert runs == [1, 1]
+
 def test_threshold_warn_once_per_day(caplog):
     """达阈值后每群每日只告警一次；进程内记忆清空（次日）才再告警。"""
     bot, kv, sent = _send_bot(suspended=False)

@@ -3546,6 +3546,13 @@ class AcmerGroupBot(Star):
         gname = str(name or "").strip()
         key = platform_compat.scoped_key(pid, gid)
         now = time.monotonic()
+        # 恢复探测（台账 M6.1）：必须放在快速路径之前，否则常见路径直接 return
+        # 钩子永不触发；同时先做内存守卫：无被拒群时每条消息零成本（不碰 KV）。
+        if getattr(self, "_health_cache", None):
+            try:
+                await self._probe_on_group_message(gid, pid)
+            except Exception as probe_exc:  # noqa: BLE001 - 探测失败不影响群注册
+                logger.debug("推送健康探测失败（%s）：%s", gid, probe_exc)
         # 常见路径：内存缓存新鲜且已注册该群、会话与群名都没变化 → 不读 KV、不写 KV。
         cached = self._groups_cache
         if cached is not None and now - cached[0] < GROUPS_CACHE_TTL_SECONDS:
@@ -3906,6 +3913,105 @@ class AcmerGroupBot(Star):
             logger.warning("清除群推送健康状态失败（%s）：%s", key, exc)
         self._cache_health(key, None)
         logger.info("群 %s 推送恢复正常，已清除被拒暂停状态", group.group_id)
+
+    async def _probe_on_group_message(self, group_id: str, platform_id: str) -> None:
+        """群内收到消息：若仍在暂停中且探测间隔已到，放行一个窗口（不删键）。
+
+        语义（实现文档 §5.3）：被动消息只证明"在群且能收"，不能证明"能主动发"，
+        所以不清状态，只按 push_denied_probe_minutes 节流放行；放行后的首次
+        权限类失败会立即重新暂停（自然闭环，不需要一次性标志位）。
+        """
+        key = push_health.health_key(platform_id, group_id)
+        cached = self._health_cache_store().get(key)
+        if cached is None or not cached[1]:
+            return  # 无状态（写路径总是同步刷缓存，故缓存可信）
+        health = cached[1]
+        now = time.time()
+        if float(health.get("suspended_until") or 0) <= now:
+            return  # 暂停已到期，无需动作
+        if now < float(health.get("probe_at") or 0):
+            return  # 探测节流未到
+        try:
+            settings = await self.get_settings()
+            probe_minutes = int(
+                settings.get(
+                    "push_denied_probe_minutes", push_health.DEFAULT_PROBE_MINUTES
+                )
+                or push_health.DEFAULT_PROBE_MINUTES
+            )
+        except Exception:  # noqa: BLE001 - 读不到设置按默认
+            probe_minutes = push_health.DEFAULT_PROBE_MINUTES
+        health = dict(health)
+        health["suspended_until"] = now
+        health["probe_at"] = now + probe_minutes * 60.0
+        health["last_at"] = now
+        try:
+            await self.put_kv_data(key, health)
+        except Exception as exc:  # noqa: BLE001 - 写失败不影响群注册
+            logger.warning("写探测状态失败（%s）：%s", key, exc)
+        self._cache_health(key, health)
+        logger.debug(
+            "群 %s 收到消息，放行一次推送探测（下次最早 %d 分钟后）",
+            group_id,
+            probe_minutes,
+        )
+
+    async def _clear_blocked_for_group(self, group_id: str) -> int:
+        """人工启用某群：删除其在最近比赛记录覆盖范围内的 blocked 标记。"""
+        try:
+            payloads = list(getattr(self.settlement, "_recent", {}).values())
+        except Exception:  # noqa: BLE001
+            return 0
+        removed = 0
+        for payload in payloads:
+            platform = str(payload.get("platform") or "")
+            cid = str(payload.get("contest_id") or "")
+            if not platform or not cid:
+                continue
+            key = f"settle_{group_id}_{platform}_{cid}"
+            try:
+                marker = await self.get_kv_data(key, None)
+                if isinstance(marker, dict) and marker.get("blocked"):
+                    await self.delete_kv_data(key)
+                    removed += 1
+            except Exception as exc:  # noqa: BLE001 - 单键失败不阻断
+                logger.warning("清 blocked 标记失败（%s）：%s", key, exc)
+        return removed
+
+    async def _handle_group_enable_transitions(self, new_raw: dict) -> None:
+        """后台把群从停用改为启用时，视为人工恢复：清暂停状态与 blocked 标记。"""
+        try:
+            old_raw = await self._raw_groups(fresh=True)
+        except Exception:  # noqa: BLE001 - 读不到旧值就不做自动清理
+            return
+        if not isinstance(old_raw, dict):
+            old_raw = {}
+        for key, cfg in (new_raw or {}).items():
+            if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+                continue
+            old = old_raw.get(key)
+            if isinstance(old, dict) and old.get("enabled", True):
+                continue  # 原本就启用：不是启用转换，不动被拒状态
+            gid = str(cfg.get("group_id") or "")
+            if not gid:
+                continue
+            try:
+                target = GroupConfig(
+                    group_id=gid,
+                    platform_id=str(cfg.get("platform_id") or ""),
+                    name=str(cfg.get("name") or ""),
+                    umo=str(cfg.get("umo") or ""),
+                )
+                await self._clear_push_health(target)
+                removed = await self._clear_blocked_for_group(gid)
+                logger.info(
+                    "群 %s 由后台启用，已清除被拒暂停状态（blocked 清理 %d 个）",
+                    gid,
+                    removed,
+                )
+            except Exception as exc:  # noqa: BLE001 - 清理失败不影响保存
+                logger.warning("启用恢复清理失败（%s）：%s", gid, exc)
+
     async def _prune_blocked_markers(self) -> int:
         """每日清理已出窗的 blocked 标记（实现文档 R26，台账 M2.6）。
 
@@ -3986,6 +4092,7 @@ class AcmerGroupBot(Star):
             if sent:
                 logger.info("已向群 %s 提交 @全体成员 标记", group.group_id)
                 await self._clear_push_failure("group", str(group.group_id))
+                await self._clear_push_health(group)  # 成功即自愈（M6.2）
                 return True
             logger.warning(
                 "群 %s 发送 @全体成员 失败，自动降级为普通通知", group.group_id
@@ -4003,6 +4110,7 @@ class AcmerGroupBot(Star):
         if sent:
             logger.info("已向群 %s 发送普通通知", group.group_id)
             await self._clear_push_failure("group", str(group.group_id))
+            await self._clear_push_health(group)  # 成功即自愈（M6.2）
         else:
             await self._note_push_failure("group", str(group.group_id))
         return sent
@@ -4342,6 +4450,8 @@ class AcmerGroupBot(Star):
                 group.group_id,
                 caption,
             )
+        else:
+            await self._clear_push_health(group)  # 成功即自愈（M6.2）
         return bool(ok)
 
     async def push_weekly_boards(
@@ -6467,6 +6577,8 @@ class AcmerGroupBot(Star):
                 )
             if "groups" in payload:
                 raw = self._build_groups_payload(payload["groups"])
+                # 读旧值做"停用→启用"转换判定，必须在写入新值之前（M6.3）
+                await self._handle_group_enable_transitions(raw)
                 await self.put_kv_data("groups", raw)
                 self._groups_cache = None
         except ValueError as exc:

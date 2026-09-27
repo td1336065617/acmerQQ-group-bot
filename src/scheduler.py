@@ -62,6 +62,16 @@ class PushScheduler:
                 logger.exception("acmerQQ群机器人 定时推送任务异常")
             await asyncio.sleep(TICK_SECONDS)
 
+    async def _maybe_prune_blocked(self, now: datetime) -> None:
+        """每日执行一次过期 blocked 标记清理（台账 M6.4）。"""
+        day = now.strftime("%Y%m%d")
+        if getattr(self, "_blocked_prune_day", "") == day:
+            return
+        self._blocked_prune_day = day
+        prune = getattr(self.plugin, "_prune_blocked_markers", None)
+        if callable(prune):
+            await prune()
+
     async def tick(self) -> None:
         now = datetime.now(CN_TZ)
         # reminded 去重表每个 tick 只读一次，各群共享；仅在真正新增提醒时写回。
@@ -87,6 +97,12 @@ class PushScheduler:
                 await warm()
         except Exception:  # noqa: BLE001 - 预热失败不影响其它推送
             logger.warning("会话场景预热失败", exc_info=True)
+        # 每日一次：清理过期 blocked 标记（实现文档 R26；进程内按日期去重，
+        # 先记日期再执行——失败也不会每 tick 重试刷屏）。
+        try:
+            await self._maybe_prune_blocked(now)
+        except Exception:  # noqa: BLE001 - 清理失败不影响推送
+            logger.warning("blocked 标记清理失败", exc_info=True)
         # 比赛数据后台预热：在 TTL 到期前 90 秒提前刷新一个平台，
         # 使用户请求不再撞上“缓存过期后同步抓取”的卡顿。
         try:
