@@ -207,14 +207,20 @@ def test_config_api_merges_readiness_fields():
         captured.update(payload)
         return payload
 
-    m.json_response = fake_json_response  # 打桩模块级 json_response（实例属性无效）
+    # 打桩模块级 json_response（实例属性无效）；用完必须还原：_load_main_module 有缓存，
+    # 不还原会污染同进程后续用例。
+    original_json_response = m.json_response
+    m.json_response = fake_json_response
 
     async def get_admins():
         return []
 
     bot._get_admins = get_admins
     bot._default_platform_id = lambda: "爱莉希雅"
-    asyncio.run(bot._web_config_get())
+    try:
+        asyncio.run(bot._web_config_get())
+    finally:
+        m.json_response = original_json_response
     rows = captured["data"]["groups"]
     assert rows and rows[0]["group_id"] == "G1"
     assert rows[0]["channel"] == "official"

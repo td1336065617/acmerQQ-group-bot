@@ -842,6 +842,7 @@
     var hist = '历史：' + (g.activated ? '该群发过 acmer激活' : '该群未发过 acmer激活') + '（不影响推送）';
     if (g.enabled === false) return '<span class="badge info" title="该群已停用，不参与推送。' + hist + '">已停用</span>';
     if (g.channel === 'onebot') return '<span class="badge ok" title="OneBot 通道无会话限制。' + hist + '">无需会话</span>';
+    if (!g.channel) return '<span class="badge warn" title="未找到该群所属的平台实例（平台可能已改名或尚未加载），这类群无法主动推送。' + hist + '">平台未识别</span>';
     if (g.scene_ready) return '<span class="badge ok" title="会话已就绪，可以主动推送。' + hist + '">已就绪</span>';
     return '<span class="badge warn" title="官方通道要求该群给机器人发过消息；插件默认开启自动预热，通常无需人工处理。' + hist + '">待群内发言</span>';
   }
