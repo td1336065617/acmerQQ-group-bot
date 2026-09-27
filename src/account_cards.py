@@ -54,6 +54,8 @@ RANKING_HEIGHT_SAFETY = 24
 RANKING_MIN_RENDER_HEIGHT = 520
 # 赛果卡（赛后名次版）：每平台最多展示 SETTLE_CARD_MAX_ROWS 行，2 列栅格。
 SETTLE_CARD_MAX_ROWS = 10
+#: 榜外/打星成员在名次列的默认标注（可用设置 settle_unofficial_label 覆盖）
+SETTLE_UNOFFICIAL_LABEL = "打星"
 SETTLE_CARD_ROW_STEP = 62
 SETTLE_CARD_SECTION_BASE = 66
 #: Pillow 路径的表头位置与行高（HTML 路径有 mini-header，Pillow 需要自己留位）
@@ -1084,6 +1086,7 @@ class AccountCardRenderer:
         subtitle: str,
         note: str = "",
         platform_order: Optional[List[str]] = None,
+        unofficial_label: str = SETTLE_UNOFFICIAL_LABEL,
     ) -> Optional[Path]:
         """赛后赛果卡（名次版）：只展示名次类信息，不含 Rating 变化。
 
@@ -1114,7 +1117,11 @@ class AccountCardRenderer:
             for platform, rows in ordered.items()
         }
         body = self._settlement_html(
-            ordered, title=title, subtitle=subtitle, note=note
+            ordered,
+            title=title,
+            subtitle=subtitle,
+            note=note,
+            unofficial_label=unofficial_label,
         )
         return self._render(
             body,
@@ -1124,6 +1131,7 @@ class AccountCardRenderer:
             title,
             subtitle,
             note,
+            unofficial_label,
         )
 
     @staticmethod
@@ -1159,6 +1167,7 @@ class AccountCardRenderer:
         title: str,
         subtitle: str,
         note: str = "",
+        unofficial_label: str = SETTLE_UNOFFICIAL_LABEL,
     ) -> str:
         blocks = []
         for platform, rows in sections.items():
@@ -1167,7 +1176,10 @@ class AccountCardRenderer:
             rendered = []
             for index, row in enumerate(rows, start=1):
                 rank = row.get("rank")
-                rank_text = f"#{rank}" if rank else "—"
+                if row.get("unofficial"):
+                    rank_text = unofficial_label
+                else:
+                    rank_text = f"#{rank}" if rank else "—"
                 solved = row.get("solved")
                 total = row.get("total_problems")
                 if solved is None:
@@ -3939,6 +3951,7 @@ class AccountCardRenderer:
         subtitle: str,
         note: str,
         image_path: Path,
+        unofficial_label: str = SETTLE_UNOFFICIAL_LABEL,
     ) -> bool:
         """无 Chromium 时的赛果卡回退：每平台一节，行内为「名次 成员 通过」。
 
@@ -4047,7 +4060,11 @@ class AccountCardRenderer:
             line_y = header_y + SETTLE_CARD_HEADER_STEP
             for row in rows[:SETTLE_CARD_MAX_ROWS]:
                 rank = row.get("rank")
-                rank_text = f"#{rank}" if rank else "—"
+                rank_text = (
+                    unofficial_label
+                    if row.get("unofficial")
+                    else (f"#{rank}" if rank else "—")
+                )
                 solved = row.get("solved")
                 total = row.get("total_problems")
                 if solved is None:

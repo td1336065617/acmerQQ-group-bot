@@ -54,9 +54,9 @@ ATCODER_RESULTS_TIMEOUT = 30.0
 #: 缓存条目上限（防止长时间运行无限增长）
 CACHE_MAX_ENTRIES = 128
 #: 最近比赛记录：赛程接口只返回"未开始"的比赛，比赛一结束就从列表消失，
-#: 因此必须把见过的比赛记下来，等它结束后再结算。保留 26 小时足够覆盖
-#: "延迟 + 2 小时补推窗口 + 一次夜间停机"。
-RECENT_CONTEST_KEEP_SECONDS = 26 * 3600
+#: 因此必须把见过的比赛记下来，等它结束后再结算。保留 48 小时：严格完整门禁下
+#: CF 最长等待 24 小时，比赛记录必须晚于门禁窗口才被淘汰。
+RECENT_CONTEST_KEEP_SECONDS = 48 * 3600
 RECENT_CONTEST_FILE = "settle_recent.json"
 RECENT_CONTEST_MAX_ENTRIES = 400
 
@@ -70,6 +70,56 @@ NOWCODER_PROFILE_REFERER = "https://ac.nowcoder.com/acm/contest/profile/{uid}"
 #: （实测：日历 contestId=1139935，链接 /acm/contest/139935）。
 NOWCODER_CONTEST_ID_RE = re.compile(r"/acm/contest/(\d+)")
 
+# ----------------------------------------------------------------------
+# 严格完整门禁（settle strict）：只在平台侧"结算完成"后才允许推送
+# 设计文档：docs/赛果卡严格完整门禁-设计文档.md
+# ----------------------------------------------------------------------
+#: 轮询间隔（分钟，按序推进，最后一档固定循环）
+PROBE_INTERVALS: Dict[str, Tuple[int, ...]] = {
+    "codeforces": (5, 5, 10, 10, 15, 20, 30, 60, 120, 180),
+    "atcoder": (3, 3, 5, 5, 10, 15, 20, 30, 60, 120),
+    "nowcoder": (10, 15, 20, 30, 60, 120),
+    "luogu": (10, 15, 30, 60, 120),
+}
+#: 最长等待（分钟）：超过即放弃本场推送（改为群内"数据结算异常"提示）
+MAX_WAIT_MINUTES: Dict[str, int] = {
+    "codeforces": 1440,
+    "atcoder": 720,
+    "nowcoder": 720,
+    "luogu": 360,
+}
+#: 最小等待（分钟）：仅作下限，不代表"完成期望"；CF 以 phase 为准故为 0
+MIN_AGE_MINUTES: Dict[str, int] = {
+    "codeforces": 0,
+    "atcoder": 45,
+    "nowcoder": 0,
+    "luogu": 15,
+}
+#: 采样"稳定窗口"（分钟）：指纹必须保持不变的时长。
+#: 生产实测：ABC477 在 T+37min 仍是 3594/11547 行的"自洽半截数据"，
+#: 只靠"连续两次一致"会误判，因此必须加上时间跨度要求。
+STABLE_SPAN_MINUTES: Dict[str, int] = {
+    "codeforces": 0,
+    "atcoder": 30,
+    "nowcoder": 15,
+    "luogu": 15,
+}
+#: 判定"稳定"所需的连续相同采样次数
+STABLE_SAMPLES_DEFAULT = 2
+#: 每 tick 最多发起几次探测（防止多场同时轮询打满网络）
+MAX_PROBES_PER_TICK = 3
+#: 探测结果短缓存（只用于同一 tick 内多群复用，绝不参与完整性判定）
+SETTLE_PROBE_TTL = 30
+#: 采样轨迹保留条数（防 KV 键膨胀）
+POLL_SAMPLE_KEEP = 20
+#: 结算候选窗口（小时）：严格门禁下按平台区分
+SETTLE_WINDOW_HOURS: Dict[str, float] = {
+    "codeforces": 24.0,
+    "atcoder": 12.0,
+    "nowcoder": 12.0,
+    "luogu": 6.0,
+}
+
 
 def _as_int(value: object) -> Optional[int]:
     try:
@@ -78,6 +128,130 @@ def _as_int(value: object) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+@dataclass
+class Sample:
+    """一次探测的采样结果：严格完整门禁的判定输入。
+
+    rows        ：榜单行数（AtCoder）/ 命中集合大小（牛客、洛谷）
+    fingerprint ：内容指纹（判定"两次采样是否一致"）
+    hint_ready  ：平台自带的完成信号（CF：phase==FINISHED 且无 PRELIMINARY）
+    payload     ：原始数据，仅就绪后交给采集/渲染使用，不写入轮询状态
+    """
+
+    rows: int = 0
+    fingerprint: str = ""
+    hint_ready: Optional[bool] = None
+    payload: Any = None
+
+    def brief(self) -> Dict[str, Any]:
+        """采样轨迹（写进轮询状态的精简结构）。"""
+        return {
+            "ts": int(time.time()),
+            "rows": int(self.rows),
+            "fp": str(self.fingerprint)[:64],
+        }
+
+
+def new_poll_state(now: float) -> Dict[str, Any]:
+    """新建一场比赛的轮询状态。"""
+    return {
+        "state": "POLLING",
+        "attempts": 0,
+        "samples": [],
+        "first_seen_at": float(now),
+        "next_poll_at": 0.0,
+        "stable_count": 0,
+        "stable_since": None,
+        "last_fp": "",
+        "ready_at": None,
+        "elapsed_minutes": None,
+        "abandoned_reason": None,
+    }
+
+
+def poll_key(platform: str, contest_id: str, group_id: Optional[str] = None) -> str:
+    """轮询状态键：CF/AtCoder 采样与群无关（跨群共享）；牛客/洛谷按群隔离。"""
+    platform, contest_id = str(platform), str(contest_id)
+    if platform in ("nowcoder", "luogu") and group_id:
+        return f"settle_poll_{group_id}_{platform}_{contest_id}"
+    return f"settle_poll_{platform}_{contest_id}"
+
+
+def evaluate_readiness(
+    platform: str,
+    sample: Sample,
+    state: Dict[str, Any],
+    elapsed_minutes: float,
+    *,
+    stable_samples: int = STABLE_SAMPLES_DEFAULT,
+    stable_span_minutes: Optional[float] = None,
+    min_age_minutes: Optional[float] = None,
+    now_ts: Optional[float] = None,
+) -> Tuple[bool, str]:
+    """判定"平台侧是否已结算完成"；就地更新 state 的稳定计数与稳定起点。
+
+    - Codeforces：以 phase / 重测标记为准（hint_ready）
+    - AtCoder / 牛客 / 洛谷：需要在**稳定窗口**内保持指纹不变，且满足最小等待：
+      仅"连续两次一致"不足以判定——生产实测出现过自洽的半截数据
+      （ABC477 T+37min 仍是 3594/11547 行）。
+    """
+    if platform == "codeforces":
+        if sample.hint_ready is not True:
+            state["stable_count"] = 0
+            state["stable_since"] = None
+            return False, "cf:phase-not-finished"
+        state["stable_count"] = max(1, int(state.get("stable_count") or 0))
+        return True, "cf:finished"
+    moment = float(now_ts) if now_ts is not None else None
+    same = bool(sample.fingerprint) and state.get("last_fp") == sample.fingerprint
+    if same:
+        state["stable_count"] = int(state.get("stable_count") or 0) + 1
+    else:
+        state["stable_count"] = 0
+        state["stable_since"] = moment
+    state["last_fp"] = sample.fingerprint
+    needed = max(0, int(stable_samples) - 1)
+    min_age = (
+        float(min_age_minutes)
+        if min_age_minutes is not None
+        else float(MIN_AGE_MINUTES.get(str(platform), 0))
+    )
+    span_need = (
+        float(stable_span_minutes)
+        if stable_span_minutes is not None
+        else float(STABLE_SPAN_MINUTES.get(str(platform), 0))
+    )
+    span_ok = True
+    since = state.get("stable_since")
+    if span_need > 0:
+        if moment is None or since is None:
+            span_ok = False
+        else:
+            span_ok = (moment - float(since)) >= span_need * 60
+    if (
+        state["stable_count"] >= needed
+        and float(elapsed_minutes) >= min_age
+        and span_ok
+    ):
+        return True, f"{platform}:stable"
+    return False, (
+        f"{platform}:unstable(rows={sample.rows}, stable={state['stable_count']},"
+        f" span_ok={span_ok})"
+    )
+
+
+def next_poll_delay_minutes(
+    platform: str, attempts: int, *, night: bool = False, night_scale: float = 1.0
+) -> float:
+    """按下标取轮询间隔（超出序列则固定最后一档），夜间可整体放大。"""
+    seq = PROBE_INTERVALS.get(str(platform)) or (10,)
+    index = max(0, min(int(attempts), len(seq) - 1))
+    delay = float(seq[index])
+    if night:
+        delay *= max(1.0, float(night_scale))
+    return delay
 
 
 @dataclass
@@ -96,6 +270,8 @@ class SettleRow:
     unsolved: List[str] = field(default_factory=list)
     #: 数据来源标记，用于卡片底部说明口径
     source: str = ""
+    #: 打星/榜外成员：有实际参赛与成绩，但不在官方榜单（无名次）
+    unofficial: bool = False
 
     def to_card_row(self) -> Dict[str, Any]:
         """转成渲染层使用的行结构（见实现文档 §A1.2）。"""
@@ -103,6 +279,7 @@ class SettleRow:
         return {
             "rank": self.rank,
             "user_count": self.user_count,
+            "unofficial": bool(self.unofficial),
             "display_name": self.display_name,
             "handle": self.handle,
             "solved": self.solved,
@@ -137,8 +314,11 @@ class SettlementService:
         #: 结果缓存：键含"成员指纹"，否则 A 群算出的结果会被 B 群复用
         #: （线上真实故障：5 个群都推了主群那一个人的赛果）。
         self._result_cache: Dict[Tuple[str, str, str], Tuple[float, SettleResult]] = {}
-        #: 原始数据缓存（榜单等与"哪些群"无关的数据，跨群共享，避免每个群重复拉取）
+        #: 原始数据缓存（榜单等与"哪些群"无关的数据，跨群共享，避免每个群重复拉取）。
+        #: 严格门禁下它只服务"已就绪"的最终数据；探测样本必须绕过它（见 probe()）。
         self._raw_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+        #: 探测短缓存（30 秒）：只用于同一 tick 内多群复用，绝不参与完整性判定
+        self._probe_cache: Dict[Tuple[str, str], Tuple[float, Sample]] = {}
         self._nowcoder_history: Dict[str, Tuple[float, List[dict]]] = {}
         self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
         #: {(platform, contest_id): {...}}：赛程接口只给未开始的比赛，
@@ -212,9 +392,15 @@ class SettlementService:
         now: datetime,
         delay_minutes: int,
         *,
-        window_hours: float = 2.0,
+        window_hours: Optional[float] = None,
     ) -> List[Contest]:
-        """从最近记录里挑出"刚结束、仍在补推窗口内"的比赛。"""
+        """从最近记录里挑出"刚结束、仍在补推窗口内"的比赛。
+
+        严格完整门禁下窗口按平台取值（CF 24h / AtCoder 12h / 牛客 12h / 洛谷 6h），
+        否则 CF 的系统重测还没结束，比赛记录就先被淘汰了。
+        """
+        if window_hours is None:
+            window_hours = SETTLE_WINDOW_HOURS.get(str(platform), 2.0)
         moment = now.timestamp() if isinstance(now, datetime) else float(now)
         out: List[Contest] = []
         for (item_platform, _contest_id), payload in self._recent.items():
@@ -311,6 +497,8 @@ class SettlementService:
         platform: str,
         contest,
         members: Sequence[Tuple[str, str, str]],
+        *,
+        include_unofficial: bool = True,
     ) -> Optional[SettleResult]:
         """采集本群成员在该场比赛的赛果。
 
@@ -343,7 +531,9 @@ class SettlementService:
                 return cached[1]
             try:
                 if platform == "codeforces":
-                    result = await self._collect_codeforces(contest, members)
+                    result = await self._collect_codeforces(
+                        contest, members, include_unofficial=include_unofficial
+                    )
                 elif platform == "atcoder":
                     result = await self._collect_atcoder(contest, members)
                 elif platform == "nowcoder":
@@ -375,12 +565,86 @@ class SettlementService:
             self._result_cache = dict(newest)
 
     # ------------------------------------------------------------------
+    # 严格门禁：探测（settle strict probe）
+    # ------------------------------------------------------------------
+    async def probe(
+        self,
+        platform: str,
+        contest: Any,
+        members: Sequence[Tuple[str, str, str]],
+        *,
+        force: bool = False,
+    ) -> Sample:
+        """探测一次"平台侧是否已结算完成"（严格完整门禁的输入）。
+
+        同一 tick 内多群复用 30 秒的 probe_cache；探测路径**不读 final_cache**，
+        否则重测前后的数据会互相污染。
+        """
+        platform = str(platform)
+        cid = str(getattr(contest, "contest_id", "") or "")
+        key = (platform, cid)
+        cached = self._probe_cache.get(key)
+        if cached is not None and not force and time.time() - cached[0] < SETTLE_PROBE_TTL:
+            return cached[1]
+        sample = await self._probe_platform(platform, contest, members)
+        self._probe_cache[key] = (time.time(), sample)
+        if len(self._probe_cache) > CACHE_MAX_ENTRIES:
+            newest = sorted(
+                self._probe_cache.items(), key=lambda pair: pair[1][0], reverse=True
+            )[: CACHE_MAX_ENTRIES // 2]
+            self._probe_cache = dict(newest)
+        return sample
+
+    async def _probe_platform(
+        self, platform: str, contest: Any, members: Sequence[Tuple[str, str, str]]
+    ) -> Sample:
+        """按平台取一次样本：AtCoder 用榜单行数，CF 用 phase，牛客/洛谷用命中集合。"""
+        cid = str(getattr(contest, "contest_id", "") or "").strip()
+        if not cid:
+            return Sample()
+        if platform == "atcoder":
+            index, total_rows = await self._atcoder_results_index(cid, fresh=True)
+            if not index and not total_rows:
+                return Sample()
+            rows = int(total_rows or len(index))
+            return Sample(rows=rows, fingerprint=f"rows:{rows}")
+        if platform == "codeforces":
+            data = await self._cf_standings_meta(cid, fresh=True)
+            if not data["rows"]:
+                return Sample(hint_ready=False)
+            phase = str(data["phase"] or "")
+            ready = bool(phase == "FINISHED" and not data["preliminary"])
+            return Sample(
+                rows=len(data["rows"]),
+                fingerprint=f"rows:{len(data['rows'])}:{phase}",
+                hint_ready=ready,
+                payload=data,
+            )
+        if platform == "nowcoder":
+            result = await self._collect_nowcoder(contest, members)
+        else:
+            result = await self._collect_luogu(contest, members)
+        if result is None:
+            return Sample(rows=0, fingerprint="empty")
+        keys = sorted(
+            str(row.handle or row.display_name).casefold() for row in result.rows
+        ) or [str(result.extra_note or "")]
+        digest = hashlib.sha1("|".join(keys).encode("utf-8")).hexdigest()[:12]
+        return Sample(rows=len(keys), fingerprint=f"set:{digest}", payload=result)
+
+    # ------------------------------------------------------------------
     # Codeforces
     # ------------------------------------------------------------------
-    async def _cf_standings(self, contest_id: str) -> Tuple[list, list]:
-        """CF 榜单原始数据（跨群共享缓存，避免每个群都拉一次 248KB）。"""
+    async def _cf_standings_meta(
+        self, contest_id: str, *, fresh: bool = False
+    ) -> Dict[str, Any]:
+        """CF 榜单原始数据 + 结算状态（phase / 是否仍有 PRELIMINARY）。
+
+        fresh=True 供严格门禁探测使用：**必须绕过 6 小时缓存**，
+        否则重测前后两份数据会互相污染。
+        """
         key = ("codeforces", str(contest_id))
-        cached = self._raw_cache.get(key)
+        cached = None if fresh else self._raw_cache.get(key)
         if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
             return cached[1]
         # 注意：CF 对非管理员只允许"匿名 GET 且不带任何额外参数"，
@@ -394,30 +658,168 @@ class SettlementService:
             comment = payload.get("comment") if isinstance(payload, dict) else payload
             raise ValueError(f"CF standings 返回异常：{comment}")
         result = payload.get("result") or {}
-        data = (result.get("rows") or [], result.get("problems") or [])
-        self._raw_cache[key] = (time.time(), data)
-        if len(self._raw_cache) > CACHE_MAX_ENTRIES:
-            newest = sorted(self._raw_cache.items(), key=lambda pair: pair[1][0], reverse=True)[
-                : CACHE_MAX_ENTRIES // 2
-            ]
-            self._raw_cache = dict(newest)
+        rows = result.get("rows") or []
+        contest_meta = result.get("contest") or {}
+        preliminary = any(
+            str(item.get("type") or "").upper() == "PRELIMINARY"
+            for row in rows
+            if isinstance(row, dict)
+            for item in (row.get("problemResults") or [])
+        )
+        data: Dict[str, Any] = {
+            "rows": rows,
+            "problems": result.get("problems") or [],
+            "phase": str(contest_meta.get("phase") or ""),
+            "preliminary": preliminary,
+            "name": str(contest_meta.get("name") or ""),
+            "duration": _as_int(contest_meta.get("durationSeconds")) or 0,
+        }
+        if not fresh:
+            self._raw_cache[key] = (time.time(), data)
+            if len(self._raw_cache) > CACHE_MAX_ENTRIES:
+                newest = sorted(
+                    self._raw_cache.items(), key=lambda pair: pair[1][0], reverse=True
+                )[: CACHE_MAX_ENTRIES // 2]
+                self._raw_cache = dict(newest)
         return data
 
-    async def _collect_codeforces(
-        self, contest, members: Sequence[Tuple[str, str, str]]
-    ) -> Optional[SettleResult]:
-        contest_id = str(contest.contest_id)
-        raw_rows, problems = await self._cf_standings(contest_id)
-        if not raw_rows:
-            return None
+    async def _cf_rating_changes(self, contest_id: str) -> Dict[str, Dict[str, Any]]:
+        """CF 计分参赛全员名单（handle → {old,new}）。
 
+        contest.standings 在 Div2/Div3 会少于实际计分人数（实测 2269：7474 vs 10453），
+        打星/榜外成员只能靠这份名单判断；拿不到时返回 {}（不影响正式行）。
+        """
+        key = ("codeforces", f"changes:{contest_id}")
+        cached = self._raw_cache.get(key)
+        if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
+            return cached[1]
+        out: Dict[str, Dict[str, Any]] = {}
+        try:
+            payload = await self.fetcher._cf_json(
+                "contest.ratingChanges",
+                {"contestId": str(contest_id)},
+                timeout=CF_STANDINGS_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 - 名单不可用不该影响正式行
+            logger.warning("CF 计分名单获取失败（%s）：%s", contest_id, exc)
+            return {}
+        if isinstance(payload, dict) and payload.get("status") == "OK":
+            for item in payload.get("result") or []:
+                if not isinstance(item, dict):
+                    continue
+                handle = str(item.get("handle") or "").strip().casefold()
+                if handle:
+                    out[handle] = {
+                        "old": _as_int(item.get("oldRating")),
+                        "new": _as_int(item.get("newRating")),
+                    }
+        if out:
+            self._raw_cache[key] = (time.time(), out)
+        return out
+
+    async def _cf_status_solved(
+        self, contest_id: str, duration_seconds: int
+    ) -> Dict[str, int]:
+        """比赛窗口内提交过的成员 → 通过题数（打星成员没有官方名次，用它补成绩）。
+
+        窗口过滤 relativeTimeSeconds ≤ duration + 60，避免把赛后练习/虚拟参赛算进来。
+        """
+        key = ("codeforces", f"status:{contest_id}")
+        cached = self._raw_cache.get(key)
+        if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
+            return cached[1]
+        try:
+            payload = await self.fetcher._cf_json(
+                "contest.status",
+                {"contestId": str(contest_id)},
+                timeout=CF_STANDINGS_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 - 明细拿不到时打星行只显示名字
+            logger.warning("CF 提交明细获取失败（%s）：%s", contest_id, exc)
+            return {}
+        solved: Dict[str, set] = {}
+        if isinstance(payload, dict) and payload.get("status") == "OK":
+            for item in payload.get("result") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    rel = int(item.get("relativeTimeSeconds"))
+                except (TypeError, ValueError):
+                    continue
+                if duration_seconds and rel > duration_seconds + 60:
+                    continue
+                author = item.get("author") or {}
+                for member in author.get("members") or []:
+                    if not isinstance(member, dict):
+                        continue
+                    handle = str(member.get("handle") or "").strip().casefold()
+                    if not handle:
+                        continue
+                    solved.setdefault(handle, set())
+                    if str(item.get("verdict") or "") == "OK":
+                        index = str((item.get("problem") or {}).get("index") or "")
+                        if index:
+                            solved[handle].add(index)
+        out = {handle: len(items) for handle, items in solved.items()}
+        if out:
+            self._raw_cache[key] = (time.time(), out)
+        return out
+
+    async def _cf_unofficial_rows(
+        self,
+        contest_id: str,
+        problems: Sequence[dict],
+        meta: Dict[str, Any],
+        members: Sequence[Tuple[str, str, str]],
+        official_handles: set,
+    ) -> List[SettleRow]:
+        """榜外/打星成员：在计分名单或比赛窗口内有提交，但不在官方榜单。"""
+        pending = [
+            (user_id, display, handle)
+            for user_id, display, handle in members
+            if str(handle or "").strip()
+            and str(handle).casefold() not in official_handles
+        ]
+        if not pending:
+            return []
+        changes = await self._cf_rating_changes(contest_id)
+        status = await self._cf_status_solved(
+            contest_id, int(meta.get("duration") or 0)
+        )
+        out: List[SettleRow] = []
+        for user_id, display, handle in pending:
+            key = str(handle).casefold()
+            if key not in changes and key not in status:
+                continue
+            out.append(
+                SettleRow(
+                    platform="codeforces",
+                    user_id=str(user_id),
+                    display_name=str(display or handle),
+                    handle=str(handle),
+                    rank=None,
+                    user_count=None,
+                    solved=status.get(key),
+                    total_problems=len(problems),
+                    source="cf-ratingChanges",
+                    unofficial=True,
+                )
+            )
+        return out
+
+    def _cf_official_rows(
+        self,
+        raw_rows: Sequence[dict],
+        problems: Sequence[dict],
+        members: Sequence[Tuple[str, str, str]],
+    ) -> List[SettleRow]:
+        """官方榜单里的本群成员（名次/通过题数，逻辑与旧版一致）。"""
         lookup = {
             str(handle).casefold(): (str(user_id), str(display or handle), str(handle))
             for user_id, display, handle in members
             if handle
         }
         rows: List[SettleRow] = []
-        preliminary = False
         for raw in raw_rows:
             if not isinstance(raw, dict):
                 continue
@@ -430,7 +832,8 @@ class SettlementService:
                 if hit is None:
                     continue
                 problem_results = [
-                    item for item in (raw.get("problemResults") or [])
+                    item
+                    for item in (raw.get("problemResults") or [])
                     if isinstance(item, dict)
                 ]
                 solved = sum(
@@ -441,11 +844,6 @@ class SettlementService:
                     if (item.get("points") or 0) > 0:
                         continue
                     unsolved.append(self._problem_index(problems, index))
-                if any(
-                    str(item.get("type") or "").upper() == "PRELIMINARY"
-                    for item in problem_results
-                ):
-                    preliminary = True
                 rows.append(
                     SettleRow(
                         platform="codeforces",
@@ -460,12 +858,39 @@ class SettlementService:
                         source="cf-standings",
                     )
                 )
-        if not rows:
+        return rows
+
+    async def _collect_codeforces(
+        self,
+        contest,
+        members: Sequence[Tuple[str, str, str]],
+        *,
+        include_unofficial: bool = True,
+    ) -> Optional[SettleResult]:
+        contest_id = str(contest.contest_id)
+        meta = await self._cf_standings_meta(contest_id)
+        raw_rows = meta["rows"]
+        problems = meta["problems"]
+        if not raw_rows:
             return None
-        rows.sort(key=lambda row: (row.rank is None, row.rank or 0))
-        note = "数据源：Codeforces 官方 standings"
-        if preliminary:
-            note += " · 重测中，名次可能微调"
+        rows = self._cf_official_rows(raw_rows, problems, members)
+        unofficial: List[SettleRow] = []
+        if include_unofficial:
+            unofficial = await self._cf_unofficial_rows(
+                contest_id,
+                problems,
+                meta,
+                members,
+                {str(row.handle).casefold() for row in rows},
+            )
+        if not rows and not unofficial:
+            return None
+        rows.extend(unofficial)
+        # 正式行按名次在前；打星行统一置尾
+        rows.sort(key=lambda row: (row.unofficial, row.rank is None, row.rank or 0))
+        note = "数据源：Codeforces 官方 standings（已结算）"
+        if unofficial:
+            note += f" · 另有 {len(unofficial)} 人打星（榜外），不计官方名次"
         return SettleResult(
             platform="codeforces",
             contest_id=contest_id,
@@ -688,10 +1113,16 @@ class SettlementService:
     # ------------------------------------------------------------------
     # 洛谷
     # ------------------------------------------------------------------
-    async def _atcoder_results_index(self, slug: str) -> Tuple[Dict[str, dict], int]:
-        """AtCoder 官方 results 的"用户名 → 行"索引（跨群共享缓存）。"""
+    async def _atcoder_results_index(
+        self, slug: str, *, fresh: bool = False
+    ) -> Tuple[Dict[str, dict], int]:
+        """AtCoder 官方 results 的"用户名 → 行"索引（跨群共享缓存）。
+
+        fresh=True 供严格门禁探测使用：绕过 6 小时缓存，避免把"半截榜单"
+        当成最终数据（生产实测：T+37min 只有 3594/11547 行）。
+        """
         key = ("atcoder", str(slug))
-        cached = self._raw_cache.get(key)
+        cached = None if fresh else self._raw_cache.get(key)
         if cached is not None and time.time() - cached[0] < SETTLE_RESULT_TTL:
             return cached[1]
         payload = await self.fetcher._fetch_json(
@@ -709,7 +1140,7 @@ class SettlementService:
                     name = str(item.get(name_key) or "").strip()
                     if name:
                         index.setdefault(name.casefold(), item)
-        if index:
+        if index and not fresh:
             self._raw_cache[key] = (time.time(), (index, total_rows))
         return index, total_rows
 

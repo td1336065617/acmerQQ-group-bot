@@ -53,11 +53,19 @@ class FakeSettlement:
         self.calls = 0
         self._real = SettlementService(None)
 
-    async def collect(self, platform, contest, members):
+    async def collect(self, platform, contest, members, **kwargs):
         self.calls += 1
         if self.error:
             raise self.error
         return self.result
+
+    # 严格门禁相关方法委托给真实服务（本文件默认关闭严格模式，见 _build_bot 的 settings）
+    async def probe(self, platform, contest, members, **kwargs):
+        return await self._real.probe(platform, contest, members, **kwargs)
+
+    def next_poll_delay_minutes(self, platform, attempts, **kwargs):
+        return self._real.next_poll_delay_minutes(platform, attempts, **kwargs)
+
 
     def remember_contests(self, platform, contests, **kwargs):
         return self._real.remember_contests(platform, contests, **kwargs)
@@ -99,6 +107,8 @@ def _build_bot(main_module, *, groups, contests, members, accounts, settlement, 
             "settle_delay_minutes": 10,
             "settle_min_participants": 1,
             "settle_show_unsolved": True,
+            # 本文件的用例覆盖"推送/幂等/跳过"旧路径；严格门禁有独立用例
+            "settle_strict_enabled": False,
         }
         base.update(settings or {})
         return base
@@ -207,11 +217,11 @@ def test_delay_window_filters_contests():
             settlement=FakeSettlement(result=_result()),
         )
         assert await bot.tick_settlements() == 0
-        # 结束 3 小时（超出 2 小时补推窗口）→ 不推
+        # 结束 30 小时（超出 CF 24 小时门禁窗口）→ 不推
         bot = _build_bot(
             main_module,
             groups=[GROUP],
-            contests={"codeforces": [_contest(hours_ago=3)]},
+            contests={"codeforces": [_contest(hours_ago=30)]},
             members=MEMBERS,
             accounts=ACCOUNTS,
             settlement=FakeSettlement(result=_result()),

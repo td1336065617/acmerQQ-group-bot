@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # AstrBot 按 `data.plugins.<插件目录>.main` 加载插件，使用相对导入可避免
 # 不同插件/旧版本之间共享顶层 `src` 模块缓存。
@@ -38,7 +38,15 @@ from .src.contest_fetcher import (
 from .src.plugin_paths import migrate_known_caches, plugin_cache_dir
 from .src.rank_service import RankService
 from .src.group_names import event_group_name, fetch_group_name
-from .src.settlement import SETTLE_PLATFORMS, SettlementService
+from .src.settlement import (
+    MAX_WAIT_MINUTES as SETTLE_MAX_WAIT_MINUTES,
+    POLL_SAMPLE_KEEP,
+    SETTLE_PLATFORMS,
+    SettlementService,
+    evaluate_readiness,
+    new_poll_state,
+    poll_key as settle_poll_key,
+)
 from .src.problem_service import ProblemService, weak_tags_from_analysis
 from .src.account_cards import (
     SETTLE_CARD_MAX_ROWS,
@@ -120,6 +128,30 @@ SETTLE_WINDOW_HOURS = 2
 DEFAULT_SETTLE_MIN_PARTICIPANTS = 1
 MIN_SETTLE_MIN_PARTICIPANTS = 1
 MAX_SETTLE_MIN_PARTICIPANTS = 10
+
+# 严格完整门禁（settle strict）：只在平台侧结算完成后推送一次
+DEFAULT_SETTLE_STABLE_SAMPLES = 2
+MIN_SETTLE_STABLE_SAMPLES = 2
+MAX_SETTLE_STABLE_SAMPLES = 4
+DEFAULT_SETTLE_ATCODER_MIN_AGE_MINUTES = 45
+MIN_SETTLE_MIN_AGE_MINUTES = 0
+MAX_SETTLE_MIN_AGE_MINUTES = 120
+DEFAULT_SETTLE_CF_MAX_WAIT_MINUTES = 1440
+DEFAULT_SETTLE_ATCODER_MAX_WAIT_MINUTES = 720
+DEFAULT_SETTLE_NOWCODER_MAX_WAIT_MINUTES = 720
+DEFAULT_SETTLE_LUOGU_MAX_WAIT_MINUTES = 360
+MIN_SETTLE_MAX_WAIT_MINUTES = 60
+MAX_SETTLE_MAX_WAIT_MINUTES = 1440
+DEFAULT_SETTLE_NIGHT_SCALE = 2
+MIN_SETTLE_NIGHT_SCALE = 1
+MAX_SETTLE_NIGHT_SCALE = 4
+#: 平台 → "最长等待"设置键
+SETTLE_MAX_WAIT_KEYS = {
+    "codeforces": "settle_cf_max_wait_minutes",
+    "atcoder": "settle_atcoder_max_wait_minutes",
+    "nowcoder": "settle_nowcoder_max_wait_minutes",
+    "luogu": "settle_luogu_max_wait_minutes",
+}
 # 群训练周报（A3）：默认每周一 20:00 推一次，ISO 周幂等（同一周每群只推一次）。
 DEFAULT_WEEKLY_REPORT_ENABLED = True
 DEFAULT_WEEKLY_REPORT_WEEKDAY = 1
@@ -830,6 +862,56 @@ class AcmerGroupBot(Star):
                 MAX_SETTLE_MIN_PARTICIPANTS,
             ),
             "settle_show_unsolved": bool(raw.get("settle_show_unsolved", True)),
+            "settle_strict_enabled": bool(raw.get("settle_strict_enabled", True)),
+            "settle_stable_samples": self._read_bounded_int(
+                raw.get("settle_stable_samples"),
+                DEFAULT_SETTLE_STABLE_SAMPLES,
+                MIN_SETTLE_STABLE_SAMPLES,
+                MAX_SETTLE_STABLE_SAMPLES,
+            ),
+            "settle_atcoder_min_age_minutes": self._read_bounded_int(
+                raw.get("settle_atcoder_min_age_minutes"),
+                DEFAULT_SETTLE_ATCODER_MIN_AGE_MINUTES,
+                MIN_SETTLE_MIN_AGE_MINUTES,
+                MAX_SETTLE_MIN_AGE_MINUTES,
+            ),
+            "settle_cf_max_wait_minutes": self._read_bounded_int(
+                raw.get("settle_cf_max_wait_minutes"),
+                DEFAULT_SETTLE_CF_MAX_WAIT_MINUTES,
+                MIN_SETTLE_MAX_WAIT_MINUTES,
+                MAX_SETTLE_MAX_WAIT_MINUTES,
+            ),
+            "settle_atcoder_max_wait_minutes": self._read_bounded_int(
+                raw.get("settle_atcoder_max_wait_minutes"),
+                DEFAULT_SETTLE_ATCODER_MAX_WAIT_MINUTES,
+                MIN_SETTLE_MAX_WAIT_MINUTES,
+                MAX_SETTLE_MAX_WAIT_MINUTES,
+            ),
+            "settle_nowcoder_max_wait_minutes": self._read_bounded_int(
+                raw.get("settle_nowcoder_max_wait_minutes"),
+                DEFAULT_SETTLE_NOWCODER_MAX_WAIT_MINUTES,
+                MIN_SETTLE_MAX_WAIT_MINUTES,
+                MAX_SETTLE_MAX_WAIT_MINUTES,
+            ),
+            "settle_luogu_max_wait_minutes": self._read_bounded_int(
+                raw.get("settle_luogu_max_wait_minutes"),
+                DEFAULT_SETTLE_LUOGU_MAX_WAIT_MINUTES,
+                MIN_SETTLE_MAX_WAIT_MINUTES,
+                MAX_SETTLE_MAX_WAIT_MINUTES,
+            ),
+            "settle_include_unofficial": bool(
+                raw.get("settle_include_unofficial", True)
+            ),
+            "settle_unofficial_label": str(
+                raw.get("settle_unofficial_label") or "打星"
+            )[:8],
+            "settle_abandon_notice": bool(raw.get("settle_abandon_notice", True)),
+            "settle_night_scale": self._read_bounded_int(
+                raw.get("settle_night_scale"),
+                DEFAULT_SETTLE_NIGHT_SCALE,
+                MIN_SETTLE_NIGHT_SCALE,
+                MAX_SETTLE_NIGHT_SCALE,
+            ),
             "daily_problem_enabled": bool(raw.get("daily_problem_enabled", True)),
             "daily_problem_platform": self._read_daily_problem_platform(
                 raw.get("daily_problem_platform")
@@ -4065,6 +4147,7 @@ class AcmerGroupBot(Star):
         subtitle: str,
         note: str = "",
         platform_order=None,
+        unofficial_label: str = "打星",
     ):
         """渲染赛果卡；失败时返回 None，由调用方发送纯文本。"""
         try:
@@ -4075,6 +4158,7 @@ class AcmerGroupBot(Star):
                 subtitle=subtitle,
                 note=note,
                 platform_order=platform_order,
+                unofficial_label=unofficial_label,
             )
         except Exception as exc:  # noqa: BLE001 - UI 失败不能阻断推送
             logger.error("赛果卡渲染失败，改用文字：%s", exc, exc_info=True)
@@ -4116,7 +4200,10 @@ class AcmerGroupBot(Star):
         """赛果卡的纯文本兜底（渲染不可用时使用）。"""
         lines = [f"🏁 {result.contest_name} 赛果"]
         for row in result.rows:
-            rank = f"#{row.rank}" if row.rank else "—"
+            if getattr(row, "unofficial", False):
+                rank = "打星"
+            else:
+                rank = f"#{row.rank}" if row.rank else "—"
             solved = (
                 f"{row.solved}/{row.total_problems} 题"
                 if row.solved is not None and row.total_problems
@@ -4191,8 +4278,16 @@ class AcmerGroupBot(Star):
                         )
                         if str(marker.get("members") or "") == current:
                             continue
+                    strict_mode = bool(settings.get("settle_strict_enabled", True))
+                    strict_poll_key = ""
+                    if strict_mode:
+                        verdict, strict_poll_key = await self._settle_gate(
+                            group, platform, contest, settings, moment
+                        )
+                        if verdict != "ready":
+                            continue  # wait / abandoned：本 tick 不推送
                     try:
-                        pushed += await self._push_settlement(
+                        pushed_now = await self._push_settlement(
                             group,
                             platform,
                             contest,
@@ -4200,7 +4295,16 @@ class AcmerGroupBot(Star):
                             min_participants=min_participants,
                             show_unsolved=show_unsolved,
                             platform_order=list(platforms),
+                            include_unofficial=bool(
+                                settings.get("settle_include_unofficial", True)
+                            ),
+                            unofficial_label=str(
+                                settings.get("settle_unofficial_label") or "打星"
+                            ),
                         )
+                        pushed += pushed_now
+                        if strict_mode and pushed_now and strict_poll_key:
+                            await self._settle_mark_pushed(strict_poll_key)
                     except Exception as exc:  # noqa: BLE001 - 单场失败不影响其他群/平台
                         logger.warning(
                             "群 %s 的 %s %s 赛果处理失败：%s",
@@ -4215,6 +4319,154 @@ class AcmerGroupBot(Star):
             logger.warning("保存最近比赛记录失败：%s", exc)
         return pushed
 
+    # ------------------------------------------------------------------
+    # 严格完整门禁（settle strict）：只在平台结算完成后推送一次
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _settle_max_wait_minutes(platform: str, settings: dict) -> int:
+        key = SETTLE_MAX_WAIT_KEYS.get(str(platform), "")
+        try:
+            value = int(settings.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+        return int(SETTLE_MAX_WAIT_MINUTES.get(str(platform), 720))
+
+    async def _settle_gate(
+        self,
+        group: GroupConfig,
+        platform: str,
+        contest,
+        settings: dict,
+        moment: datetime,
+    ) -> Tuple[str, str]:
+        """严格完整门禁：返回 (verdict, poll_key)，verdict ∈ ready/wait/abandoned。
+
+        - 就绪判据：CF phase=FINISHED 且无 PRELIMINARY；其余平台"稳定窗口 + 最小等待"
+        - 未就绪：写轮询状态并排队下次探测（间隔按平台序列推进，夜间放大）
+        - 超过最长等待：写 ABANDONED + 群内一句异常提示，本场不再推送
+        """
+        poll_key = settle_poll_key(platform, contest.contest_id, group.group_id)
+        now_ts = moment.timestamp() if isinstance(moment, datetime) else float(moment)
+        state = await self.get_kv_data(poll_key, None)
+        if not isinstance(state, dict):
+            state = new_poll_state(now_ts)
+        current_state = str(state.get("state") or "POLLING")
+        if current_state == "PUSHED":
+            return "ready", poll_key
+        if current_state == "ABANDONED":
+            return "abandoned", poll_key
+        try:
+            if float(state.get("next_poll_at") or 0) > now_ts:
+                return "wait", poll_key
+        except (TypeError, ValueError):
+            pass
+        members = await self._settlement_members(group.group_id, platform)
+        try:
+            sample = await self.settlement.probe(platform, contest, members)
+        except Exception as exc:  # noqa: BLE001 - 探测失败等同于"未就绪"
+            logger.warning(
+                "赛果门禁探测失败（%s %s）：%s", platform, contest.contest_id, exc
+            )
+            return "wait", poll_key
+        end_time = getattr(contest, "end_time", None)
+        elapsed_minutes = 0.0
+        if isinstance(end_time, datetime):
+            elapsed_minutes = max(0.0, (now_ts - end_time.timestamp()) / 60.0)
+        ready, reason = evaluate_readiness(
+            platform,
+            sample,
+            state,
+            elapsed_minutes,
+            stable_samples=int(settings.get("settle_stable_samples") or 2),
+            min_age_minutes=(
+                float(settings.get("settle_atcoder_min_age_minutes") or 45)
+                if platform == "atcoder"
+                else None
+            ),
+            now_ts=now_ts,
+        )
+        max_wait = self._settle_max_wait_minutes(platform, settings)
+        if not ready and elapsed_minutes > max_wait:
+            state.update(
+                state="ABANDONED",
+                abandoned_reason=reason,
+                elapsed_minutes=elapsed_minutes,
+            )
+            await self.put_kv_data(poll_key, state)
+            if settings.get("settle_abandon_notice", True):
+                await self._notify_settle_abandoned(group, contest)
+            await self._log_push(group.group_id, "settle", False, "数据未结算完成")
+            logger.warning(
+                "群 %s 的 %s %s 未在 %d 分钟内结算完成，本次不推送"
+                "（最后样本 %s 行，T+%.0f 分钟）",
+                group.group_id,
+                platform,
+                contest.contest_id,
+                max_wait,
+                sample.rows,
+                elapsed_minutes,
+            )
+            return "abandoned", poll_key
+        samples = list(state.get("samples") or [])
+        samples.append(sample.brief())
+        state["samples"] = samples[-POLL_SAMPLE_KEEP:]
+        if not ready:
+            night = 0 <= getattr(moment, "hour", 12) < 7
+            delay = self.settlement.next_poll_delay_minutes(
+                platform,
+                int(state.get("attempts") or 0),
+                night=night,
+                night_scale=float(settings.get("settle_night_scale") or 2),
+            )
+            state.update(
+                attempts=int(state.get("attempts") or 0) + 1,
+                next_poll_at=now_ts + delay * 60.0,
+            )
+            await self.put_kv_data(poll_key, state)
+            logger.info(
+                "赛果门禁：%s %s 尚未结算完成（%s；样本 %s 行；%.0f 分钟后重试）",
+                platform,
+                contest.contest_id,
+                reason,
+                sample.rows,
+                delay,
+            )
+            return "wait", poll_key
+        state.update(state="READY", ready_at=now_ts, elapsed_minutes=elapsed_minutes)
+        await self.put_kv_data(poll_key, state)
+        logger.info(
+            "赛果门禁：%s %s 已结算完成（%s；样本 %s 行；T+%.0f 分钟）",
+            platform,
+            contest.contest_id,
+            reason,
+            sample.rows,
+            elapsed_minutes,
+        )
+        return "ready", poll_key
+
+    async def _settle_mark_pushed(self, poll_key: str) -> None:
+        """推送成功后把轮询状态置为终态（本场不再重新评估）。"""
+        state = await self.get_kv_data(poll_key, None)
+        if isinstance(state, dict):
+            state["state"] = "PUSHED"
+            await self.put_kv_data(poll_key, state)
+
+    async def _notify_settle_abandoned(self, group: GroupConfig, contest) -> None:
+        """超时未结算：给群发一句纯文本提示（每群每场一次）。"""
+        name = str(getattr(contest, "name", "") or getattr(contest, "contest_id", ""))
+        text = f"【{name}】本场数据结算异常，本次不推送。"
+        try:
+            ok = await self.send_notification(group, text)
+            logger.info(
+                "群 %s 已收到数据结算异常提示（%s）",
+                group.group_id,
+                "成功" if ok else "失败",
+            )
+        except Exception as exc:  # noqa: BLE001 - 提示失败不影响其它群/场次
+            logger.warning("发送数据结算异常提示失败（群 %s）：%s", group.group_id, exc)
+
     async def _push_settlement(
         self,
         group: GroupConfig,
@@ -4226,6 +4478,8 @@ class AcmerGroupBot(Star):
         show_unsolved: bool,
         platform_order: List[str],
         write_key: bool = True,
+        include_unofficial: bool = True,
+        unofficial_label: str = "打星",
     ) -> int:
         """处理单场赛果：采集 → 渲染 → 推送 → 写幂等键；返回 1/0。
 
@@ -4265,7 +4519,9 @@ class AcmerGroupBot(Star):
                 except Exception as exc:  # noqa: BLE001 - 标记写失败不影响其它群/场次
                     logger.warning("写赛果跳过标记失败：%s（%s）", key, exc)
             return 0
-        result = await self.settlement.collect(platform, contest, members)
+        result = await self.settlement.collect(
+            platform, contest, members, include_unofficial=include_unofficial
+        )
         if result is None:
             logger.info(
                 "群 %s 跳过 %s %s 赛果：赛果采集失败（接口异常或平台未公开）",
@@ -4316,6 +4572,7 @@ class AcmerGroupBot(Star):
                 subtitle=subtitle,
                 note=note,
                 platform_order=platform_order,
+                unofficial_label=unofficial_label,
             )
         if image_path is not None and Path(image_path).is_file():
             ok = await self._send_group_image(group, image_path, caption=title)
@@ -4331,7 +4588,19 @@ class AcmerGroupBot(Star):
             )
             return 0
         if write_key and key:
-            await self.put_kv_data(key, True)
+            # 幂等键结构化：便于审计"这张卡是基于哪份数据推的"，并兼容旧值 true
+            await self.put_kv_data(
+                key,
+                {
+                    "state": "pushed",
+                    "pushed_at": time.time(),
+                    "rows": len(result.rows),
+                    "complete": True,
+                    "unofficial_count": sum(
+                        1 for row in result.rows if getattr(row, "unofficial", False)
+                    ),
+                },
+            )
         await self._log_push(
             group.group_id,
             "settle",

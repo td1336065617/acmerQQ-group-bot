@@ -437,7 +437,17 @@
       { key: 'settle_push_enabled', label: '赛后赛果推送', type: 'bool', desc: '比赛结束后推一张名次卡（名次/通过题数/参赛人数，不含 Rating 变化）' },
       { key: 'settle_delay_minutes', label: '推送延迟（分钟）', type: 'number', min: 1, max: 60, desc: '默认 10，范围 1～60；超过 2 小时未拿到赛果则不再补推' },
       { key: 'settle_min_participants', label: '最少参赛人数', type: 'number', min: 1, max: 10, desc: '默认 1，范围 1～10；低于该人数不推送' },
-      { key: 'settle_show_unsolved', label: '赛果卡附“本场未通过题目”（仅 Codeforces）', type: 'bool' }
+      { key: 'settle_show_unsolved', label: '赛果卡附“本场未通过题目”（仅 Codeforces）', type: 'bool' },
+      { key: 'settle_strict_enabled', label: '严格完整门禁（结算完成后只推一次）', type: 'bool', desc: '默认开。开启后卡片可能晚到几分钟到数小时，但不会出现“重测中”或半截榜单的名次；异常超时会发一句提示、不发卡' },
+      { key: 'settle_stable_samples', label: '稳定采样次数', type: 'number', min: 2, max: 4, desc: '默认 2；配合“稳定窗口”判断榜单是否还在增长' },
+      { key: 'settle_atcoder_min_age_minutes', label: 'AtCoder 最小等待（分钟）', type: 'number', min: 0, max: 120, desc: '默认 45；仅作下限，真正判据是“稳定窗口”' },
+      { key: 'settle_cf_max_wait_minutes', label: 'CF 最长等待（分钟）', type: 'number', min: 60, max: 1440, desc: '默认 1440（24 小时），系统重测可能很久' },
+      { key: 'settle_atcoder_max_wait_minutes', label: 'AtCoder 最长等待（分钟）', type: 'number', min: 60, max: 1440, desc: '默认 720（12 小时）' },
+      { key: 'settle_nowcoder_max_wait_minutes', label: '牛客最长等待（分钟）', type: 'number', min: 60, max: 1440, desc: '默认 720（12 小时）' },
+      { key: 'settle_luogu_max_wait_minutes', label: '洛谷最长等待（分钟）', type: 'number', min: 60, max: 1440, desc: '默认 360（6 小时）' },
+      { key: 'settle_include_unofficial', label: '补 CF 打星（榜外）成员', type: 'bool', desc: '默认开。打星成员没有官方名次，卡上显示“打星 · 通过 x 题”' },
+      { key: 'settle_abandon_notice', label: '超时未结算时群内提示', type: 'bool', desc: '默认开：发一句“本场数据结算异常，本次不推送”' },
+      { key: 'settle_night_scale', label: '夜间轮询间隔倍数', type: 'number', min: 1, max: 4, desc: '默认 2；00:30–07:00 把轮询间隔放大，减少无谓请求' }
     ] },
     { id: 'weekly', title: '训练周报', fields: [
       { key: 'weekly_report_enabled', label: '群训练周报', type: 'bool', desc: '每周一次推送本周进步榜 / 退步榜两张卡 + 文字统计' },

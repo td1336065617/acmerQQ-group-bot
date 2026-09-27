@@ -133,7 +133,8 @@ def test_codeforces_rows_are_matched_and_ranked():
         assert result.rows[0].user_count == 3
         # 大小写不敏感匹配
         assert result.rows[1].handle == "BOB"
-        assert "重测中" in result.note
+        # 严格门禁后不再推"重测中"的数据，卡片口径改为"已结算"
+        assert "已结算" in result.note
 
     asyncio.run(scenario())
 
@@ -153,7 +154,8 @@ def test_codeforces_request_carries_only_contest_id():
     asyncio.run(scenario())
 
 
-def test_codeforces_without_preliminary_has_no_warning():
+def test_codeforces_note_no_longer_mentions_retest():
+    """严格门禁替代了"重测中"提示：任何情况下都不再出现该措辞。"""
     async def scenario():
         payload = _cf_standings_payload()
         for row in payload["result"]["rows"]:
@@ -167,6 +169,7 @@ def test_codeforces_without_preliminary_has_no_warning():
             [("u1", "张三", "Alice")],
         )
         assert "重测中" not in result.note
+        assert "已结算" in result.note
 
     asyncio.run(scenario())
 
@@ -401,17 +404,27 @@ def test_remember_and_select_candidates():
     async def scenario():
         service = SettlementService(FakeFetcher())
         now = datetime.now(timezone.utc)
-        # 已结束 12 分钟（>10 分钟延迟，<2 小时窗口）→ 应成为候选
-        ended = _contest("codeforces", "1", "刚结束", hours_ago=0.2)
-        # 已结束 3 小时 → 超窗
-        old = _contest("codeforces", "2", "很久以前", hours_ago=3)
-        # 还没开始 → 不是候选
-        future = _contest("codeforces", "3", "未开始", hours_ago=-1)
-        service.remember_contests("codeforces", [ended, old, future], now=now.timestamp())
+        # 严格门禁下窗口按平台取值：CF 24h / AtCoder 12h
+        # CF：刚结束 12 分钟 → 候选；20 小时前 → 仍在 24h 窗口内；25 小时 → 超窗
+        fresh = _contest("codeforces", "1", "刚结束", hours_ago=0.2)
+        within = _contest("codeforces", "2", "20 小时前", hours_ago=20)
+        beyond = _contest("codeforces", "3", "25 小时前", hours_ago=25)
+        future = _contest("codeforces", "4", "未开始", hours_ago=-1)
+        service.remember_contests(
+            "codeforces", [fresh, within, beyond, future], now=now.timestamp()
+        )
         candidates = service.settlement_candidates("codeforces", now, 10)
-        assert [c.contest_id for c in candidates] == ["1"]
-        # 其他平台不受影响
+        # 候选按结束时间升序返回（与顺序无关地断言集合）
+        assert sorted(c.contest_id for c in candidates) == ["1", "2"]
+        # AtCoder 窗口 12h：上面记账只在 codeforces 名下 → 本平台无候选
         assert service.settlement_candidates("atcoder", now, 10) == []
+        # AtCoder 自己的 13 小时前记录 → 超 12h 窗口
+        at_old = _contest("atcoder", "abc1", "13 小时前", hours_ago=13)
+        at_new = _contest("atcoder", "abc2", "10 小时前", hours_ago=10)
+        service.remember_contests("atcoder", [at_old, at_new], now=now.timestamp())
+        assert [
+            c.contest_id for c in service.settlement_candidates("atcoder", now, 10)
+        ] == ["abc2"]
 
     asyncio.run(scenario())
 

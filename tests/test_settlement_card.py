@@ -170,9 +170,10 @@ def test_render_settlement_sanitizes_emoji_before_drawing(monkeypatch):
 
     captured = {}
 
-    def fake_render(self, body, source, pillow, sections, title, subtitle, note):
+    def fake_render(
+        self, body, source, pillow, sections, title, subtitle, note, *args, **kwargs
+    ):
         captured.update({"body": body, "title": title, "subtitle": subtitle, "note": note})
-        return None
 
     monkeypatch.setattr(AccountCardRenderer, "_render", fake_render)
     renderer = AccountCardRenderer.__new__(AccountCardRenderer)
@@ -281,3 +282,40 @@ def test_long_rank_value_falls_back_to_rank_only_in_narrow_cell():
         full.split(" · ")[0], font, narrow
     )
     assert "…" not in short       # 退回名次后完整
+
+
+def test_settle_card_marks_unofficial_rows():
+    """打星（榜外）成员在名次列显示标注，正式行仍显示名次。"""
+    from src.account_cards import SETTLE_UNOFFICIAL_LABEL, AccountCardRenderer
+
+    sections = {
+        "codeforces": [
+            _row("正式甲", 12, 3, 6, 7474),
+            {
+                "rank": None,
+                "user_count": None,
+                "display_name": "打星乙",
+                "handle": "star1",
+                "solved": 2,
+                "total_problems": 6,
+                "ak": False,
+                "source": "cf-ratingChanges",
+                "unofficial": True,
+            },
+        ]
+    }
+    html = AccountCardRenderer._settlement_html(
+        sections,
+        title="Round X 赛果",
+        subtitle="本群 2 人参赛",
+        note="另有 1 人打星（榜外），不计官方名次",
+    )
+    assert "#12" in html
+    assert SETTLE_UNOFFICIAL_LABEL in html
+    assert "打星乙" in html
+    # 标注可通过设置覆盖
+    html2 = AccountCardRenderer._settlement_html(
+        sections, title="T", subtitle="S", unofficial_label="榜外"
+    )
+    assert "榜外" in html2
+

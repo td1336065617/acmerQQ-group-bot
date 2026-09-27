@@ -61,7 +61,7 @@ def test_settlement_run_does_not_write_idempotency_key():
     async def members(group_id, platform):
         return ["u1"]
 
-    async def collect(platform, contest, member_list):
+    async def collect(platform, contest, member_list, **kwargs):
         return _Result()
 
     async def render(*args, **kwargs):
@@ -102,7 +102,7 @@ def test_settlement_default_still_writes_key():
     async def members(group_id, platform):
         return ["u1"]
 
-    async def collect(platform, contest, member_list):
+    async def collect(platform, contest, member_list, **kwargs):
         return _Result()
 
     async def render(*args, **kwargs):
@@ -130,7 +130,9 @@ def test_settlement_default_still_writes_key():
         )
     )
     assert pushed == 1
-    assert kv.data["settle_g1_codeforces_1001"] is True
+    marker = kv.data["settle_g1_codeforces_1001"]
+    assert isinstance(marker, dict)
+    assert marker["state"] == "pushed" and marker["complete"] is True
 
 
 def test_weekly_run_does_not_write_idempotency_key():
