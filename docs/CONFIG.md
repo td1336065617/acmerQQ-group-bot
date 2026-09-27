@@ -15,7 +15,10 @@
 | `groups` | 各群配置（自动注册） |
 | `reminded` | 已提醒的比赛去重记录 |
 | `morning_<群ID>_<日期>` | 当日早报是否已发送 |
-| `settle_<群ID>_<平台>_<contestID>` | 赛后赛果是否已推送（每群每场一次） |
+| `settle_<群ID>_<平台>_<contestID>` | 赛后赛果终态（每群每场一次）。新格式：`{state:"pushed", pushed_at, rows, complete, unofficial_count}`；兼容旧值 `true`，以及"人数不足"的 `{skipped:true, members}` |
+| `settle_poll_<平台>_<contestID>` | 结算轮询状态（CF/AtCoder 跨群共享）：`{state, attempts, samples, next_poll_at, stable_count, stable_since, ready_at, elapsed_minutes, abandoned_reason}` |
+| `settle_poll_<群ID>_<平台>_<contestID>` | 同上，但用于牛客/洛谷（样本依赖本群成员，必须按群隔离） |
+| `settle_notice_<群ID>_<平台>_<contestID>` | 超时异常提示是否已发过（每群每场一次） |
 | `weekly_<群ID>_<YYYY-Www>` | 训练周报是否已推送（每群每 ISO 周一次） |
 | `signup_<contestID>_<24h\|2h>` | 报名截止提醒是否已推送（全局，不按群） |
 | `at_all_blocked_until_<群ID>` | @全体失败后的冷却截止时间 |
@@ -37,10 +40,21 @@
 | 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附"今日一题"，与 `每日一题` 指令同源同一题；消息里只显示题目名与链接 |
 | 每日一题平台 `settings.daily_problem_platform` | `nowcoder` | 题目来源：牛客（复用本地题库索引，零新增抓取）/ Codeforces / AtCoder / 洛谷（首次使用构建索引，7 天有效） |
 | 推荐补题 `settings.recommend_enabled` | 开 | 单平台详细资料卡之后追加 3 道推荐题（未通过 + 贴合难度 + 优先薄弱知识点） |
-| 赛后赛果推送 `settings.settle_push_enabled` | 开 | 比赛结束后推一张名次卡：名次 / 通过题数 / 参赛人数（**不含 Rating 变化**——CF 要等系统重测、牛客固定次日 00:00 才更新评分） |
-| 赛后推送延迟 `settings.settle_delay_minutes` | `10` | 赛后多少分钟推送，范围 1～60；超过 2 小时未拿到赛果则不再补推 |
+| 赛后赛果推送 `settings.settle_push_enabled` | 开 | **官方结算完成后**推一张名次卡：名次 / 通过题数 / 参赛人数（**不含 Rating 变化**——CF 要等系统重测、牛客固定次日 00:00 才更新评分） |
+| 赛后推送延迟 `settings.settle_delay_minutes` | `10` | 赛后多少分钟开始尝试推送，范围 1～60；是否可推由结算门禁决定 |
 | 最少参赛人数 `settings.settle_min_participants` | `1` | 低于该人数不推送，范围 1～10 |
 | 附带未通过题目 `settings.settle_show_unsolved` | 开 | 赛果卡附"本场未通过题目"，仅 Codeforces 有效 |
+| 严格完整门禁 `settings.settle_strict_enabled` | 开 | 只在平台结算完成后推一次；关闭恢复旧行为（拿到数据就推） |
+| 稳定采样次数 `settings.settle_stable_samples` | `2` | 连续相同采样次数，范围 2～4 |
+| AtCoder 最小等待 `settings.settle_atcoder_min_age_minutes` | `45` | 距比赛结束最少等待（分钟），范围 0～120 |
+| CF 最长等待 `settings.settle_cf_max_wait_minutes` | `1440` | 默认 24 小时，范围 60～1440；超时发异常提示、不发卡 |
+| AtCoder 最长等待 `settings.settle_atcoder_max_wait_minutes` | `720` | 默认 12 小时 |
+| 牛客最长等待 `settings.settle_nowcoder_max_wait_minutes` | `720` | 默认 12 小时 |
+| 洛谷最长等待 `settings.settle_luogu_max_wait_minutes` | `360` | 默认 6 小时 |
+| 补 CF 打星成员 `settings.settle_include_unofficial` | 开 | 打星/榜外成员入卡（无名次，显示通过题数） |
+| 打星标注文案 `settings.settle_unofficial_label` | `打星` | 卡片名次列的标注文字 |
+| 超时异常提示 `settings.settle_abandon_notice` | 开 | 超时仍在结算中时，群内发一句「本场数据结算异常，本次不推送」 |
+| 夜间轮询倍数 `settings.settle_night_scale` | `2` | 00:00–07:00（北京时间）轮询间隔放大倍数，范围 1～4 |
 | 群训练周报 `settings.weekly_report_enabled` | 开 | 每周一次推「本周进步榜/退步榜」两张卡 + 文字统计（参与人数、人均活跃天数与提交数、进步/退步最多） |
 | 周报推送星期 `settings.weekly_report_weekday` | `1` | `1`～`7`（周一=1），默认周一；当天该时刻触发一次 |
 | 周报推送时间 `settings.weekly_report_time` | `20:00` | `HH:MM`（24 小时制，北京时间）；同一 ISO 周每群只推一次，无数据时静默跳过 |
