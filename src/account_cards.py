@@ -3950,13 +3950,18 @@ class AccountCardRenderer:
         title: str,
         subtitle: str,
         note: str,
+        unofficial_label: str,
         image_path: Path,
-        unofficial_label: str = SETTLE_UNOFFICIAL_LABEL,
     ) -> bool:
         """无 Chromium 时的赛果卡回退：每平台一节，行内为「名次 成员 通过」。
 
         与 HTML 路径保持同一信息结构（名次/成员/通过/参赛人数），
         但不追求像素级一致——Pillow 路径只保证信息完整、不越界。
+
+        ⚠️ 参数顺序是**契约**：_render 以 fallback(*fallback_args, image_tmp) 调用，
+        输出路径永远在最后，所以 unofficial_label 必须排在 image_path 之前。
+        1.20.0 曾按"image_path 在前"的顺序传参 → "打星" 被当成输出文件名
+        （生产写出 /root/AstrBot/打星）→ 兜底异常被 _render 吞掉 → 静默转文字。
         """
         try:
             from PIL import Image as PILImage

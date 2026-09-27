@@ -108,7 +108,8 @@ def test_render_settlement_pillow_path(tmp_path, monkeypatch):
         "Round 1121 Settlement",
         "3 participants",
         "source: codeforces standings",
-        image_path,
+        "打星",
+        image_path=image_path,
     )
     assert ok is True
     assert image_path.is_file() and image_path.stat().st_size > 0
@@ -124,7 +125,8 @@ def test_render_settlement_returns_none_without_fonts(tmp_path, monkeypatch):
         "t",
         "s",
         "n",
-        tmp_path / "none.png",
+        "打星",
+        image_path=tmp_path / "none.png",
     )
     assert ok is False
     assert not (tmp_path / "none.png").exists()
@@ -144,7 +146,8 @@ def test_settlement_pillow_with_no_rows(tmp_path, monkeypatch):
         "Empty",
         "0 participants",
         "",
-        tmp_path / "empty.png",
+        "打星",
+        image_path=tmp_path / "empty.png",
     )
     assert ok is True
 
@@ -208,7 +211,7 @@ def test_pillow_settlement_draws_column_headers(monkeypatch, tmp_path):
     ]}
     out = tmp_path / "settle.png"
     ok = AccountCardRenderer._pillow_settlement(
-        sections, "某比赛 赛果", "本群 1 人参赛", "以平台为准", out
+        sections, "某比赛 赛果", "本群 1 人参赛", "以平台为准", "打星", image_path=out
     )
     assert ok and out.is_file()
     for label in ("名次", "成员", "通过", "参赛人数"):
@@ -318,4 +321,51 @@ def test_settle_card_marks_unofficial_rows():
         sections, title="T", subtitle="S", unofficial_label="榜外"
     )
     assert "榜外" in html2
+
+
+
+# ---------------------------------------------------------------------------
+# 1.20.8 回归：渲染兜底的"参数契约"（1.20.0 曾在此静默转文字）
+# ---------------------------------------------------------------------------
+
+
+def test_pillow_settlement_arg_order_contract(tmp_path):
+    """按 _render 的调用形状传参（输出路径在最末）必须成功产出 PNG。
+
+    生产事故：1.20.0 起 unofficial_label 与 image_path 顺序错位 →
+    Pillow 把 "打星" 当输出文件名（写出 /root/AstrBot/打星）→
+    _render 吞掉异常返回 None → 赛果卡静默变文字，且没有任何错误日志。
+    """
+    sections = AccountCardRenderer._ordered_settlement_sections(SECTIONS)
+    out = tmp_path / "contract.png"
+    # 与 _render 内部 fallback(*fallback_args, image_tmp) 完全一致的形状
+    ok = AccountCardRenderer._pillow_settlement(
+        sections, "Round 1121 Settlement", "3 participants", "note", "打星", out
+    )
+    assert ok is True
+    assert out.is_file() and out.stat().st_size > 0
+    # 不能把标签当成文件名写出去
+    assert not (tmp_path.parent / "打星").exists()
+
+
+def test_render_settlement_falls_back_to_pillow(tmp_path, monkeypatch):
+    """整条渲染入口：无 Chromium 时也必须走通 Pillow 兜底并返回文件路径。"""
+    from src.output_renderer import AdaptiveOutputRenderer
+
+    monkeypatch.setattr(
+        AdaptiveOutputRenderer,
+        "_find_renderers",
+        staticmethod(lambda: [("pillow", None)]),
+    )
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    sections = AccountCardRenderer._ordered_settlement_sections(SECTIONS)
+    path = renderer.render_settlement(
+        sections,
+        title="🏁 Round 1121 赛果",
+        subtitle="本群 3 人参赛",
+        note="评分变化以平台为准",
+        unofficial_label="打星",
+    )
+    assert path is not None, "渲染返回 None → 调用方会静默改发文字"
+    assert path.is_file() and path.stat().st_size > 0
 

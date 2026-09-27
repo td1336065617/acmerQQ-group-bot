@@ -11,6 +11,23 @@
 
 ## 近期版本
 
+## [1.20.8] - 2026-09-27
+
+> 🚨 **紧急修复**：赛果卡自 1.20.0 起**静默变成纯文字**（渲染兜底的参数错位）。
+
+### 🐛 修复
+- `AccountCardRenderer._pillow_settlement` 的参数顺序与 `_render` 的调用契约不一致：`_render` 用 `fallback(*fallback_args, image_tmp)` 调用（**输出路径永远在最后**），而签名里 `image_path` 排在 `unofficial_label` 之前 → **"打星"被当成输出文件名**（生产写出 `/root/AstrBot/打星`），随后 `os.replace` 找不到临时文件 → 被 `_render` 的 `except Exception` 吞掉 → 返回 None → 调用方**静默改发纯文字**（无任何错误日志）。
+  - 影响面：**1.20.0 ~ 1.20.7 期间的赛果卡**；装了 Chromium 的部署走 HTML 路径不受影响，本机无 Chromium 走 Pillow 兜底因而必然触发；
+  - 修法：把 `unofficial_label` 排到 `image_path` 之前（函数名不变，关键字调用不受影响），docstring 里写明"输出路径必须在最后"是契约。
+- 清掉生产上被误写的 `/root/AstrBot/打星`（56 KB，Pillow 渲染结果）。
+
+### ✅ 新增防线（正是"测试测不出"的那类）
+- `test_pillow_settlement_arg_order_contract`：按 `_render` 的真实调用形状传参，断言产出 PNG、且不会产生"打星"文件；
+- `test_render_settlement_falls_back_to_pillow`：强制走 Pillow 兜底，断言 `render_settlement` 返回真实文件（此前用例只 stub 渲染入口，永远覆盖不到兜底参数）；
+- 既有 4 处 `_pillow_settlement` 直接调用改成关键字传参，避免再被顺序坑。
+
+---
+
 ## [1.20.7] - 2026-09-27
 
 > 🚨 **复查修正**：1.20.6 的复评节流会挡住同一 tick 里其他群的推送——本次修掉。
