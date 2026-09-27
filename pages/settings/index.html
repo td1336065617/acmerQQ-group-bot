@@ -310,7 +310,7 @@
             <button class="btn small secondary" id="groupTest">批量测试</button>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th title="决定能否主动推送的是「群会话是否就绪」：官方通道需要该群给机器人发过消息（插件已支持自动预热）；OneBot 通道无此限制。历史「已激活」标记只表示该群发过 acmer激活 命令，不影响推送。">推送就绪</th><th>启用</th><th>早报时间</th><th>推送平台<span class="muted" style="font-weight:400">（与全局取交集，提醒除外）</span></th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="groupHeadCheck"></th><th>群（名称 / ID）</th><th>平台</th><th title="决定能否主动推送的是「群会话是否就绪」：官方通道需要该群给机器人发过消息（插件已支持自动预热）；OneBot 通道无此限制。历史「已激活」标记只表示该群发过 acmer激活 命令，不影响推送。">推送就绪<span id="readyHeadCount"></span></th><th>启用</th><th>早报时间</th><th>推送平台<span class="muted" style="font-weight:400">（与全局取交集，提醒除外）</span></th><th>赛前提醒</th><th>赛果</th><th>操作</th></tr></thead><tbody id="groupBody"></tbody></table></div>
         <div class="pager" id="groupPager"></div>
         <div id="groupTestResult"></div>
       </div>
@@ -434,7 +434,9 @@
       { key: 'recommend_enabled', label: '详细资料里给“推荐补题”', type: 'bool', desc: '按未通过 + 当前难度 + 薄弱知识点推荐 3 题' }
     ] },
     { id: 'push', title: '推送通道', fields: [
-      { key: 'session_warmup_enabled', label: '重启后自动恢复群会话（QQ 官方通道）', type: 'bool', desc: '默认开。AstrBot 整进程重启后，官方通道需要"该群给机器人发过消息"才能主动推送；开启后插件会用已有群号自动补回，无需群友发言（只补"曾交互过"的群），并每小时自动重补一次' }
+      { key: 'session_warmup_enabled', label: '重启后自动恢复群会话（QQ 官方通道）', type: 'bool', desc: '默认开。AstrBot 整进程重启后，官方通道需要"该群给机器人发过消息"才能主动推送；开启后插件会用已有群号自动补回，无需群友发言（只补"曾交互过"的群），并每小时自动重补一次' },
+      { key: 'push_denied_threshold', label: '推送被拒告警阈值（次）', type: 'number', min: 3, max: 20, desc: '默认 5；同一群连续被平台拒绝达到该次数后，就绪列变红并在日志告警一次（每日一次）' },
+      { key: 'push_denied_probe_minutes', label: '被拒后的探测间隔（分钟）', type: 'number', min: 15, max: 360, desc: '默认 60；群内有人发消息时，最快每隔该时长允许一次重试（用于自动发现权限恢复）' }
     ] },
     { id: 'settle', title: '赛后赛果', fields: [
       { key: 'settle_push_enabled', label: '赛后赛果推送', type: 'bool', desc: '比赛结束后推一张名次卡（名次/通过题数/参赛人数，不含 Rating 变化）' },
@@ -841,6 +843,22 @@
   function readinessCell(g) {
     var hist = '历史：' + (g.activated ? '该群发过 acmer激活' : '该群未发过 acmer激活') + '（不影响推送）';
     if (g.enabled === false) return '<span class="badge info" title="该群已停用，不参与推送。' + hist + '">已停用</span>';
+    var health = g.push_health || {};
+    if (health.state) {
+      var reason = health.state === 'muted' ? '机器人被禁言，无法发言' : '主动消息被平台拒绝（无权限）';
+      var cnt = '连续 ' + (health.count || 0) + ' 次被拒';
+      var untilText = '暂停已到期，下次推送自动重试';
+      if (health.suspended_until && new Date(health.suspended_until * 1000).getTime() > Date.now()) {
+        var d = new Date(health.suspended_until * 1000);
+        untilText = '暂停至 ' + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ' 自动重试';
+      }
+      var err = health.last_error ? ('；最近错误：' + health.last_error) : '';
+      var tip = reason + '，' + cnt + '，' + untilText + err +
+        '。建议：确认机器人是否仍在群内、该群是否授予主动消息权限；任意一次推送成功会自动解除（也可用「测试推送」验证）。' + hist;
+      var threshold = (state.settings && state.settings.push_denied_threshold) || 5;
+      if ((health.count || 0) >= threshold) return '<span class="badge err" title="' + esc(tip) + '">推送被拒</span>';
+      return '<span class="badge warn" title="' + esc(tip + '（尚未达到告警阈值，持续观察中）') + '">推送被拒</span>';
+    }
     if (g.channel === 'onebot') return '<span class="badge ok" title="OneBot 通道无会话限制。' + hist + '">无需会话</span>';
     if (!g.channel) return '<span class="badge warn" title="未找到该群所属的平台实例（平台可能已改名或尚未加载），这类群无法主动推送。' + hist + '">平台未识别</span>';
     if (g.scene_ready) return '<span class="badge ok" title="会话已就绪，可以主动推送。' + hist + '">已就绪</span>';
@@ -848,6 +866,9 @@
   }
   function renderGroups() {
     var list = filteredGroups();
+    var deniedCount = list.filter(function (g) { return g.enabled !== false && g.push_health && g.push_health.state; }).length;
+    var counter = document.getElementById('readyHeadCount');
+    if (counter) counter.innerHTML = deniedCount ? ' <span class="badge err" title="主动消息被平台拒绝的群数；点开各群「推送被拒」徽章可见原因、暂停时长与恢复建议">' + deniedCount + ' 个被拒</span>' : '';
     var size = state.groupPage.size;
     var maxPage = Math.max(1, Math.ceil(list.length / size));
     if (state.groupPage.page > maxPage) state.groupPage.page = maxPage;

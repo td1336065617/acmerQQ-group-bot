@@ -15,10 +15,11 @@
 | `groups` | 各群配置（自动注册） |
 | `reminded` | 已提醒的比赛去重记录 |
 | `morning_<群ID>_<日期>` | 当日早报是否已发送 |
-| `settle_<群ID>_<平台>_<contestID>` | 赛后赛果终态（每群每场一次）。新格式：`{state:"pushed", pushed_at, rows, complete, unofficial_count}`；兼容旧值 `true`，以及"人数不足"的 `{skipped:true, members}` |
+| `settle_<群ID>_<平台>_<contestID>` | 赛后赛果终态（每群每场一次）。新格式：`{state:"pushed", pushed_at, rows, complete, unofficial_count}`；兼容旧值 `true`，"人数不足"的 `{skipped:true, members}`，以及"推送被拒"的 `{blocked:true, reason, at, members}`（成员指纹不变不再重试，出窗 72 小时后自动清理） |
 | `settle_poll_<平台>_<contestID>` | 结算轮询状态（CF/AtCoder 跨群共享）：`{state, attempts, samples, next_poll_at, stable_count, stable_since, ready_at, elapsed_minutes, abandoned_reason}` |
 | `settle_poll_<群ID>_<平台>_<contestID>` | 同上，但用于牛客/洛谷（样本依赖本群成员，必须按群隔离） |
 | `settle_notice_<群ID>_<平台>_<contestID>` | 超时异常提示是否已发过（每群每场一次） |
+| `push_health_<平台实例ID>:<群ID>` | 主动消息被平台拒绝后的暂停状态：`{state, since, count, suspended_until, probe_at, last_error_class, last_error, last_at, platform_id}`。发送成功即删除（自愈）；无状态时不存在 |
 
 > **关于 READY 复评**：判定"已结算完成"（state=READY）后，轮询状态里的 `next_poll_at` 会被设为 30 分钟后（常量 `READY_RECHECK_MINUTES`）。复评间隔内不再探测（省掉重复抓榜单），但**仍然放行推送**——因为轮询键跨群共享，节流只能节流探测，不能节流推送；同一状态只在首次打一条 INFO。
 | `weekly_<群ID>_<YYYY-Www>` | 训练周报是否已推送（每群每 ISO 周一次） |
@@ -44,6 +45,8 @@
 | 每日一题平台 `settings.daily_problem_platform` | `nowcoder` | 题目来源：牛客（复用本地题库索引，零新增抓取）/ Codeforces / AtCoder / 洛谷（首次使用构建索引，7 天有效） |
 | 推荐补题 `settings.recommend_enabled` | 开 | 单平台详细资料卡之后追加 3 道推荐题（未通过 + 贴合难度 + 优先薄弱知识点） |
 | 赛后赛果推送 `settings.settle_push_enabled` | 开 | **官方结算完成后**推一张名次卡：名次 / 通过题数 / 参赛人数（**不含 Rating 变化**——CF 要等系统重测、牛客固定次日 00:00 才更新评分） |
+| 推送被拒告警阈值 `settings.push_denied_threshold` | `5` | 同一群连续被平台拒绝达到该次数后，WebUI 就绪列变红并在日志告警一次（每群每日至多一次），范围 3～20 |
+| 被拒后探测间隔 `settings.push_denied_probe_minutes` | `60` | 群内有人发消息时，最快每隔该时长允许一次重试（用于自动发现权限恢复），范围 15～360 |
 | 赛后推送延迟 `settings.settle_delay_minutes` | `10` | 赛后多少分钟开始尝试推送，范围 1～60；是否可推由结算门禁决定 |
 | 最少参赛人数 `settings.settle_min_participants` | `1` | 低于该人数不推送，范围 1～10 |
 | 附带未通过题目 `settings.settle_show_unsolved` | 开 | 赛果卡附"本场未通过题目"，仅 Codeforces 有效 |
@@ -176,6 +179,12 @@ QQ 官方机器人在**群聊场景**实际不支持 `@everyone`：官方格式�
   再点击按钮，机器人会立即向该群发送今日比赛早报；今日无比赛时自动改发
   最近一场比赛作为测试内容。若提示“会话未就绪”，说明该群在机器人本次
   运行期间还没发过消息，先让群里发一条消息（或发送 `acmer激活`）再试。
+- **主动消息被拒（无权限）时的自动处理**：平台返回"主动消息失败, 无权限"后，
+  插件会按 30 分钟 → 6 小时 → 12 小时 → 24 小时 递进暂停该群的主动推送
+  （只暂停发送，结算判定照常跑；被动回复不受影响），达阈值时就绪列显示红色
+  "推送被拒"徽章并每日告警一次。**任意一次推送成功即自动解除**；也可在群里
+  发一条消息触发探测性重试（间隔见"被拒后探测间隔"），或用"测试推送"人工验证。
+  插件**不会**自动停用群——需要彻底停用请手动在 WebUI 关闭。
 - 首次使用在群内发送 `acmer激活` 激活一次即可，状态会持久保存；
   AstrBot 重启后无需重复触发，群内任意一条消息都会自动重新激活
   （机器人回复激活命令时会缓存该群消息 ID，主动推送更稳定）；

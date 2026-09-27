@@ -884,6 +884,18 @@ class AcmerGroupBot(Star):
                 MIN_SETTLE_MIN_PARTICIPANTS,
                 MAX_SETTLE_MIN_PARTICIPANTS,
             ),
+            "push_denied_threshold": self._read_bounded_int(
+                raw.get("push_denied_threshold"),
+                push_health.DEFAULT_DENIED_THRESHOLD,
+                3,
+                20,
+            ),
+            "push_denied_probe_minutes": self._read_bounded_int(
+                raw.get("push_denied_probe_minutes"),
+                push_health.DEFAULT_PROBE_MINUTES,
+                15,
+                360,
+            ),
             "settle_show_unsolved": bool(raw.get("settle_show_unsolved", True)),
             "session_warmup_enabled": bool(raw.get("session_warmup_enabled", True)),
             "settle_strict_enabled": bool(raw.get("settle_strict_enabled", True)),
@@ -3607,20 +3619,26 @@ class AcmerGroupBot(Star):
             self.context, str(group_id), str(platform_id or "")
         )
 
-    def _group_readiness(self, group: GroupConfig) -> dict:
-        """WebUI「推送就绪」列用的真实状态。
+    async def _group_readiness(self, group: GroupConfig) -> dict:
+        """WebUI「推送就绪」列用的真实状态（含推送健康/被拒暂停状态）。
 
         说明：历史字段 activated 只记录"该群是否发过 acmer激活 命令"，
         与能否主动推送无关；这里给出真正决定推送能力的会话信息。
         - channel=official：需要该群在本次运行给机器人发过消息（插件会自动预热）
         - channel=onebot：无会话限制，恒为就绪
+        - push_health：主动消息被拒后的暂停状态；无状态时为 {}（前端按 state 判定）
+
+        改为 async 的原因：读 push_health 必须 await（唯一调用点 _web_config_get
+        本就是 async，改动面仅该处一行）。读取走 30 秒缓存，几乎零 KV 读。
         """
         channel = platform_channel_of(self.context, group.platform_id or "")
+        health = await self._health_of(group.group_id, group.platform_id or "")
         return {
             "channel": channel,
             "scene_ready": bool(
                 self._group_scene_ready(group.group_id, group.platform_id)
             ),
+            "push_health": health or {},
         }
 
     def _warn_throttled(self, key: str, message: str, *args: Any) -> None:
@@ -6406,7 +6424,7 @@ class AcmerGroupBot(Star):
                     "admin_users": await self._get_admins(),
                     "settings": await self.get_settings(),
                     "groups": [
-                        {**g.model_dump(), **self._group_readiness(g)}
+                        {**g.model_dump(), **(await self._group_readiness(g))}
                         for g in await self.get_groups()
                     ],
                     "platform_id": self._default_platform_id(),

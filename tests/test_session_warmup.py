@@ -83,6 +83,12 @@ def _bot_with(insts, groups):
 
     bot.get_groups = get_groups
     bot.get_settings = get_settings
+
+    async def get_kv_data(key, default=None):
+        # 就绪列会读 push_health（30 秒缓存）；这里按"无状态"返回
+        return default
+
+    bot.get_kv_data = get_kv_data
     return bot
 
 
@@ -184,15 +190,32 @@ def test_group_readiness_reports_real_capability():
     bot = _bot_with([official, onebot], [])
 
     g_off = GroupConfig(group_id="G1", platform_id="爱莉希雅", umo="u")
-    assert bot._group_readiness(g_off) == {"channel": "official", "scene_ready": False}
+    # _group_readiness 已改为 async（读 push_health 必须 await）
+    assert asyncio.run(bot._group_readiness(g_off)) == {
+        "channel": "official",
+        "scene_ready": False,
+        "push_health": {},
+    }
     official._session_scene["G1"] = "group"
-    assert bot._group_readiness(g_off) == {"channel": "official", "scene_ready": True}
+    assert asyncio.run(bot._group_readiness(g_off)) == {
+        "channel": "official",
+        "scene_ready": True,
+        "push_health": {},
+    }
 
     g_ob = GroupConfig(group_id="100", platform_id="爱莉希雅2", umo="u")
-    assert bot._group_readiness(g_ob) == {"channel": "onebot", "scene_ready": True}
+    assert asyncio.run(bot._group_readiness(g_ob)) == {
+        "channel": "onebot",
+        "scene_ready": True,
+        "push_health": {},
+    }
 
     g_unknown = GroupConfig(group_id="X", platform_id="不存在的平台", umo="u")
-    assert bot._group_readiness(g_unknown) == {"channel": "", "scene_ready": False}
+    assert asyncio.run(bot._group_readiness(g_unknown)) == {
+        "channel": "",
+        "scene_ready": False,
+        "push_health": {},
+    }
 
 
 def test_config_api_merges_readiness_fields():

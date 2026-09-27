@@ -292,6 +292,63 @@ def test_push_failure_after_denial_writes_blocked():
     assert marker.get("reason") == push_health.K_PERMISSION
     assert str(marker.get("members") or "")  # 带成员指纹（指纹变化才重评的依据）
 
+
+
+def test_settings_denied_keys_are_clamped():
+    """两个新设置项走有界整数解析：越界自动收敛到合法范围。"""
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    bot._settings_cache = None  # get_settings 直接读该属性（非惰性）
+    kv = {
+        "settings": {
+            "push_denied_threshold": 0,        # 越界 → 有界整数助手按语义回落默认值
+            "push_denied_probe_minutes": 999,  # 越界 → 回落默认值
+        }
+    }
+
+    async def get_kv_data(key, default=None):
+        return kv.get(key, default)
+
+    async def put_kv_data(key, value):
+        kv[key] = value
+
+    bot.get_kv_data = get_kv_data
+    bot.put_kv_data = put_kv_data
+    settings = asyncio.run(bot.get_settings())
+    assert settings["push_denied_threshold"] == push_health.DEFAULT_DENIED_THRESHOLD
+    assert settings["push_denied_probe_minutes"] == push_health.DEFAULT_PROBE_MINUTES
+    # 合法值原样通过
+    kv["settings"] = {"push_denied_threshold": 7, "push_denied_probe_minutes": 120}
+    bot._settings_cache = None
+    settings_in = asyncio.run(bot.get_settings())
+    assert settings_in["push_denied_threshold"] == 7
+    assert settings_in["push_denied_probe_minutes"] == 120
+    # 未配置 → 默认值
+    kv["settings"] = {}
+    bot._settings_cache = None
+    settings2 = asyncio.run(bot.get_settings())
+    assert settings2["push_denied_threshold"] == push_health.DEFAULT_DENIED_THRESHOLD
+    assert settings2["push_denied_probe_minutes"] == push_health.DEFAULT_PROBE_MINUTES
+
+
+def test_group_readiness_carries_push_health():
+    """就绪列数据源必须带 push_health（前端六态的依据）。"""
+    bot, kv, sent = _send_bot(suspended=False)
+    bot.context = types.SimpleNamespace()
+    import platform_compat as _pc
+    from unittest import mock
+    with mock.patch.object(m, "platform_channel_of", return_value="official"):
+        plain = asyncio.run(bot._group_readiness(TICK_GROUP))
+    assert plain["push_health"] == {}  # 无状态时给空对象（避免 **None 解包炸）
+    bot._cache_health(
+        KEY,
+        {"state": "denied", "count": 6, "suspended_until": time.time() + 300},
+    )
+    with mock.patch.object(m, "platform_channel_of", return_value="official"):
+        health_view = asyncio.run(bot._group_readiness(TICK_GROUP))
+    assert health_view["push_health"]["state"] == "denied"
+    assert health_view["push_health"]["count"] == 6
+    assert health_view["channel"] == "official"
+
 def test_threshold_warn_once_per_day(caplog):
     """达阈值后每群每日只告警一次；进程内记忆清空（次日）才再告警。"""
     bot, kv, sent = _send_bot(suspended=False)
