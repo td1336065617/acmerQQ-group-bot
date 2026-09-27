@@ -191,6 +191,7 @@ XCPC Link（线下赛）
 | 每日早报时间 `settings.morning_push_time` | `08:00` | `HH:MM` 24 小时制，使用北京时间 |
 | 推送平台 `settings.push_platforms` | 四平台全选 | 早报与提醒使用的平台 |
 | 赛前提醒 `settings.reminder_enabled` | 开 | 比赛开始前 15 分钟提醒 |
+| 重启后自动恢复群会话 `settings.session_warmup_enabled` | 开 | AstrBot 整进程重启后，官方通道需要「群内发过消息」才能主动推送；开启后插件自动补回，无需群友发言 |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知尝试带 `<@everyone>`，失败自动降级为普通通知 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛` 查看未来几天，范围 1～30 |
 | 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附一道题（`每日一题` 指令同源，只展示题目名与链接） |

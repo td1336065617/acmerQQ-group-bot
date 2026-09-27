@@ -79,6 +79,14 @@ class PushScheduler:
                     await self._maybe_remind(group, now, reminded, platform_cache)
             except Exception:
                 logger.exception("群 %s 定时推送处理失败", group.group_id)
+        # 会话场景预热：官方通道重启后主动推送需要"群发过消息"，
+        # 这里用配置里的群号补回，避免重启后长期静默（幂等，只跑一次）。
+        try:
+            warm = getattr(self.plugin, "ensure_session_scenes", None)
+            if callable(warm):
+                await warm()
+        except Exception:  # noqa: BLE001 - 预热失败不影响其它推送
+            logger.warning("会话场景预热失败", exc_info=True)
         # 比赛数据后台预热：在 TTL 到期前 90 秒提前刷新一个平台，
         # 使用户请求不再撞上“缓存过期后同步抓取”的卡顿。
         try:

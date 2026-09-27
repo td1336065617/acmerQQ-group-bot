@@ -35,6 +35,7 @@
 | 每日早报时间 `settings.morning_push_time` | `08:00` | HH:MM（24 小时制） |
 | 推送平台 `settings.push_platforms` | 牛客/CF/AtCoder/洛谷 | 早报与提醒默认平台 |
 | 赛前提醒 `settings.reminder_enabled` | 开 | 开始前 15 分钟提醒 |
+| 重启后自动恢复群会话 `settings.session_warmup_enabled` | 开 | 整进程重启后官方通道需「群内发过消息」才能主动推送；开启后插件用已保存群号自动补回（只补曾交互过的群） |
 | 尝试 @全体成员 `settings.at_all_enabled` | 关 | 通知带 `<@everyone>`，失败自动降级 |
 | 最近比赛查询天数 `settings.recent_contest_days` | `7` | `最近比赛`查看未来几天，范围 1～30 |
 | 早报附今日一题 `settings.daily_problem_enabled` | 开 | 早报末尾附"今日一题"，与 `每日一题` 指令同源同一题；消息里只显示题目名与链接 |

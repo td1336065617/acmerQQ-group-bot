@@ -38,6 +38,7 @@ from .src.contest_fetcher import (
 from .src.plugin_paths import migrate_known_caches, plugin_cache_dir
 from .src.rank_service import RankService
 from .src.group_names import event_group_name, fetch_group_name
+from .platform_compat import warm_scene as warm_group_scene
 from .src.settlement import (
     MAX_PROBES_PER_TICK as SETTLE_MAX_PROBES_PER_TICK,
     MAX_WAIT_MINUTES as SETTLE_MAX_WAIT_MINUTES,
@@ -182,6 +183,8 @@ PUSH_FAIL_MAX_ATTEMPTS = 3
 PUSH_FAIL_COOLDOWN_SECONDS = 900
 #: 同类告警的最小间隔（避免掉线时"会话未就绪"等日志刷屏）
 WARN_THROTTLE_SECONDS = 600
+#: 会话场景预热最多尝试的 tick 次数（每 tick 30 秒，20 次≈10 分钟）
+SESSION_WARM_MAX_TRIES = 20
 PUSH_LOG_MAX = 200
 # 「立即试跑」支持的类型（早报 / 训练周报 / 赛后赛果 / 报名提醒）。
 RUN_NOW_KINDS = ("morning", "weekly", "settle", "signup")
@@ -864,6 +867,7 @@ class AcmerGroupBot(Star):
                 MAX_SETTLE_MIN_PARTICIPANTS,
             ),
             "settle_show_unsolved": bool(raw.get("settle_show_unsolved", True)),
+            "session_warmup_enabled": bool(raw.get("session_warmup_enabled", True)),
             "settle_strict_enabled": bool(raw.get("settle_strict_enabled", True)),
             "settle_stable_samples": self._read_bounded_int(
                 raw.get("settle_stable_samples"),
@@ -3596,6 +3600,50 @@ class AcmerGroupBot(Star):
             return
         state[key] = now
         logger.warning(message, *args)
+
+    async def ensure_session_scenes(self) -> int:
+        """启动后把官方群的会话场景补回（幂等；平台实例未就绪时下个 tick 再试）。
+
+        背景：QQ 官方通道的"会话场景"只存在进程内存里，AstrBot 整进程重启后
+        必须由群内发消息才能恢复；本方法用配置里保存的群号直接补写，
+        避免重启后一群静默失联。仅处理"曾与机器人交互过"（有 umo）的群。
+        """
+        if getattr(self, "_session_warm_done", False):
+            return 0
+        try:
+            settings = await self.get_settings()
+        except Exception:  # noqa: BLE001 - 读设置失败时保守跳过
+            return 0
+        if not settings.get("session_warmup_enabled", True):
+            self._session_warm_done = True
+            return 0
+        tries = int(getattr(self, "_session_warm_tries", 0) or 0)
+        if tries >= SESSION_WARM_MAX_TRIES:
+            self._session_warm_done = True
+            return 0
+        self._session_warm_tries = tries + 1
+        warmed = 0
+        pending = 0
+        for group in await self.get_groups():
+            if not group.enabled:
+                continue
+            if not str(group.umo or "").strip():
+                continue  # 从未交互过的群：不预热
+            if warm_group_scene(
+                self.context, group.group_id, group.platform_id or ""
+            ):
+                warmed += 1
+            else:
+                pending += 1
+        if warmed:
+            logger.info(
+                "会话场景预热：已恢复 %d 个群的主动推送会话（官方通道，重启后无需群友发言）",
+                warmed,
+            )
+        if warmed == 0 and pending > 0:
+            return 0  # 官方平台实例还没加载完 → 下个 tick 继续尝试
+        self._session_warm_done = True
+        return warmed
 
     async def _push_retry_allowed(self, kind: str, key: str) -> bool:
         """失败退避闸门：连续失败达到上限后，冷却期内不再重试。"""

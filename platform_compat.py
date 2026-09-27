@@ -116,6 +116,37 @@ def scene_ready(context, group_id: str, platform_id: str) -> bool:
     return False
 
 
+def warm_scene(context, group_id: str, platform_id: str) -> bool:
+    """把"群会话场景"补回官方平台实例（整进程重启后主动推送需要）。
+
+    官方适配器收到群消息时会把 _session_scene[group_id] 记成 "group"，
+    该字典只存在进程内存中；AstrBot 重启后必须由群内再发一条消息才能恢复。
+    这里用配置里保存的 group_id/platform_id 直接补写，避免"重启后静默失联"
+    （生产实测：一次重启后 13/17 个群收不到赛前提醒）。
+    OneBot 通道无此限制，直接返回 False。
+    """
+    gid = str(group_id)
+    target = str(platform_id or "")
+    for inst in _insts(context):
+        meta = _meta(inst)
+        if meta is None:
+            continue
+        if target and str(getattr(meta, "id", "") or "") != target:
+            continue
+        # 与 scene_ready 一致：直接按实例名判通道，少一层间接依赖
+        if channel_by_name(str(getattr(meta, "name", "") or "")) != "official":
+            continue
+        remember = getattr(inst, "remember_session_scene", None)
+        if not callable(remember):
+            continue
+        try:
+            remember(gid, "group")
+        except Exception:  # noqa: BLE001 - 单个实例失败不影响其他群
+            continue
+        return True
+    return False
+
+
 def at_all_prefix(channel: str) -> list:
     """@全体成员前缀：OneBot 用 At(all)，官方族沿用文本标记。"""
     if channel == "onebot":

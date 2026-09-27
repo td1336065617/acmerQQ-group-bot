@@ -7,9 +7,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
+
 from test_main_accounts import _load_main_module
 
 from src.models import GroupConfig
+
+
+@pytest.fixture(autouse=True)
+def _restore_channel_hook():
+    """_build_bot 会把 channel_of_platform_id 改写成"永远 onebot"来模拟 OneBot。
+
+    必须用完还原：_load_main_module() 有模块缓存，污染会泄漏到其它测试文件
+    （曾导致会话预热用例在全量跑时失败）。
+    """
+    module = _load_main_module().platform_compat
+    original = module.channel_of_platform_id
+    yield
+    module.channel_of_platform_id = original
 
 
 def _build_bot(main_module, *, send_ok=True, scene_ready=True):

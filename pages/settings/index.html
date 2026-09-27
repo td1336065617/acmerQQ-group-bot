@@ -433,6 +433,9 @@
       { key: 'daily_problem_count', label: '每日一题数量', type: 'number', min: 1, max: 3, desc: '默认 1，范围 1～3' },
       { key: 'recommend_enabled', label: '详细资料里给“推荐补题”', type: 'bool', desc: '按未通过 + 当前难度 + 薄弱知识点推荐 3 题' }
     ] },
+    { id: 'push', title: '推送通道', fields: [
+      { key: 'session_warmup_enabled', label: '重启后自动恢复群会话（QQ 官方通道）', type: 'bool', desc: '默认开。AstrBot 整进程重启后，官方通道需要"该群给机器人发过消息"才能主动推送；开启后插件会用已有群号自动补回，无需群友发言（只补"曾交互过"的群）' }
+    ] },
     { id: 'settle', title: '赛后赛果', fields: [
       { key: 'settle_push_enabled', label: '赛后赛果推送', type: 'bool', desc: '比赛结束后推一张名次卡（名次/通过题数/参赛人数，不含 Rating 变化）' },
       { key: 'settle_delay_minutes', label: '推送延迟（分钟）', type: 'number', min: 1, max: 60, desc: '默认 10，范围 1～60；超过 2 小时未拿到赛果则不再补推' },
