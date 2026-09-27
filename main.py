@@ -51,6 +51,7 @@ from .src.settlement import (
     STABLE_SPAN_MINUTES as SETTLE_STABLE_SPAN_MINUTES,
     SettlementService,
     evaluate_readiness,
+    next_poll_delay_minutes as settle_poll_delay_minutes,
     new_poll_state,
     poll_key as settle_poll_key,
 )
@@ -4519,7 +4520,7 @@ class AcmerGroupBot(Star):
             except Exception:  # noqa: BLE001 - 时区异常按原值兜底
                 night = 0 <= getattr(moment, "hour", 12) < 7
             span = SETTLE_STABLE_SPAN_MINUTES.get(str(platform)) or None
-            delay = self.settlement.next_poll_delay_minutes(
+            delay = settle_poll_delay_minutes(
                 platform,
                 int(state.get("attempts") or 0),
                 night=night,

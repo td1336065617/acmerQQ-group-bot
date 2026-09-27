@@ -11,6 +11,25 @@
 
 ## 近期版本
 
+## [1.20.5] - 2026-09-27
+
+> 🚨 **紧急修复**：严格门禁的"等待"路径每 tick 抛异常，牛客/AtCoder/洛谷的赛果卡**完全推不出去**。
+
+### 🐛 修复
+- `next_poll_delay_minutes` 是 `src/settlement.py` 的**模块级函数**，main.py 却写成 `self.settlement.next_poll_delay_minutes(...)` → `AttributeError`，`tick_settlements` 每 30 秒失败一次；
+  - 影响面：CF 因为走"就绪即推送"分支没暴露，**牛客 / AtCoder / 洛谷**只要进入等待轮询就必然崩（生产实测 22:14 起每 tick 报错，牛客周赛 Round 163 与 AGC078 的卡都发不出）；
+  - 修法：改为直接调用模块级函数（成员函数只保留真实的 `SettlementService` 方法）。
+- 之所以 451 个用例全绿仍漏掉：测试里的 **fake service 恰好定义了同名方法**，把真实的接口面差异掩盖了。
+
+### ✅ 新增防线
+- `tests/test_settlement_contract.py`：
+  1. 扫描 main.py 里所有 `self.settlement.X`，断言 X 在 `SettlementService` 上真实存在（这条能直接拦住本次事故）；
+  2. 断言 main.py 直接调用的模块级助手（`evaluate_readiness`/`new_poll_state`/`settle_poll_key`/`settle_poll_delay_minutes`）都已导入；
+  3. 轮询间隔助手契约（不超过稳定窗口、夜间放大）；
+  4. 用**真实 SettlementService**（只挡网络）走一遍"未就绪 → 等待"分支，确保等待路径端到端可用。
+
+---
+
 ## [1.20.4] - 2026-09-27
 
 > 🧭 一句话：把「推送就绪」列的边界补齐——平台实例找不到时明确提示，不再含糊显示"待群内发言"。
