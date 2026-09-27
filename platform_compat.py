@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Set, Tuple
 
 from astrbot.api.message_components import At, Plain
 
@@ -18,6 +18,10 @@ ONEBOT_NAMES = {"aiocqhttp"}
 SEP = ":"
 
 logger = logging.getLogger(__name__)
+
+#: 会话场景恢复失败的去重集合：同一个群+平台只告警一次（之后降为 DEBUG），
+#: 否则「平台实例存在但补写一直失败」会在 20 次重试里刷出上百条日志。
+_warm_scene_warned: Set[Tuple[str, str]] = set()
 
 
 def channel_by_name(name: str) -> str:
@@ -142,19 +146,30 @@ def warm_scene(context, group_id: str, platform_id: str) -> bool:
         remember = getattr(inst, "remember_session_scene", None)
         if not callable(remember):
             continue
+        # inst_id 必须在 try 之前定义：成功路径也要用它清去重键，
+        # 否则成功分支会引用未定义的变量（本文件已因此炸过一次）。
+        inst_id = str(getattr(meta, "id", "") or getattr(meta, "name", "") or "")
         try:
             remember(gid, "group")
         except Exception as exc:  # noqa: BLE001 - 单个实例失败不影响其他群
             # 必须留痕：会话场景恢复失败会导致该群静默收不到推送，
-            # 没日志就只能看到现象、查不出原因。
-            logger.warning(
-                "恢复群 %s 的会话场景失败（平台实例 %s，%s）：%s",
-                gid,
-                getattr(meta, "id", "") or getattr(meta, "name", ""),
-                type(exc).__name__,
-                exc,
-            )
+            # 没日志就只能看到现象、查不出原因。但要按 群+平台 去重，
+            # 否则预热重试会刷出上百条同义告警。
+            key = (gid, inst_id)
+            if key not in _warm_scene_warned:
+                _warm_scene_warned.add(key)
+                logger.warning(
+                    "恢复群 %s 的会话场景失败（平台实例 %s，%s）：%s",
+                    gid,
+                    inst_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                logger.debug("恢复群 %s 的会话场景仍然失败：%s", gid, exc)
             continue
+        # 成功即清除去重键：这样"恢复后又失败"能再次告警（否则会永久静音）
+        _warm_scene_warned.discard((gid, inst_id))
         return True
     return False
 

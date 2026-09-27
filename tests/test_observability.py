@@ -24,14 +24,43 @@ class _BrokenInst(FakeInst):
         raise RuntimeError("模拟平台补写失败")
 
 
+def _broken_ctx(name="爱莉希雅"):
+    inst = _BrokenInst(name, "qq_official")
+    return type("Ctx", (), {"platform_manager": type("PM", (), {"platform_insts": [inst]})()})()
+
+
 def test_warm_scene_failure_is_logged(caplog):
     """A1：预热补写会话失败必须记下群号与异常。"""
-    inst = _BrokenInst("爱莉希雅", "qq_official")
-    ctx = type("Ctx", (), {"platform_manager": type("PM", (), {"platform_insts": [inst]})()})()
     with caplog.at_level(logging.WARNING):
-        assert warm_scene(ctx, "G1", "爱莉希雅") is False
+        assert warm_scene(_broken_ctx(), "G-warm-1", "爱莉希雅") is False
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("恢复群 G1 的会话场景失败" in m and "RuntimeError" in m for m in msgs), msgs
+    assert any("恢复群 G-warm-1 的会话场景失败" in m and "RuntimeError" in m for m in msgs), msgs
+
+
+def test_warm_scene_failure_is_deduped(caplog):
+    """同一个群+平台只告警一次，避免预热重试刷屏。"""
+    ctx = _broken_ctx()
+    with caplog.at_level(logging.DEBUG):
+        assert warm_scene(ctx, "G-warm-2", "爱莉希雅") is False
+        assert warm_scene(ctx, "G-warm-2", "爱莉希雅") is False
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING and "恢复群 G-warm-2" in r.getMessage()]
+    assert len(warns) == 1, [r.getMessage() for r in caplog.records]
+
+
+def test_warm_scene_alert_resets_after_success(caplog):
+    """恢复成功后再次失败要能重新告警（否则去重会变成永久静音）。"""
+
+    def ctx_with(inst):
+        return type("Ctx", (), {"platform_manager": type("PM", (), {"platform_insts": [inst]})()})()
+
+    broken = _BrokenInst("爱莉希雅", "qq_official")
+    healthy = FakeInst("爱莉希雅", "qq_official")
+    with caplog.at_level(logging.DEBUG):
+        assert warm_scene(ctx_with(broken), "G-warm-3", "爱莉希雅") is False
+        assert warm_scene(ctx_with(healthy), "G-warm-3", "爱莉希雅") is True
+        assert warm_scene(ctx_with(broken), "G-warm-3", "爱莉希雅") is False
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING and "恢复群 G-warm-3" in r.getMessage()]
+    assert len(warns) == 2, [r.getMessage() for r in caplog.records]
 
 
 def test_preview_cache_error_is_logged(caplog):
