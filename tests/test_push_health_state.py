@@ -70,7 +70,7 @@ def test_note_denied_structure_and_backoff():
     kv = FakeKV()
     bot = _bot(kv)
     t0 = 10_000_000.0
-    asyncio.run(bot._note_push_denied(GROUP, "爱莉希雅", DENIED_ERR, now=t0))
+    asyncio.run(bot._note_push_denied(GROUP.group_id, GROUP.platform_id, DENIED_ERR, now=t0))
     key = push_health.health_key("爱莉希雅", "G1")
     state = kv.store[key]
     assert state["count"] == 1
@@ -80,14 +80,14 @@ def test_note_denied_structure_and_backoff():
     assert state["last_error_class"] == push_health.K_PERMISSION
     assert state["platform_id"] == "爱莉希雅"
     assert len(state["last_error"]) <= push_health.LAST_ERROR_MAX_CHARS
-    fail = kv.store["pushfail_group_G1"]
-    assert fail["n"] == 1 and fail["error_class"] == push_health.K_PERMISSION
+    # pushfail 不在这里写：计数交给既有 _note_push_failure，避免同一次失败重复加一
+    assert "pushfail_group_G1" not in kv.store
     # 第二次：count=2 → 退避 360 分钟
-    asyncio.run(bot._note_push_denied(GROUP, "爱莉希雅", DENIED_ERR, now=t0 + 1))
+    asyncio.run(bot._note_push_denied(GROUP.group_id, GROUP.platform_id, DENIED_ERR, now=t0 + 1))
     state2 = kv.store[key]
     assert state2["count"] == 2
     assert state2["suspended_until"] == t0 + 1 + 360 * 60
-    assert kv.store["pushfail_group_G1"]["n"] == 2
+    assert "pushfail_group_G1" not in kv.store
 
 
 def test_note_denied_discards_stale_write():
@@ -96,7 +96,7 @@ def test_note_denied_discards_stale_write():
     bot = _bot(kv)
     key = push_health.health_key("爱莉希雅", "G1")
     kv.store[key] = {"count": 7, "last_at": 10_000_500.0}
-    asyncio.run(bot._note_push_denied(GROUP, "爱莉希雅", DENIED_ERR, now=10_000_000.0))
+    asyncio.run(bot._note_push_denied(GROUP.group_id, GROUP.platform_id, DENIED_ERR, now=10_000_000.0))
     assert kv.store[key]["count"] == 7  # 未被旧写覆盖
 
 
@@ -104,7 +104,7 @@ def test_clear_health_deletes_key_and_refreshes_cache():
     kv = FakeKV()
     bot = _bot(kv)
     key = push_health.health_key("爱莉希雅", "G1")
-    asyncio.run(bot._note_push_denied(GROUP, "爱莉希雅", DENIED_ERR))
+    asyncio.run(bot._note_push_denied(GROUP.group_id, GROUP.platform_id, DENIED_ERR))
     assert key in kv.store
     asyncio.run(bot._clear_push_health(GROUP))
     assert key in kv.deletes and key not in kv.store

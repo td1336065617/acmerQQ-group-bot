@@ -86,7 +86,7 @@ def _build_bot(main_module, *, contests, groups, send_ok=True):
     async def get_groups():
         return list(groups)
 
-    async def send_notification(group, text):
+    async def send_notification(group, text, **kwargs):
         bot._sent.append((group.group_id, text))
         return send_ok
 

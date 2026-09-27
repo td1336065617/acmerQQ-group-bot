@@ -180,6 +180,11 @@ class PushScheduler:
                 logger.warning("账号抓取器缓存清理失败", exc_info=True)
 
     async def _maybe_morning_push(self, group: GroupConfig, now: datetime) -> None:
+        # 层 A 挂点：必须位于补发护栏与 note_push_attempt 之前，
+        # 否则暂停期的跳过会烧掉每日 3 次补发预算（实现文档 P1）。
+        if await self.plugin.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，本周期早报跳过", group.group_id)
+            return
         try:
             push_time = validate_hhmm(group.morning_push_time)
         except ValueError:
@@ -269,6 +274,9 @@ class PushScheduler:
         reminded: Set[str],
         platform_cache: Dict[str, Tuple[list, object]],
     ) -> None:
+        if await self.plugin.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，本周期赛前提醒跳过", group.group_id)
+            return
         for platform in group.push_platforms:
             if platform not in platform_cache:
                 platform_cache[platform] = await self.plugin.fetcher.fetch_platform(

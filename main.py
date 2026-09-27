@@ -3784,17 +3784,19 @@ class AcmerGroupBot(Star):
 
     async def _note_push_denied(
         self,
-        group: GroupConfig,
-        platform: str,
+        group_id: str,
+        platform_id: str,
         err: dict,
         now: Optional[float] = None,
     ) -> None:
-        """记一次权限类失败：写 push_health（含退避）并同步 pushfail 计数。
+        """记一次权限类失败：写 push_health（含退避递进），达阈值按日告警一次。
 
         写前读改写并比对 last_at：若已有更晚的写入（并发或乱序）则丢弃本次。
+        pushfail 计数不在此处做——由既有发送路径的 _note_push_failure 统一计，
+        避免同一失败重复加一；错误类只存 push_health（权威处）。
         """
         moment = time.time() if now is None else now
-        key = push_health.health_key(group.platform_id or "", group.group_id)
+        key = push_health.health_key(platform_id, group_id)
         current = None
         try:
             current = await self.get_kv_data(key, None)
@@ -3816,36 +3818,76 @@ class AcmerGroupBot(Star):
             "last_error_class": kind,
             "last_error": (str(err.get("raw") or ""))[: push_health.LAST_ERROR_MAX_CHARS],
             "last_at": moment,
-            "platform_id": str(group.platform_id or ""),
+            "platform_id": platform_id,
         }
         try:
             await self.put_kv_data(key, state)
         except Exception as exc:  # noqa: BLE001 - 写失败不能阻断发送
             logger.warning("写群推送健康状态失败（%s）：%s", key, exc)
         self._cache_health(key, state)
-        # pushfail 扩字段（仅计数与展示；权限类主要靠暂停闸门，不依赖它的 900 秒冷却）
-        fail_key = f"pushfail_group_{group.group_id}"
+        await self._warn_denied_if_threshold(group_id, count, state)
+
+    async def _warn_denied_if_threshold(
+        self, group_id: str, count: int, state: dict
+    ) -> None:
+        """阈值告警：每群每日一次（进程内记忆，不为日志去造 KV）。"""
         try:
-            info = await self.get_kv_data(fail_key, {}) or {}
-            if not isinstance(info, dict):
-                info = {}
-            info["n"] = int(info.get("n") or 0) + 1
-            info["ts"] = moment
-            info["error_class"] = kind
-            info["last_error"] = state["last_error"]
-            await self.put_kv_data(fail_key, info)
-        except Exception as exc:  # noqa: BLE001 - 计数写失败不影响主流程
-            logger.warning("写 pushfail 扩展字段失败（%s）：%s", group.group_id, exc)
+            settings = await self.get_settings()
+            threshold = int(
+                settings.get(
+                    "push_denied_threshold", push_health.DEFAULT_DENIED_THRESHOLD
+                )
+                or push_health.DEFAULT_DENIED_THRESHOLD
+            )
+        except Exception:  # noqa: BLE001 - 读不到设置按默认
+            threshold = push_health.DEFAULT_DENIED_THRESHOLD
+        if count < threshold:
+            return
+        store = getattr(self, "_denied_warned", None)
+        if store is None:
+            store = {}
+            self._denied_warned = store
+        day = time.strftime("%Y-%m-%d")
+        if store.get(group_id) == day:
+            return
+        store[group_id] = day
+        logger.warning(
+            "群 %s 连续 %d 次推送被平台拒绝（%s）：已暂停该群主动推送至 %s；"
+            "请确认机器人是否仍在群内、该群是否授予主动消息权限",
+            group_id,
+            count,
+            state.get("last_error_class"),
+            time.strftime(
+                "%m-%d %H:%M", time.localtime(float(state.get("suspended_until") or 0))
+            ),
+        )
 
     async def _clear_push_health(self, group: GroupConfig) -> None:
-        """推送成功即自愈：删除健康状态键（AstrBot KV 提供 delete_kv_data）。"""
+        """推送成功即自愈：确有状态才删除，并打一条恢复 INFO。
+
+        先看缓存：无状态直接返回（成功推送是热路径，不能每次都读 KV）；
+        缓存未命中才读一次 KV 确认。
+        """
         key = push_health.health_key(group.platform_id or "", group.group_id)
+        store = self._health_cache_store()
+        cached = store.get(key)
+        existed = bool(cached[1]) if cached is not None else False
+        if cached is None:
+            value = None
+            try:
+                value = await self.get_kv_data(key, None)
+            except Exception:  # noqa: BLE001 - 读失败按无状态
+                value = None
+            existed = isinstance(value, dict) and bool(value)
+            store[key] = (time.time(), value if isinstance(value, dict) else None)
+        if not existed:
+            return
         try:
             await self.delete_kv_data(key)
         except Exception as exc:  # noqa: BLE001 - 清理失败不影响发送
             logger.warning("清除群推送健康状态失败（%s）：%s", key, exc)
         self._cache_health(key, None)
-
+        logger.info("群 %s 推送恢复正常，已清除被拒暂停状态", group.group_id)
     async def _prune_blocked_markers(self) -> int:
         """每日清理已出窗的 blocked 标记（实现文档 R26，台账 M2.6）。
 
@@ -3886,8 +3928,13 @@ class AcmerGroupBot(Star):
             )
         return removed
 
-    async def send_notification(self, group: GroupConfig, text: str) -> bool:
-        """发送通知；返回是否发送成功。@全体成员 开启且无权限时自动降级。"""
+    async def send_notification(
+        self, group: GroupConfig, text: str, *, bypass_suspend: bool = False
+    ) -> bool:
+        """发送通知；返回是否发送成功。@全体成员 开启且无权限时自动降级。
+
+        bypass_suspend：仅后台试跑等人工通道使用（跳过暂停闸门）。
+        """
         if not self._group_scene_ready(group.group_id, group.platform_id):
             self._warn_throttled(
                 "scene:" + str(group.group_id),
@@ -3895,6 +3942,9 @@ class AcmerGroupBot(Star):
                 "跳过发送；请先让群内发一条消息",
                 group.group_id,
             )
+            return False
+        if not bypass_suspend and await self.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，跳过文字通知", group.group_id)
             return False
         if not await self._push_retry_allowed("group", str(group.group_id)):
             return False
@@ -3996,8 +4046,20 @@ class AcmerGroupBot(Star):
                 logger.warning("发送到群 %s 失败：未找到匹配平台", group_id)
                 return False
             return True
-        except Exception as exc:
-            logger.error("发送到群 %s 失败: %s", group_id, exc)
+        except Exception as exc:  # noqa: BLE001 - 发送失败按 False 处理
+            err = push_health.classify(
+                exc,
+                platform_compat.channel_of_platform_id(self.context, platform_id or ""),
+            )
+            logger.error(
+                "发送到群 %s 失败: %s（分类 %s，匹配 %s）",
+                group_id,
+                exc,
+                err["kind"],
+                err["matched_by"],
+            )
+            if push_health.is_denied_kind(err["kind"]):
+                await self._note_push_denied(group_id, platform_id or "", err)
             return False
 
     async def _send_text_chunks(
@@ -4216,9 +4278,12 @@ class AcmerGroupBot(Star):
         return "\n".join(lines)
 
     async def _send_group_image(
-        self, group: GroupConfig, image_path, *, caption: str = ""
+        self, group: GroupConfig, image_path, *, caption: str = "", bypass_suspend: bool = False
     ) -> bool:
-        """主动向群发送一张图片（用于周榜卡片）；失败返回 False。"""
+        """主动向群发送一张图片（用于周榜卡片）；失败返回 False。
+
+        bypass_suspend：仅后台试跑等人工通道使用。
+        """
         if not self._group_scene_ready(group.group_id, group.platform_id):
             logger.warning(
                 "群 %s 主动推送会话未就绪，跳过图片推送（%s）",
@@ -4226,14 +4291,32 @@ class AcmerGroupBot(Star):
                 caption,
             )
             return False
+        if not bypass_suspend and await self.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，跳过图片推送（%s）", group.group_id, caption)
+            return False
         session = self._session_for(group.group_id, group.platform_id, group.umo)
         chain = MessageChain([Image.fromFileSystem(str(image_path))])
         try:
             ok = await self.context.send_message(session, chain)
         except Exception as exc:  # noqa: BLE001 - 图片推送失败由调用方决定后续
-            logger.error(
-                "群 %s 图片推送异常（%s）：%s", group.group_id, caption, exc
+            err = push_health.classify(
+                exc,
+                platform_compat.channel_of_platform_id(self.context, group.platform_id),
             )
+            logger.error(
+                "群 %s 图片推送异常（%s）：%s（分类 %s，匹配 %s）",
+                group.group_id,
+                caption,
+                exc,
+                err["kind"],
+                err["matched_by"],
+            )
+            if push_health.is_denied_kind(err["kind"]):
+                # 图片路径此前完全不计数，这里只为权限类补计数（与文字路径对齐）
+                await self._note_push_denied(
+                    group.group_id, group.platform_id or "", err
+                )
+                await self._note_push_failure("group", str(group.group_id))
             return False
         if not ok:
             logger.warning(
@@ -4243,7 +4326,9 @@ class AcmerGroupBot(Star):
             )
         return bool(ok)
 
-    async def push_weekly_boards(self, group: GroupConfig) -> bool:
+    async def push_weekly_boards(
+        self, group: GroupConfig, *, bypass_suspend: bool = False
+    ) -> bool:
         """推送两张周榜卡：先进步榜、后退步榜。图片优先，渲染失败回退文字。"""
         boards = await self.build_weekly_board_cards(group)
         if not boards:
@@ -4254,11 +4339,11 @@ class AcmerGroupBot(Star):
             image_path = board.get("image")
             if image_path is not None and Path(image_path).is_file():
                 ok = await self._send_group_image(
-                    group, image_path, caption=title
+                    group, image_path, caption=title, bypass_suspend=bypass_suspend
                 )
             else:
                 ok = await self.send_notification(
-                    group, str(board.get("text") or "")
+                    group, str(board.get("text") or ""), bypass_suspend=bypass_suspend
                 )
             if ok:
                 logger.info("群 %s 已推送 %s", group.group_id, title)
@@ -4809,6 +4894,9 @@ class AcmerGroupBot(Star):
         notice_key = (
             f"settle_notice_{group.group_id}_{platform}_{contest.contest_id}"
         )
+        if await self.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，跳过结算异常提示", group.group_id)
+            return
         if await self.get_kv_data(notice_key, False):
             return
         await self.put_kv_data(notice_key, True)
@@ -4842,12 +4930,23 @@ class AcmerGroupBot(Star):
         write_key: bool = True,
         include_unofficial: bool = True,
         unofficial_label: str = "打星",
+        bypass_suspend: bool = False,
     ) -> int:
         """处理单场赛果：采集 → 渲染 → 推送 → 写幂等键；返回 1/0。
 
         write_key=False 供后台“立即试跑”使用：只推送、不写幂等键，
         避免挤掉当天正式的赛后赛果推送。
         """
+        # 层 A：入口闸门在 collect/render 之前（既省渲染，也避免暂停期的失败
+        # 与 WARNING；门禁 _settle_gate 不受影响，仍照常评估）。
+        if not bypass_suspend and await self.push_suspended(group):
+            logger.debug(
+                "群 %s 推送暂停中，跳过 %s %s 赛果的采集与推送",
+                group.group_id,
+                platform,
+                contest.contest_id,
+            )
+            return 0
         members = await self._settlement_members(group.group_id, platform)
         if len(members) < max(1, min_participants):
             logger.info(
@@ -4937,7 +5036,9 @@ class AcmerGroupBot(Star):
                 unofficial_label=unofficial_label,
             )
         if image_path is not None and Path(image_path).is_file():
-            ok = await self._send_group_image(group, image_path, caption=title)
+            ok = await self._send_group_image(
+                group, image_path, caption=title, bypass_suspend=bypass_suspend
+            )
         else:
             # 渲染不可用时改发纯文字是设计内的降级，但必须留痕：
             # 否则线上表现为"卡片悄悄变文字"（2026-09-27 的事故就是这样藏了两小时）。
@@ -4951,8 +5052,28 @@ class AcmerGroupBot(Star):
             ok = await self.send_notification(
                 group,
                 self._settlement_text(result, unofficial_label=unofficial_label),
+                bypass_suspend=bypass_suspend,
             )
         if not ok:
+            if write_key and key and await self.push_suspended(group):
+                # 本次真实尝试失败且群已进入暂停 → 该场次记 blocked，
+                # 之后 tick 的 marker 分支直接跳过（无需跨层传错误分类）。
+                try:
+                    health = await self._health_of(
+                        group.group_id, group.platform_id or ""
+                    )
+                    await self.put_kv_data(
+                        key,
+                        {
+                            "blocked": True,
+                            "reason": (health or {}).get("last_error_class")
+                            or push_health.K_PERMISSION,
+                            "at": time.time(),
+                            "members": self._members_fingerprint(members),
+                        },
+                    )
+                except Exception as blocked_exc:  # noqa: BLE001 - 标记失败不影响重试
+                    logger.warning("写 blocked 标记失败（%s）：%s", key, blocked_exc)
             logger.warning(
                 "群 %s 的 %s 赛果推送失败，下个周期重试",
                 group.group_id,
@@ -5211,11 +5332,15 @@ class AcmerGroupBot(Star):
         write_key: bool = True,
         late: bool = False,
         scheduled_at: "datetime | None" = None,
+        bypass_suspend: bool = False,
     ) -> bool:
         """推送单个群的训练周报；返回是否送达。
 
         write_key=False 供后台“立即试跑”使用：不写 weekly 幂等键。
         """
+        if not bypass_suspend and await self.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，跳过周报（%s）", group.group_id, week_key or "")
+            return False
         week = week_key or self._iso_week_key(moment)
         key = f"weekly_{group.group_id}_{week}"
         attempt_key = f"{group.group_id}_{week}"
@@ -5256,11 +5381,11 @@ class AcmerGroupBot(Star):
             image_path = card.get("image")
             if image_path is not None and Path(image_path).is_file():
                 ok = await self._send_group_image(
-                    group, image_path, caption=title
+                    group, image_path, caption=title, bypass_suspend=bypass_suspend
                 )
             else:
                 ok = await self.send_notification(
-                    group, str(card.get("text") or "")
+                    group, str(card.get("text") or ""), bypass_suspend=bypass_suspend
                 )
             if ok:
                 sent_cards += 1
@@ -5399,10 +5524,19 @@ class AcmerGroupBot(Star):
             )
         return reminded
 
-    async def _send_signup_text(self, group: GroupConfig, text: str) -> bool:
+    async def _send_signup_text(
+        self, group: GroupConfig, text: str, *, bypass_suspend: bool = False
+    ) -> bool:
         """向单个群发送报名提醒；异常按失败处理，不打断其他群。"""
+        if not bypass_suspend and await self.push_suspended(group):
+            logger.debug("群 %s 推送暂停中，跳过报名提醒", group.group_id)
+            return False
         try:
-            return bool(await self.send_notification(group, text))
+            return bool(
+                await self.send_notification(
+                    group, text, bypass_suspend=bypass_suspend
+                )
+            )
         except Exception as exc:  # noqa: BLE001 - 单群失败不影响其他群
             logger.warning("群 %s 报名提醒发送异常：%s", group.group_id, exc)
             return False
@@ -6339,13 +6473,13 @@ class AcmerGroupBot(Star):
                 "QQ 主动推送会话未就绪：请先让该群给机器人发一条消息，再点测试推送"
             )
         text = await self.build_test_text(group)
-        sent = await self.send_notification(group, text)
+        sent = await self.send_notification(group, text, bypass_suspend=True)
         if not sent:
             await self._log_push(group_id, "test", False, "发送失败")
             return error_response("发送失败，请查看 AstrBot 日志")
         # 与真实早报一致：正文之后追加两张周榜图片，便于在后台预览完整效果。
         try:
-            await self.push_weekly_boards(group)
+            await self.push_weekly_boards(group, bypass_suspend=True)
         except Exception:  # noqa: BLE001 - 周榜预览失败不影响测试推送结果
             logger.warning("测试推送的周榜发送失败", exc_info=True)
         await self._log_push(group_id, "test", True, "测试推送")
@@ -6880,6 +7014,7 @@ class AcmerGroupBot(Star):
                     show_unsolved=show_unsolved,
                     platform_order=list(platforms),
                     write_key=False,
+                    bypass_suspend=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 return [{"step": "赛果推送", "ok": False, "message": str(exc)}]
@@ -6926,7 +7061,7 @@ class AcmerGroupBot(Star):
             if remaining < 0:
                 continue
             text = self._signup_reminder_text(contest, deadline, remaining)
-            sent = await self._send_signup_text(group, text)
+            sent = await self._send_signup_text(group, text, bypass_suspend=True)
             return [
                 {"step": "报名提醒", "ok": bool(sent), "message": cid or "已发送"}
             ]
@@ -6963,7 +7098,7 @@ class AcmerGroupBot(Star):
         try:
             if kind == "morning":
                 text = await self.build_test_text(group)
-                sent = await self.send_notification(group, text)
+                sent = await self.send_notification(group, text, bypass_suspend=True)
                 results.append(
                     {
                         "step": "发送早报",
@@ -6973,7 +7108,7 @@ class AcmerGroupBot(Star):
                 )
                 if sent:
                     try:
-                        boards_ok = await self.push_weekly_boards(group)
+                        boards_ok = await self.push_weekly_boards(group, bypass_suspend=True)
                         results.append(
                             {
                                 "step": "推送周榜",
@@ -6987,7 +7122,7 @@ class AcmerGroupBot(Star):
                         )
             elif kind == "weekly":
                 pushed = await self._push_weekly_report_for_group(
-                    group, datetime.now(CN_TZ), write_key=False
+                    group, datetime.now(CN_TZ), write_key=False, bypass_suspend=True
                 )
                 results.append(
                     {

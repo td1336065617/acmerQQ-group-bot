@@ -131,13 +131,17 @@ class _FakePlugin:
     async def build_morning_text(self, group):
         return self._morning
 
-    async def send_notification(self, group, text):
+    async def send_notification(self, group, text, **kwargs):
         self.sent.append(text)
         return True
 
-    async def push_weekly_boards(self, group):
+    async def push_weekly_boards(self, group, **kwargs):
         self.board_pushes += 1
         return self._boards_ok and self._has_boards or self._boards_ok
+
+    async def push_suspended(self, group):
+        # 层 A 闸门：早报测试默认不在暂停中；需要断言暂停的用例直接改该属性
+        return False
 
     async def get_kv_data(self, key, default=None):
         return self.kv.get(key, default)

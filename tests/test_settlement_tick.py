@@ -120,11 +120,11 @@ def _build_bot(main_module, *, groups, contests, members, accounts, settlement, 
         base.update(settings or {})
         return base
 
-    async def send_notification(group, text):
+    async def send_notification(group, text, **kwargs):
         bot._sent.append((group.group_id, text))
         return True
 
-    async def send_group_image(group, path, caption=""):
+    async def send_group_image(group, path, caption="", **kwargs):
         bot._images.append((group.group_id, str(path), caption))
         return True
 

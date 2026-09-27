@@ -67,7 +67,7 @@ def test_settlement_run_does_not_write_idempotency_key():
     async def render(*args, **kwargs):
         return None
 
-    async def send(group, text):
+    async def send(group, text, **kwargs):
         return True
 
     bot._settlement_members = members
@@ -108,7 +108,7 @@ def test_settlement_default_still_writes_key():
     async def render(*args, **kwargs):
         return None
 
-    async def send(group, text):
+    async def send(group, text, **kwargs):
         return True
 
     bot._settlement_members = members
@@ -143,7 +143,7 @@ def test_weekly_run_does_not_write_idempotency_key():
     async def build_report(group):
         return {"cards": [], "text": "本周训练周报"}
 
-    async def send(group, text):
+    async def send(group, text, **kwargs):
         return True
 
     bot.build_weekly_report = build_report
@@ -166,7 +166,7 @@ def test_weekly_default_still_writes_key():
     async def build_report(group):
         return {"cards": [], "text": "本周训练周报"}
 
-    async def send(group, text):
+    async def send(group, text, **kwargs):
         return True
 
     bot.build_weekly_report = build_report
@@ -186,7 +186,7 @@ def test_signup_send_helper_never_writes_keys():
     bot = _bot(m, kv)
     sent = []
 
-    async def send(group, text):
+    async def send(group, text, **kwargs):
         sent.append((group.group_id, text))
         return True
 

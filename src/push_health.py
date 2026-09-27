@@ -16,6 +16,10 @@ from typing import Any, Dict, Tuple
 # ---- 常量（设计文档 §5.2 / §5.6；不开放为设置，调整走代码评审） ----
 #: 连续被拒 1/2/3/4+ 次的暂停时长（分钟）
 DENIED_BACKOFF_MINUTES: Tuple[int, ...] = (30, 360, 720, 1440)
+#: 阈值告警的连续被拒次数（可被设置 push_denied_threshold 覆盖）
+DEFAULT_DENIED_THRESHOLD = 5
+#: 群内消息触发探测性重试的最小间隔（可被设置 push_denied_probe_minutes 覆盖）
+DEFAULT_PROBE_MINUTES = 60
 HEALTH_TTL_DAYS = 90
 #: 进程内健康状态缓存时长（秒）：与群配置缓存同策略，防读放大
 HEALTH_CACHE_TTL_SECONDS = 30

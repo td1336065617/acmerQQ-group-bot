@@ -110,11 +110,11 @@ def _build_bot(
         base.update(settings or {})
         return base
 
-    async def send_notification(group, text):
+    async def send_notification(group, text, **kwargs):
         bot._sent.append((group.group_id, text))
         return send_ok
 
-    async def send_group_image(group, path, caption=""):
+    async def send_group_image(group, path, caption="", **kwargs):
         bot._images.append((group.group_id, str(path), caption))
         return send_ok
 
