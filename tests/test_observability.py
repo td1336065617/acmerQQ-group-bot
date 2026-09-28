@@ -113,3 +113,143 @@ def test_renderer_failures_are_logged(caplog, tmp_path, monkeypatch):
                          bad_fallback, [], "t", "s", "n", "打星")
     msgs = [r.getMessage() for r in caplog.records]
     assert any("卡片渲染不可用" in m and "chromium" in m and "模拟 Pillow 失败" in m for m in msgs), msgs
+
+# ---------------------------------------------------------------------------
+# 周报/周榜卡片降级为文字的发送侧留痕（W1/W2，实现文档：周报卡片降级留痕）
+# ---------------------------------------------------------------------------
+
+
+def _weekly_bot(m, report, boards=None):
+    """最小真机：跑真实 _push_weekly_report_for_group / push_weekly_boards，
+    只替换数据构建与发送（发送成功、记录到 sent/images）。"""
+    bot = m.AcmerGroupBot.__new__(m.AcmerGroupBot)
+    kv: dict = {}
+    sent: list = []
+    images: list = []
+
+    async def get_kv_data(key, default=None):
+        return kv.get(key, default)
+
+    async def put_kv_data(key, value):
+        kv[key] = value
+
+    async def delete_kv_data(key):
+        kv.pop(key, None)
+
+    async def get_settings():
+        return {}
+
+    async def send_notification(group, text, **kwargs):
+        sent.append(text)
+        return True
+
+    async def send_group_image(group, image_path, **kwargs):
+        images.append(str(image_path))
+        return True
+
+    async def build_weekly_report(group):
+        return report
+
+    async def build_weekly_board_cards(group):
+        return boards if boards is not None else report.get("cards") or []
+
+    async def log_push(*args, **kwargs):
+        return None
+
+    bot.get_kv_data = get_kv_data
+    bot.put_kv_data = put_kv_data
+    bot.delete_kv_data = delete_kv_data
+    bot.get_settings = get_settings
+    bot.send_notification = send_notification
+    bot._send_group_image = send_group_image
+    bot.build_weekly_report = build_weekly_report
+    bot.build_weekly_board_cards = build_weekly_board_cards
+    bot._log_push = log_push
+    return bot, kv, sent, images
+
+
+def test_weekly_card_without_image_is_logged(caplog):
+    """W1：周报卡片降级为文字必须留痕（群、卡名、原因、改发说明）。"""
+    from datetime import datetime, timezone
+
+    m = _load_main_module()
+    report = {
+        "text": "统计正文",
+        "cards": [{"title": "本周进步榜", "image": None, "text": "卡片兜底文字"}],
+    }
+    bot, kv, sent, images = _weekly_bot(m, report)
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
+        ok = asyncio.run(
+            bot._push_weekly_report_for_group(
+                GROUP, datetime.now(timezone.utc), week_key="2026-W40"
+            )
+        )
+    assert ok is True
+    warns = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        GROUP.group_id in w and "本周进步榜" in w and "渲染未产出图片" in w for w in warns
+    ), warns
+    assert any("改发卡片文字" in w for w in warns), warns
+    assert "卡片兜底文字" in sent  # 确实降级成了文字
+    assert images == []  # 没走图片路径
+
+
+def test_weekly_card_with_image_has_no_warning(tmp_path, caplog):
+    """有图且文件存在：走图片路径、零告警（锁不误报）。"""
+    from datetime import datetime, timezone
+
+    m = _load_main_module()
+    image_file = tmp_path / "weekly.png"
+    image_file.write_bytes(b"png")
+    report = {
+        "text": "统计正文",
+        "cards": [{"title": "本周进步榜", "image": str(image_file), "text": "兜底"}],
+    }
+    bot, kv, sent, images = _weekly_bot(m, report)
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
+        ok = asyncio.run(
+            bot._push_weekly_report_for_group(
+                GROUP, datetime.now(timezone.utc), week_key="2026-W41"
+            )
+        )
+    assert ok is True
+    assert images == [str(image_file)]
+    assert "兜底" not in sent  # 没降级
+    assert not any("未取到图片" in r.getMessage() for r in caplog.records)
+
+
+def test_weekly_card_missing_file_logs_path(tmp_path, caplog):
+    """image 有值但文件不存在（如缓存被清理）：告警须含「文件缺失」与路径。"""
+    from datetime import datetime, timezone
+
+    m = _load_main_module()
+    missing = str(tmp_path / "evicted.png")
+    report = {
+        "text": "t",
+        "cards": [{"title": "本周退步榜", "image": missing, "text": "兜底文字"}],
+    }
+    bot, kv, sent, images = _weekly_bot(m, report)
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
+        ok = asyncio.run(
+            bot._push_weekly_report_for_group(
+                GROUP, datetime.now(timezone.utc), week_key="2026-W42"
+            )
+        )
+    assert ok is True
+    warns = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("图片文件缺失" in w and "evicted.png" in w for w in warns), warns
+    assert "兜底文字" in sent
+
+
+def test_boards_card_without_image_is_logged(caplog):
+    """W2：早报周榜卡片降级同样必须留痕。"""
+    m = _load_main_module()
+    boards = [{"title": "本群本周进步榜", "image": None, "text": "榜单文字"}]
+    bot, kv, sent, images = _weekly_bot(m, {"text": "", "cards": boards}, boards=boards)
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
+        assert asyncio.run(bot.push_weekly_boards(GROUP)) is True
+    warns = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        GROUP.group_id in w and "本群本周进步榜" in w and "改发卡片文字" in w for w in warns
+    ), warns
+    assert "榜单文字" in sent

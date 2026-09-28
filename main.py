@@ -4478,6 +4478,19 @@ class AcmerGroupBot(Star):
                     group, image_path, caption=title, bypass_suspend=bypass_suspend
                 )
             else:
+                # 降级必须留痕（同上；图片正常时本分支不触发，不会产生噪音）。
+                cause = (
+                    "图片文件缺失：" + str(image_path)
+                    if image_path is not None
+                    else "渲染未产出图片"
+                )
+                self._warn_throttled(
+                    "weekly_board_text:" + str(group.group_id),
+                    "群 %s 的 %s 榜单卡未取到图片（%s），本次改发卡片文字（请检查渲染器/缓存）",
+                    group.group_id,
+                    title,
+                    cause,
+                )
                 ok = await self.send_notification(
                     group, str(board.get("text") or ""), bypass_suspend=bypass_suspend
                 )
@@ -5525,6 +5538,19 @@ class AcmerGroupBot(Star):
                     group, image_path, caption=title, bypass_suspend=bypass_suspend
                 )
             else:
+                # 降级必须留痕（CASE-003 同类：此前周报路径静默变文字，线上无从追查）。
+                cause = (
+                    "图片文件缺失：" + str(image_path)
+                    if image_path is not None
+                    else "渲染未产出图片"
+                )
+                self._warn_throttled(
+                    "weekly_card_text:" + str(group.group_id),
+                    "群 %s 的 %s 周报卡未取到图片（%s），本次改发卡片文字（请检查渲染器/缓存）",
+                    group.group_id,
+                    title,
+                    cause,
+                )
                 ok = await self.send_notification(
                     group, str(card.get("text") or ""), bypass_suspend=bypass_suspend
                 )
