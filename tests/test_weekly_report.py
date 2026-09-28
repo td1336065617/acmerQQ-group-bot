@@ -399,6 +399,39 @@ def test_cf_solved_key_keeps_problemset_problems_apart():
     assert activity.submissions == 5          # 窗口内提交都算
     assert activity.solved == 3               # 两道题库 A 题 + 一道正式赛 A 题
 
+def test_no_board_data_produces_no_card_and_no_warning(monkeypatch, caplog):
+    """设计锁定：无数据不产卡 → 不发卡、也不告警。
+
+    "不存在数据就不需要那张图"是设计而非降级——告警只属于
+    「有数据、本该出图、图却没产出」的真降级场景。
+    硬锁：无数据时连渲染都不应被调用（render 直接 AssertionError）。
+    """
+    import logging
+
+    async def scenario():
+        main_module = _load_main_module()
+        _patch_activity(monkeypatch, main_module, _activity_ok())
+        # 默认 rank 数据形状产不出榜单（sections 恒为空）
+        bot = _build_bot(main_module)
+        bot.build_weekly_board_cards = (
+            main_module.AcmerGroupBot.build_weekly_board_cards.__get__(bot)
+        )
+
+        async def render_never(*args, **kwargs):
+            raise AssertionError("无数据时不应走到渲染")
+
+        bot._render_overview_card = render_never
+        with caplog.at_level(logging.WARNING, logger="astrbot"):
+            assert await bot.tick_weekly_report(MONDAY) == 1  # 正文照发
+        assert not any(
+            "未取到图片" in r.getMessage() for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        texts = [text for _gid, text in bot._sent]
+        assert not any("本群本周进步榜" in text for text in texts)  # 没有卡片文字降级
+
+    asyncio.run(scenario())
+
+
 def test_real_chain_warns_when_render_fails(monkeypatch, caplog):
     """链路可达性锁（1.21.1 精读补充，防「测试全绿但生产走不到」）。
 
