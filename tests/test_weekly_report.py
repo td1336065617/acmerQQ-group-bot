@@ -398,3 +398,44 @@ def test_cf_solved_key_keeps_problemset_problems_apart():
     activity = summarize_cf_rows(rows, since_ts=1_799_000_000)
     assert activity.submissions == 5          # 窗口内提交都算
     assert activity.solved == 3               # 两道题库 A 题 + 一道正式赛 A 题
+
+def test_real_chain_warns_when_render_fails(monkeypatch, caplog):
+    """链路可达性锁（1.21.1 精读补充，防「测试全绿但生产走不到」）。
+
+    不 patch 构建器：走真实的 build_weekly_board_cards 与 build_weekly_report，
+    只把渲染桩成失败（image=None 的唯一合法来源），断言发送侧告警真的会响。
+    防的隐藏问题：若未来有人给周报加一行卡片过滤（如只保留有图的卡），
+    降级告警会变成死代码，而 patch 了构建器的单测依然全绿。
+    """
+    import logging
+
+    async def scenario():
+        main_module = _load_main_module()
+        _patch_activity(monkeypatch, main_module, _activity_ok())
+        bot = _build_bot(
+            main_module,
+            # 数据要够：否则真实构建器产不出卡（无 sections 直接 continue）
+            rank_rows={"codeforces": [_rank_rows("codeforces")]},
+        )
+        # 拆掉 harness 的构建器替身，绑回真实方法（走真实链路）
+        bot.build_weekly_board_cards = (
+            main_module.AcmerGroupBot.build_weekly_board_cards.__get__(bot)
+        )
+
+        async def render_none(*args, **kwargs):  # 渲染边界桩：模拟渲染失败
+            return None
+
+        bot._render_overview_card = render_none
+        with caplog.at_level(logging.WARNING, logger="astrbot"):
+            assert await bot.tick_weekly_report(MONDAY) == 1
+        warns = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            GROUP.group_id in w and "本群本周进步榜" in w and "渲染未产出图片" in w
+            for w in warns
+        ), warns
+        texts = [text for _gid, text in bot._sent]
+        assert any("本周训练周报" in text for text in texts)    # 正文照发
+        assert any("本群本周进步榜" in text for text in texts)   # 卡片以文字降级发出
+        assert bot._images == []                               # 没有任何图片发出
+
+    asyncio.run(scenario())
