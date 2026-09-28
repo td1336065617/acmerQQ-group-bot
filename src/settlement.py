@@ -564,11 +564,13 @@ class SettlementService:
             finally:
                 self._locks.pop(cache_key, None)
 
-        # 只缓存"有内容"的结果：未就绪（None）必须留给下一 tick 重试。
+        # 只缓存"有内容"的结果（空结果不缓存，留给调用方按终局处理）；
+        # 返回值必须原样透传：空结果（无人参赛）是终局信号，归一成 None
+        # 会把它重新打回「未就绪重试」——1.21.2 实施时踩过这个接缝：
+        # 采集层改对了，结果却被这里的缓存尾巴吞掉（生产断言抓获，已补 collect 级用例）。
         if result is not None and result.has_content():
             self._cache_put(cache_key, result)
-            return result
-        return None
+        return result
 
     def _cache_put(self, key: Tuple[str, str], value: SettleResult) -> None:
         self._result_cache[key] = (time.time(), value)
@@ -920,7 +922,15 @@ class SettlementService:
                 {str(row.handle).casefold() for row in rows},
             )
         if not rows and not unofficial:
-            return None
+            # 榜已就绪但成员全不在 = 无人参赛（终局信号）：返回空结果交调用方
+            # 写终局标记；raw 榜为空（910 行）仍返回 None 表示未就绪。
+            return SettleResult(
+                platform="codeforces",
+                contest_id=contest_id,
+                contest_name=str(getattr(contest, "name", "") or ""),
+                rows=[],
+                note="CF standings 已就绪，本群绑定成员均未参加该场比赛",
+            )
         rows.extend(unofficial)
         # 正式行按名次在前；打星行统一置尾
         rows.sort(key=lambda row: (row.unofficial, row.rank is None, row.rank or 0))
@@ -976,7 +986,16 @@ class SettlementService:
                 )
             )
         if not rows:
-            return None
+            # 榜已就绪但成员全不在结果里 = 无人参赛（终局信号）。
+            # 不能折成 None——None 表示「数据未就绪、继续重试」，会每 30 秒刷一条
+            # 误导性日志（2026-09-28 AGC078 实测连刷 9.6 小时，见实现文档）。
+            return SettleResult(
+                platform="atcoder",
+                contest_id=slug,
+                contest_name=str(getattr(contest, "name", "") or ""),
+                rows=[],
+                note="AtCoder results 已就绪，本群绑定成员均未参加该场比赛",
+            )
         rows.sort(key=lambda row: (row.rank is None, row.rank or 0))
         return SettleResult(
             platform="atcoder",

@@ -5138,14 +5138,38 @@ class AcmerGroupBot(Star):
             platform, contest, members, include_unofficial=include_unofficial
         )
         if result is None:
+            # None 只代表「平台数据未就绪」：真异常在采集层已打 WARNING（560-561 行），
+            # 此处不再冒称「接口异常」（2026-09-28 生产证伪：无人参赛被误报成该文案）。
             logger.info(
-                "群 %s 跳过 %s %s 赛果：赛果采集失败（接口异常或平台未公开）",
+                "群 %s 跳过 %s %s 赛果：赛果数据未就绪（平台未发布，下轮重试）",
                 group.group_id,
                 platform,
                 contest.contest_id,
             )
             return 0
         if not result.has_content():
+            # 终局跳过：数据就绪但无人参赛 → 写标记后本场不再重评
+            #（复用 BUG-039 的 skipped 形态，成员指纹变化仍可重开）。
+            # 此前采集层把该情形折成 None，本分支不可达且不写标记 →
+            # 每 30 秒刷误导日志（2026-09-28 AGC078 实测 9.6 小时约 4000 行）。
+            try:
+                await self.put_kv_data(
+                    key,
+                    {
+                        "skipped": True,
+                        "reason": "no-participants",
+                        "members": self._members_fingerprint(members),
+                        "ts": time.time(),
+                    },
+                )
+                await self._log_push(
+                    group.group_id,
+                    "settle",
+                    True,
+                    "跳过：本群绑定成员均未参加该场比赛",
+                )
+            except Exception as exc:  # noqa: BLE001 - 标记写失败不影响其它群/场次
+                logger.warning("写赛果跳过标记失败：%s（%s）", key, exc)
             logger.info(
                 "群 %s 跳过 %s %s 赛果：本群 %d 名绑定成员均未参加该场比赛",
                 group.group_id,

@@ -174,7 +174,13 @@ def test_codeforces_note_no_longer_mentions_retest():
     asyncio.run(scenario())
 
 
-def test_codeforces_no_matching_member_returns_none():
+def test_codeforces_no_matching_member_returns_empty_result():
+    """新契约（1.21.2）：榜就绪但无人匹配 = 终局空结果（调用方据此写标记、只报一次）。
+
+    旧契约（返回 None → 每 30 秒重试 + 误报「采集失败」）已被 2026-09-28
+    生产事故证伪并按修 A 改掉；None 从此只代表「未就绪或异常」。
+    本用例走真 collect() 全链路，同时锁住缓存尾巴的透传（不吞空结果）。
+    """
     async def scenario():
         fetcher = FakeFetcher(cf=_cf_standings_payload())
         service = SettlementService(fetcher)
@@ -183,7 +189,9 @@ def test_codeforces_no_matching_member_returns_none():
             _contest("codeforces", "2264", "R1121"),
             [("u9", "路人", "nobody")],
         )
-        assert result is None
+        assert result is not None
+        assert result.has_content() is False
+        assert result.rows == []
 
     asyncio.run(scenario())
 
@@ -227,7 +235,8 @@ def test_atcoder_place_matching():
     asyncio.run(scenario())
 
 
-def test_atcoder_no_match_returns_none():
+def test_atcoder_no_match_returns_empty_result():
+    """新契约（1.21.2，同 CF）：results 就绪但无人匹配 = 终局空结果。"""
     async def scenario():
         fetcher = FakeFetcher(atcoder=[{"UserName": "someone", "Place": 1}])
         service = SettlementService(fetcher)
@@ -236,7 +245,9 @@ def test_atcoder_no_match_returns_none():
             _contest("atcoder", "abc474", "ABC474"),
             [("u1", "Alice", "alice")],
         )
-        assert result is None
+        assert result is not None
+        assert result.has_content() is False
+        assert result.rows == []
 
     asyncio.run(scenario())
 
