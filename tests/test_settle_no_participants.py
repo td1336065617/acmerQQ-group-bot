@@ -198,6 +198,43 @@ def test_collect_passes_empty_result_through():
     got2 = asyncio.run(svc.collect("atcoder", contest, members))
     assert got2 is not None and got2.has_content() is True
 
+def test_trial_no_participants_writes_no_marker_or_empty_key(caplog):
+    """1.21.3 精读补锁：试跑（write_key=False、key 为空）遇无人参赛时，
+    不得写标记、不得写空键垃圾行、不记跳过 push_log（与阈值跳过同款守卫）；
+    准确文案仍要打（试跑者要看到原因）。
+    """
+    m = _load_main_module()
+    settlement = FakeSettlement(result=_EMPTY)
+    bot = _build_bot(
+        m,
+        groups=[GROUP],
+        contests={"codeforces": [_contest()]},
+        members={"g1": ["u1"]},
+        accounts={"u1": {"codeforces": {"handle": "zhangsan", "display_name": "张三"}}},
+        settlement=settlement,
+    )
+    with caplog.at_level(logging.INFO, logger="astrbot"):
+        rc = asyncio.run(
+            bot._push_settlement(
+                GROUP,
+                "codeforces",
+                _contest(),
+                "",  # 试跑不带幂等键（与 _run_now_settle 一致）
+                min_participants=1,
+                show_unsolved=True,
+                platform_order=["codeforces"],
+                write_key=False,
+                bypass_suspend=True,
+            )
+        )
+    assert rc == 0
+    assert "" not in bot._kv  # 不写空键
+    assert not any(str(k).startswith("settle_") for k in bot._kv)  # 不写标记
+    assert "push_log" not in bot._kv  # 不记跳过（阈值跳过对试跑同样不记）
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("均未参加该场比赛" in msg for msg in msgs), msgs
+
+
 def test_marker_reevaluates_once_when_fingerprint_changes():
     """重开：成员指纹变化（新绑定）→ 终局标记放行一次重评。"""
     m = _load_main_module()

@@ -5152,24 +5152,28 @@ class AcmerGroupBot(Star):
             #（复用 BUG-039 的 skipped 形态，成员指纹变化仍可重开）。
             # 此前采集层把该情形折成 None，本分支不可达且不写标记 →
             # 每 30 秒刷误导日志（2026-09-28 AGC078 实测 9.6 小时约 4000 行）。
-            try:
-                await self.put_kv_data(
-                    key,
-                    {
-                        "skipped": True,
-                        "reason": "no-participants",
-                        "members": self._members_fingerprint(members),
-                        "ts": time.time(),
-                    },
-                )
-                await self._log_push(
-                    group.group_id,
-                    "settle",
-                    True,
-                    "跳过：本群绑定成员均未参加该场比赛",
-                )
-            except Exception as exc:  # noqa: BLE001 - 标记写失败不影响其它群/场次
-                logger.warning("写赛果跳过标记失败：%s（%s）", key, exc)
+            # 与阈值跳过同款：标记与 push_log 只在正式推送时写——试跑
+            # write_key=False 且 key 为空，漏抄该守卫会写入空键垃圾行
+            #（1.21.2 首版漏掉，1.21.3 精读补上并加用例锁死）。
+            if write_key:
+                try:
+                    await self.put_kv_data(
+                        key,
+                        {
+                            "skipped": True,
+                            "reason": "no-participants",
+                            "members": self._members_fingerprint(members),
+                            "ts": time.time(),
+                        },
+                    )
+                    await self._log_push(
+                        group.group_id,
+                        "settle",
+                        True,
+                        "跳过：本群绑定成员均未参加该场比赛",
+                    )
+                except Exception as exc:  # noqa: BLE001 - 标记写失败不影响其它群/场次
+                    logger.warning("写赛果跳过标记失败：%s（%s）", key, exc)
             logger.info(
                 "群 %s 跳过 %s %s 赛果：本群 %d 名绑定成员均未参加该场比赛",
                 group.group_id,
