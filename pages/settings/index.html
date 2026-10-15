@@ -467,6 +467,10 @@
     { id: 'render', title: '文字转图片阈值', fields: [
       { key: 'max_plain_text_chars', label: '最大字符数', type: 'number', min: 200, max: 10000, desc: '默认 1800，范围 200～10000' },
       { key: 'max_plain_text_lines', label: '最大行数', type: 'number', min: 10, max: 200, desc: '默认 36，范围 10～200' }
+    ] }    ,{ id: 'ai', title: 'AI 能力（只读工具）', fields: [
+      { key: 'acmer_ai_tools_enabled', label: '开启 AI 只读工具（比赛 / 每日一题 / 战绩 / 排行）', type: 'bool', desc: '关闭后大模型无法调用这些工具；人类指令不受影响' },
+      { key: 'acmer_ai_throttle_limit', label: '节流：窗口内最多调用次数', type: 'number', min: 1, max: 60, desc: '默认 5 次' },
+      { key: 'acmer_ai_throttle_window', label: '节流：窗口秒数', type: 'number', min: 5, max: 3600, desc: '默认 60 秒' }
     ] }
   ];
 

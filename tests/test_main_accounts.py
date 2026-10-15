@@ -54,6 +54,15 @@ def _load_main_module():
         def event_message_type(*args, **kwargs):
             return lambda function: function
 
+        @staticmethod
+        def llm_tool(*args, **kwargs):
+            # AI 工具装饰器：测试里只做"原样返回函数"，不注册到框架
+            return lambda function: function
+
+        @staticmethod
+        def on_llm_request(*args, **kwargs):
+            return lambda function: function
+
     event_module.AstrMessageEvent = object
     event_module.MessageChain = list
     event_module.filter = DummyFilter

@@ -28,6 +28,11 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_session import MessageSesion
 
 from . import platform_compat
+try:                      # AstrBot 以包方式加载（data.plugins.<目录>.main）
+    from . import ai_common, ai_impl
+except ImportError:       # 测试里以顶层模块导入
+    import ai_common
+    import ai_impl
 
 from .src.contest_fetcher import (
     NOWCODER_SCOPE_ALL,
@@ -97,6 +102,7 @@ from .src.weekly_stats import (
 )
 from .src.utils import (
     contest_start_utc,
+    contest_end_utc,
     is_contest_in_recent_window,
     normalize_command,
     validate_hhmm,
@@ -108,6 +114,8 @@ OFFLINE_PLATFORM = "offline"
 QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 
 PLUGIN_NAME = "acmer_qq_group_bot"
+#: 插件版本：与 metadata.yaml / CHANGELOG 顶部保持一致
+VERSION = "1.22.0"
 DEFAULT_MORNING_TIME = "08:00"
 # 文字转图片阈值：可在 WebUI 中调整。这里保留默认值，保证旧配置/旧数据库
 # 没有新增字段时行为与此前版本一致。
@@ -822,6 +830,327 @@ class AcmerGroupBot(Star):
             renderer.max_chars = max(1, int(max_chars))
             renderer.max_lines = max(1, int(max_lines))
 
+    # ------------------------------------------------------------------
+    # AI 能力：4 个只读工具（不渲染图片、不触发推送/结算；每日一题会复用早报缓存键）
+    #   契约（设计 §5.2）：acmer_contests(platform?, recent?, days?)
+    #                    acmer_daily_problem(platform?)
+    #                    acmer_profile(platform?, user?, username?)  ← username 走现有限流
+    #                    acmer_group_rank(board?, platform?, page?)
+    # ------------------------------------------------------------------
+    async def _ai_guard(self, event: AstrMessageEvent, tool: str):
+        """统一门禁：开关 + 独立节流；被拒时返回错误 JSON 文本，放行返回 None。
+
+        注意：`username` 查询走仓库既有 `_check_lookup_rate_limit`（AC-05），
+        其它只读工具用这里独立节流（不与人类指令共享预算）。
+        """
+        settings = await self.get_settings()
+        if not settings.get("acmer_ai_tools_enabled"):
+            return ai_common.fail(
+                "disabled", "ACMer 的 AI 工具已在配置里关闭", hint="管理员可在插件页打开"
+            )
+        limit = int(settings.get("acmer_ai_throttle_limit") or 5)
+        window = int(settings.get("acmer_ai_throttle_window") or 60)
+        throttle = getattr(self, "_ai_throttle", None)
+        if throttle is None or (throttle.limit, throttle.window) != (limit, window):
+            throttle = ai_common.ToolThrottle(limit=limit, window=window)
+            self._ai_throttle = throttle
+        key = "%s:%s" % (
+            event.get_session_id()
+            or getattr(event, "unified_msg_origin", "")
+            or "unknown",
+            event.get_sender_id() or "-",
+        )   # 设计 §3.4：节流维度是每个调用者
+        wait = throttle.check(tool, key)
+        if wait:
+            return ai_common.fail("throttled", "查询太频繁，请 %d 秒后再试" % wait, retry_after=wait)
+        return None
+
+    @staticmethod
+    def _ai_platform_error() -> str:
+        return ai_common.fail(
+            "invalid_argument",
+            "platform 只支持 all/cf/nk/lg/atc/offline（可用中文别名）",
+            field="platform",
+        )
+
+    @staticmethod
+    def _ai_platform_known(value) -> bool:
+        text = str(value or "").strip()
+        return (not text) or text.casefold() in ai_impl.PLATFORM_ALIASES
+
+    @filter.llm_tool(name="acmer_contests")
+    async def acmer_contests(self, event: AstrMessageEvent, **kwargs) -> str:
+        """查看最近的竞赛（未来若干天内开赛或正在进行中）。
+
+        何时使用：用户问"最近有什么比赛/比赛日程/有什么赛可以打"。
+        何时别用：问成绩或排行榜时用 acmer_profile / acmer_group_rank。
+
+        Args:
+            platform(string): 可选，all（默认）/ cf / nk / lg / atc / offline（支持"线下赛"等中文别名）。
+            recent(boolean): 可选，true 时只返回最近的一场；默认 false。
+            days(number): 可选，往后看几天，1~30，默认跟随后台设置。
+        """
+        blocked = await self._ai_guard(event, "acmer_contests")
+        if blocked:
+            return blocked
+        settings = await self.get_settings()
+        kwargs = kwargs or {}
+        if not self._ai_platform_known(kwargs.get("platform")):
+            return self._ai_platform_error()
+        platforms = ai_impl.resolve_platforms(
+            kwargs.get("platform"), QUERY_PLATFORMS, settings["push_platforms"]
+        )
+        recent = ai_common.to_bool(kwargs.get("recent"), default=False)
+        raw_days = kwargs.get("days")
+        default_days = int(settings.get("recent_contest_days") or 7)
+        if str(raw_days or "").strip():
+            days = ai_common.parse_int(raw_days, 1, 30)
+            if days is None:
+                return ai_common.fail("invalid_argument", "days 只能是 1~30 的整数", field="days")
+        else:
+            days = default_days
+        limit = 1 if recent else 10
+        entries = self._preview_contests(platforms)          # 只读缓存，零网络
+        picked = ai_impl.select_upcoming(
+            entries,
+            start_of=contest_start_utc,
+            end_of=contest_end_utc,   # 已结束的历史比赛不返回
+            now=time.time(),
+            days=days,
+            limit=limit,
+        )
+        lines: list = []
+        for index, (platform, contest) in enumerate(picked, 1):
+            try:
+                lines.extend(self._format_recent_contest(index, platform, contest))
+            except Exception as exc:
+                logger.warning("格式化比赛失败（跳过）：%s", exc)
+        if not lines:
+            return ai_common.fail(
+                "capability_unavailable",
+                "暂时没有查到近期比赛（赛程缓存可能正在刷新）",
+                hint="可直接发送「最近比赛」指令让插件刷新赛程",
+            )
+        text = ai_common.sanitize("\n".join(lines), 1500)
+        logger.info("AI 工具 acmer_contests 命中（%d 条，平台=%s，recent=%s）", len(picked), platforms, recent)
+        return ai_common.ok(
+            {"count": len(picked), "platforms": platforms, "recent": recent, "text": text}
+        )
+
+    @filter.llm_tool(name="acmer_daily_problem")
+    async def acmer_daily_problem(self, event: AstrMessageEvent, **kwargs) -> str:
+        """查看今天的每日一题（与早报同一题）。
+
+        何时使用：用户问"今天的每日一题/今天刷什么题"。
+        何时别用：问比赛日程用 acmer_contests。
+
+        Args:
+            platform(string): 可选，题目池平台（默认按插件设置，通常是牛客 nk）。
+        """
+        blocked = await self._ai_guard(event, "acmer_daily_problem")
+        if blocked:
+            return blocked
+        settings = await self.get_settings()
+        if not settings.get("daily_problem_enabled", True):
+            return ai_common.fail("disabled", "每日一题功能已在插件设置里关闭")
+        kwargs = kwargs or {}
+        if not self._ai_platform_known(kwargs.get("platform")):
+            return self._ai_platform_error()
+        allowed = [str(item) for item in settings.get("push_platforms") or []] or list(ACCOUNT_PLATFORMS)
+        platform = ai_impl.resolve_platform(
+            kwargs.get("platform"), allowed, settings.get("daily_problem_platform") or "nowcoder"
+        )
+        if not platform:
+            return ai_common.fail("invalid_argument", "platform 不是可用的题目池平台", field="platform")
+        group_id = str(event.get_group_id() or "").strip()
+        day = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        try:
+            service = getattr(self, "problem_service", None)
+            pool = service.peek_index(platform) if service is not None else None   # 只读：不建索引、不触网
+            if not pool:
+                return ai_common.fail(
+                    "capability_unavailable",
+                    "题目池还没建立（本工具只读，不会主动拉取）",
+                    hint="发送「每日一题」指令可让插件建立题目池",
+                )
+            problem = await self._daily_problem_for_group(group_id, platform, day, pool=pool)
+        except Exception as exc:
+            logger.warning("AI 工具取每日一题失败：%s", exc)
+            return ai_common.fail("capability_unavailable", "题目池暂时不可用，请稍后再试")
+        if problem is None:
+            return ai_common.fail(
+                "capability_unavailable",
+                "今天的每日一题还没抽出来（题目池可能未建立）",
+                hint="发送「每日一题」指令可让插件建立题目池",
+            )
+        text = ai_common.sanitize(ai_impl.problem_text(problem), 500)
+        logger.info("AI 工具 acmer_daily_problem 命中（platform=%s）", platform)
+        return ai_common.ok({"platform": platform, "date": day, "text": text})
+
+    @filter.llm_tool(name="acmer_profile")
+    async def acmer_profile(self, event: AstrMessageEvent, **kwargs) -> str:
+        """查看竞赛战绩：本群成员、自己，或按用户名查任意人。
+
+        何时使用：用户问"我的战绩/某人的 rating/查询cf 某某"。
+        何时别用：问群里整体排行时用 acmer_group_rank。
+
+        Args:
+            platform(string): 可选，指定单个平台（cf/nk/lg/atc）；用 username 查询时必填。
+            user(string): 可选，本群成员昵称（不填且无 username 时查发送者自己）。
+            username(string): 可选，第三方平台用户名/UID（未绑定也能查；会走插件现有限流）。
+        """
+        blocked = await self._ai_guard(event, "acmer_profile")
+        if blocked:
+            return blocked
+        settings = await self.get_settings()
+        kwargs = kwargs or {}
+        if not self._ai_platform_known(kwargs.get("platform")):
+            return self._ai_platform_error()
+        platform = ai_impl.resolve_platform(kwargs.get("platform"), QUERY_PLATFORMS, None)
+        want_username = ai_common.sanitize(kwargs.get("username"), 40)
+        want_user = ai_common.sanitize(kwargs.get("user"), 40)
+        group_id = str(event.get_group_id() or "").strip()
+        if want_username:
+            if not platform:
+                return ai_common.fail(
+                    "invalid_argument",
+                    "用 username 查询时必须指定 platform（cf/nk/lg/atc）",
+                    field="platform",
+                )
+            allowed, wait = await self._check_lookup_rate_limit(event)   # AC-05：复用现有限流
+            if not allowed:
+                return ai_common.fail(
+                    "throttled", "查询太频繁，请 %d 秒后再试" % wait, retry_after=wait
+                )
+            try:
+                profile = await self.account_fetcher.get_profile(
+                    platform, want_username, detail=True, include_submissions=False
+                )
+            except Exception as exc:
+                logger.warning("AI 工具按用户名取战绩失败：%s", exc)
+                return ai_common.fail("capability_unavailable", "平台数据暂时取不到，请稍后再试")
+            if profile is None:
+                return ai_common.fail("not_found", "没有找到用户名为「%s」的账号" % want_username)
+            lines = ai_impl.profile_lines([(platform, profile, None)], self._profile_metric)
+            text = ai_common.sanitize("\n".join(lines), 900)
+            logger.info("AI 工具 acmer_profile(username) 命中（platform=%s）", platform)
+            return ai_common.ok({"platform": platform, "username": want_username, "text": text})
+        user_id = str(event.get_sender_id() or "").strip()
+        matched_name = ""
+        if want_user:
+            key = want_user.casefold()
+            search_platforms = [platform] if platform else list(ACCOUNT_PLATFORMS)
+            for item in search_platforms:
+                try:
+                    members = await self._settlement_members(group_id, item)
+                except Exception:
+                    members = []
+                for member in members or []:
+                    handle = str(member[2] if len(member) > 2 else "")
+                    display = str(member[1] if len(member) > 1 else "")
+                    if key in display.casefold() or key in handle.casefold():
+                        user_id = str(member[0])
+                        matched_name = display or handle
+                        break
+                if matched_name:
+                    break
+            if not matched_name:
+                return ai_common.fail(
+                    "not_found",
+                    "本群没有找到叫「%s」的已绑定成员；也可以用 username 直接按平台用户名查" % want_user,
+                    hint="对方需要先用「绑定cf」等指令绑定账号",
+                )
+        if not user_id:
+            return ai_common.fail("platform_unsupported", "当前通道拿不到发送者账号，无法查询")
+        try:
+            accounts, profiles, errors = await self._load_bound_profiles(
+                user_id, detail=True, record_metrics=False
+            )   # 真实契约是三元组 (accounts, profiles, errors)
+        except Exception as exc:
+            logger.warning("AI 工具取战绩失败：%s", exc)
+            return ai_common.fail("capability_unavailable", "平台数据暂时取不到，请稍后再试")
+        if platform:
+            profiles = [
+                item
+                for item in profiles
+                if str(getattr(item, "platform", "") or "").casefold()
+                == platform.casefold()
+            ]
+        lines = ai_impl.profile_lines(profiles, self._profile_metric)
+        if not lines:
+            label = matched_name or "该成员"
+            return ai_common.fail(
+                "not_found",
+                "%s 还没有绑定%s账号" % (label, ai_impl.PLATFORM_LABELS.get(platform, "") if platform else ""),
+                hint="可用「绑定cf 用户名」等指令绑定",
+            )
+        text = ai_common.sanitize("\n".join(lines), 1200)
+        logger.info("AI 工具 acmer_profile 命中（user_id=%s）", ai_common.mask_id(user_id))
+        return ai_common.ok({"user": matched_name or "本人", "text": text})
+
+    @filter.llm_tool(name="acmer_group_rank")
+    async def acmer_group_rank(self, event: AstrMessageEvent, **kwargs) -> str:
+        """查看本群排行榜：总览 / 本周进步榜 / 本周退步榜。
+
+        何时使用：用户问"群里谁最强/群排行/谁进步最快/谁掉分了"。
+        何时别用：问某一个人的战绩用 acmer_profile。
+
+        Args:
+            board(string): 可选，total（默认总览）/ progress（本周进步）/ regress（本周退步）。
+            platform(string): 可选，all（默认四个平台）/ cf / nk / lg / atc。
+            page(number): 可选，第几页（每页 10 人），1~50，默认 1。
+        """
+        blocked = await self._ai_guard(event, "acmer_group_rank")
+        if blocked:
+            return blocked
+        group_id = str(event.get_group_id() or "").strip()
+        if not group_id:
+            return ai_common.fail("platform_unsupported", "排行榜只在群聊里可用")
+        kwargs = kwargs or {}
+        raw_board = kwargs.get("board")
+        board = ai_common.pick_enum(raw_board, ("total", "progress", "regress"), None)
+        if board is None:
+            if str(raw_board or "").strip():
+                return ai_common.fail(
+                    "invalid_argument", "board 只能是 total / progress / regress", field="board"
+                )
+            board = "total"
+        if not self._ai_platform_known(kwargs.get("platform")):
+            return self._ai_platform_error()
+        platforms = ai_impl.resolve_platforms(
+            kwargs.get("platform"), list(ACCOUNT_PLATFORMS), list(ACCOUNT_PLATFORMS)
+        )
+        raw_page = kwargs.get("page")
+        if str(raw_page or "").strip():
+            page = ai_common.parse_int(raw_page, 1, 50)
+            if page is None:
+                return ai_common.fail("invalid_argument", "page 只能是 1~50 的整数", field="page")
+        else:
+            page = 1
+        blocks: list = []
+        for platform in platforms:
+            try:
+                rows, _errors = await self._collect_rank_rows(
+                    group_id, platform, progress=board != "total", record_metrics=False
+                )
+            except Exception as exc:
+                logger.warning("AI 工具取群 %s 的 %s 排行失败：%s", group_id, platform, exc)
+                continue
+            if board == "regress":
+                rows = self._regress_rows(rows)
+            lines = ai_impl.rank_lines(rows, 10, page=page)
+            label = ai_impl.PLATFORM_LABELS.get(platform, platform)
+            if lines:
+                blocks.append("【%s】\n%s" % (label, "\n".join(lines)))
+        if not blocks:
+            return ai_common.fail(
+                "capability_unavailable",
+                "本群还没有%s数据" % ("退步榜" if board == "regress" else "排行榜"),
+                hint="成员需要先绑定账号；进步/退步榜需要至少一周的 Rating 快照",
+            )
+        text = ai_common.sanitize("\n\n".join(blocks), 1500)
+        logger.info("AI 工具 acmer_group_rank 命中（board=%s，平台数=%d，page=%d）", board, len(blocks), page)
+        return ai_common.ok({"board": board, "platforms": platforms, "page": page, "text": text})
     async def get_settings(self) -> dict:
         """读取全局设置；命中短 TTL 内存缓存时不再整读 AstrBot KV。
 
@@ -848,6 +1177,13 @@ class AcmerGroupBot(Star):
         settings = {
             "morning_push_time": morning,
             "push_platforms": platforms or list(DEFAULT_PLATFORMS),
+            "acmer_ai_tools_enabled": bool(raw.get("acmer_ai_tools_enabled", True)),
+            "acmer_ai_throttle_limit": self._read_bounded_int(
+                raw.get("acmer_ai_throttle_limit"), 5, 1, 60
+            ),
+            "acmer_ai_throttle_window": self._read_bounded_int(
+                raw.get("acmer_ai_throttle_window"), 60, 5, 3600
+            ),
             "reminder_enabled": bool(raw.get("reminder_enabled", True)),
             "at_all_enabled": bool(raw.get("at_all_enabled", False)),
             "max_plain_text_chars": self._read_bounded_int(
@@ -6747,6 +7083,28 @@ class AcmerGroupBot(Star):
         return {
             "morning_push_time": morning,
             "push_platforms": platforms or list(DEFAULT_PLATFORMS),
+            "acmer_ai_tools_enabled": bool(
+                settings.get(
+                    "acmer_ai_tools_enabled",
+                    current.get("acmer_ai_tools_enabled", True),
+                )
+            ),
+            "acmer_ai_throttle_limit": self._read_bounded_int(
+                settings.get(
+                    "acmer_ai_throttle_limit", current.get("acmer_ai_throttle_limit", 5)
+                ),
+                5,
+                1,
+                60,
+            ),
+            "acmer_ai_throttle_window": self._read_bounded_int(
+                settings.get(
+                    "acmer_ai_throttle_window", current.get("acmer_ai_throttle_window", 60)
+                ),
+                60,
+                5,
+                3600,
+            ),
             "reminder_enabled": bool(
                 settings.get("reminder_enabled", current["reminder_enabled"])
             ),

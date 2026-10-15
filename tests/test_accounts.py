@@ -297,6 +297,17 @@ def test_nowcoder_analysis_uses_practice_and_problem_metadata(monkeypatch, tmp_p
     asyncio.run(scenario())
 
 
+def _recent_day(days_ago: int) -> str:
+    """相对今天生成 YYYY-MM-DD（避免活跃天数类用例依赖固定日期而失效）。"""
+    import datetime
+    from src.models import CN_TZ
+
+    delta = datetime.timedelta(days=days_ago)
+    stamp = datetime.datetime.now(CN_TZ) - delta
+    return stamp.strftime("%Y-%m-%d")
+
+
+
 def test_luogu_analysis_uses_activity_scores_and_elo_history():
     payload = {
         "data": {
@@ -308,8 +319,9 @@ def test_luogu_analysis_uses_activity_scores_and_elo_history():
                 }
             },
             "dailyCounts": {
-                "2026-09-01": [3, 2],
-                "2026-07-20": [1, 2],
+                # 相对今天构造：30 天内 1 天活跃 + 100 天前 1 天（避免用例随时间过期）
+                _recent_day(5): [3, 2],
+                _recent_day(100): [1, 2],
             },
             "elo": [
                 {
