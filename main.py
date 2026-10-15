@@ -115,7 +115,7 @@ QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 
 PLUGIN_NAME = "acmer_qq_group_bot"
 #: 插件版本：与 metadata.yaml / CHANGELOG 顶部保持一致
-VERSION = "1.22.2"
+VERSION = "1.22.3"
 DEFAULT_MORNING_TIME = "08:00"
 # 文字转图片阈值：可在 WebUI 中调整。这里保留默认值，保证旧配置/旧数据库
 # 没有新增字段时行为与此前版本一致。
@@ -957,9 +957,17 @@ class AcmerGroupBot(Star):
         if not self._ai_platform_known(kwargs.get("platform")):
             return self._ai_platform_error()
         allowed = [str(item) for item in settings.get("push_platforms") or []] or list(ACCOUNT_PLATFORMS)
+        raw_platform = str(kwargs.get("platform") or "").strip()
         platform = ai_impl.resolve_platform(
-            kwargs.get("platform"), allowed, settings.get("daily_problem_platform") or "nowcoder"
+            raw_platform, allowed, settings.get("daily_problem_platform") or "nowcoder"
         )
+        requested_platform = ai_impl.resolve_platform(raw_platform, list(ai_impl.PLATFORM_LABELS), None)
+        if requested_platform and requested_platform not in allowed:
+            return ai_common.fail(
+                "invalid_argument",
+                "该平台不在每日一题的题目池里（当前可用：%s）" % "/".join(allowed),
+                field="platform",
+            )
         if not platform:
             return ai_common.fail("invalid_argument", "platform 不是可用的题目池平台", field="platform")
         group_id = str(event.get_group_id() or "").strip()
@@ -1038,41 +1046,51 @@ class AcmerGroupBot(Star):
         user_id = str(event.get_sender_id() or "").strip()
         matched_name = ""
         if want_user:
+            if not group_id:
+                return ai_common.fail(
+                    "platform_unsupported",
+                    "按昵称查人只在群聊里可用（当前会话拿不到群号）",
+                    hint="私聊里请改用 username 按平台用户名查，或让对方 @ 自己",
+                )
             key = want_user.casefold()
             own_name = self._event_display_name(event).strip().casefold()
             if key and own_name and key == own_name:   # 只认精确相等：子串匹配会把别人误认成自己
-                # 模型常把发送者自己的群昵称塞进 user（"我的战绩"也被它填了名字）：
-                # 认成"本人"，别再去成员表里空找一轮
                 matched_name = "本人"
             else:
                 search_platforms = [platform] if platform else list(ACCOUNT_PLATFORMS)
-                found: dict = {}
-                for exact in (True, False):
-                    for item in search_platforms:
-                        try:
-                            members = await self._group_member_bindings(group_id, item)
-                        except Exception:
-                            members = []
-                        for member in members or []:
-                            values = [str(member[0]), str(member[1]), str(member[2])]
-                            values.append(str(member[3]) if len(member) > 3 else "")
-                            candidates = [value for value in values[1:] if value]
-                            for value in candidates:
-                                hit = value.casefold() == key if exact else key in value.casefold()
-                                if hit:
-                                    found = {
-                                        "user_id": str(member[0]),
-                                        "name": (str(member[3]) if len(member) > 3 else "")
-                                        or str(member[1])
-                                        or str(member[2]),
-                                    }
-                                    break
-                            if found:
-                                break
-                        if found:
-                            break
-                    if found:
-                        break
+                pool: list = []
+                for item in search_platforms:
+                    try:
+                        pool.extend(await self._group_member_bindings(group_id, item))
+                    except Exception:
+                        pass
+                found = self._pick_named_member(pool, key)
+                if not found:
+                    # 名册（本群排行成员）没命中时回退**全量绑定表**：已绑定但还没进本群排行的
+                    # 成员也该能按昵称查到——与人类「@某人 查询战绩」的能力对齐。
+                    try:
+                        accounts = await self.account_registry.get_all_accounts()
+                    except Exception:
+                        accounts = {}
+                    if isinstance(accounts, dict):
+                        for item in search_platforms:
+                            for raw_user_id, platform_map in accounts.items():
+                                record = (
+                                    platform_map.get(item)
+                                    if isinstance(platform_map, dict)
+                                    else None
+                                )
+                                if not isinstance(record, dict):
+                                    continue
+                                pool.append(
+                                    (
+                                        str(raw_user_id),
+                                        str(record.get("display_name") or record.get("handle") or ""),
+                                        str(record.get("platform_user_id") or record.get("handle") or ""),
+                                        str(record.get("qq_name") or ""),
+                                    )
+                                )
+                    found = self._pick_named_member(pool, key)
                 if found:
                     user_id = found["user_id"]
                     matched_name = found["name"]
@@ -1081,7 +1099,7 @@ class AcmerGroupBot(Star):
                     "not_found",
                     "本群没有找到叫「%s」的已绑定成员；你是「%s」的话，请把 user 留空再查一次（或直接用 username 按平台用户名查）"
                     % (want_user, self._event_display_name(event)),
-                    hint="问自己的战绩时不要传 user；查别人可以让他先绑定，或改用 username",
+                    hint="问自己的战绩时不要传 user；查别人可让他先绑定，或改用 username",
                 )
         if not user_id:
             return ai_common.fail("platform_unsupported", "当前通道拿不到发送者账号，无法查询")
@@ -1140,6 +1158,23 @@ class AcmerGroupBot(Star):
             board = "total"
         if not self._ai_platform_known(kwargs.get("platform")):
             return self._ai_platform_error()
+        raw_rank_platform = str(kwargs.get("platform") or "").strip()
+        requested_rank_platform = ai_impl.resolve_platform(
+            raw_rank_platform, list(ai_impl.PLATFORM_LABELS), None
+        )
+        if (
+            raw_rank_platform
+            and not raw_rank_platform.casefold() in ("all", "全部")
+            and requested_rank_platform
+            and requested_rank_platform not in ACCOUNT_PLATFORMS
+        ):
+            # F9：请求了合法但本工具不支持的平台（如 offline）→ 明确报错，
+            # 不能静默返回四个平台的混答（resolve_platforms 的 default 语义会那样做）
+            return ai_common.fail(
+                "invalid_argument",
+                "排行榜不支持该平台（可用：all / %s）" % " / ".join(ACCOUNT_PLATFORMS),
+                field="platform",
+            )
         platforms = ai_impl.resolve_platforms(
             kwargs.get("platform"), list(ACCOUNT_PLATFORMS), list(ACCOUNT_PLATFORMS)
         )
@@ -5079,6 +5114,32 @@ class AcmerGroupBot(Star):
                 qq_name = str(record.get("qq_name") or "").strip()
             enriched.append((user_id, display, handle, qq_name))
         return enriched
+
+
+    @staticmethod
+    def _pick_named_member(records: List[tuple], key: str) -> dict:
+        """在 [(user_id, display_name, handle, qq_name)] 里按 **精确 → 包含** 找人。
+
+        统一放在一处：名册与全量绑定表都用它，避免两处匹配逻辑将来各改一半。
+        """
+        if not key:
+            return {}
+        for exact in (True, False):
+            for member in records or []:
+                if len(member) < 4:
+                    continue
+                user_id = str(member[0])
+                display = str(member[1] or "")
+                handle = str(member[2] or "")
+                qq_name = str(member[3] or "")
+                for value in (qq_name, display, handle):
+                    if not value:
+                        continue
+                    folded = value.casefold()
+                    hit = folded == key if exact else key in folded
+                    if hit:
+                        return {"user_id": user_id, "name": qq_name or display or handle}
+        return {}
 
     @staticmethod
     def _members_fingerprint(members: List[tuple]) -> str:

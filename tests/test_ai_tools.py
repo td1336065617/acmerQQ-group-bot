@@ -469,3 +469,64 @@ def test_profile_blank_own_name_does_not_make_everyone_self(monkeypatch) -> None
     data = payload(run(bot.acmer_profile(FakeEvent(sender="self1"), user="道")))
     assert data["ok"] is True, data
     assert asked["user_id"] == "u7", asked
+
+
+def test_profile_falls_back_to_all_bound_accounts(monkeypatch) -> None:
+    """F3：已绑定但不在本群排行名册里的成员，也要能按昵称查到（与人类 @某人 对齐）。"""
+    _module, bot, _settings = make_bot()
+    asked: dict = {}
+
+    async def no_roster(group_id, platform):
+        return []
+
+    async def fake_accounts():
+        return {
+            "u9": {
+                "codeforces": {
+                    "display_name": "td1336065617",
+                    "platform_user_id": "645160704",
+                    "qq_name": "道",
+                }
+            }
+        }
+
+    async def fake_profiles(user_id, *, detail=True, force=False, record_metrics=True):
+        asked["user_id"] = user_id
+        return {}, [types.SimpleNamespace(platform="codeforces", handle="x")], []
+
+    monkeypatch.setattr(bot, "_group_member_bindings", no_roster)
+    bot.account_registry = types.SimpleNamespace(get_all_accounts=fake_accounts)
+    monkeypatch.setattr(bot.account_registry, "get_all_accounts", fake_accounts)
+    monkeypatch.setattr(bot, "_load_bound_profiles", fake_profiles)
+    monkeypatch.setattr(bot, "_profile_metric", staticmethod(lambda profile: {"Rating": 1}))
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "提问者"))
+    data = payload(run(bot.acmer_profile(FakeEvent(), user="道")))
+    assert data["ok"] is True, data
+    assert asked["user_id"] == "u9", asked
+
+
+def test_profile_nickname_lookup_in_private_chat_is_rejected(monkeypatch) -> None:
+    """F5：私聊没有"本群"，按昵称查人要明确拒绝并给出替代路径。"""
+    _module, bot, _settings = make_bot()
+    data = payload(run(bot.acmer_profile(FakeEvent(group_id=""), user="道")))
+    assert data["ok"] is False and data["error"]["code"] == "platform_unsupported", data
+    assert "username" in str(data["error"].get("hint") or "")
+
+
+def test_daily_problem_rejects_platform_outside_pool(monkeypatch) -> None:
+    """F9：请求的平台不在题目池里时必须报错，不能静默换成默认平台作答。"""
+    _module, bot, _settings = make_bot()
+
+    async def fake_settings():
+        return {"acmer_ai_tools_enabled": True, "daily_problem_enabled": True, "push_platforms": ["nowcoder"], "daily_problem_platform": "nowcoder"}
+
+    monkeypatch.setattr(bot, "get_settings", fake_settings)
+    data = payload(run(bot.acmer_daily_problem(FakeEvent(), platform="atcoder")))
+    assert data["ok"] is False and data["error"]["code"] == "invalid_argument", data
+
+
+def test_group_rank_rejects_platform_not_in_rank(monkeypatch) -> None:
+    """F9：offline 不在排行支持的平台里，不能静默给全平台数据。"""
+    _module, bot, _settings = make_bot()
+    data = payload(run(bot.acmer_group_rank(FakeEvent(), platform="offline")))
+    assert data["ok"] is False and data["error"]["code"] == "invalid_argument", data
