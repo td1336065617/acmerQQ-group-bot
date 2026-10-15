@@ -115,7 +115,7 @@ QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 
 PLUGIN_NAME = "acmer_qq_group_bot"
 #: 插件版本：与 metadata.yaml / CHANGELOG 顶部保持一致
-VERSION = "1.22.0"
+VERSION = "1.22.1"
 DEFAULT_MORNING_TIME = "08:00"
 # 文字转图片阈值：可在 WebUI 中调整。这里保留默认值，保证旧配置/旧数据库
 # 没有新增字段时行为与此前版本一致。
