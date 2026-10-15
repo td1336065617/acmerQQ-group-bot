@@ -228,7 +228,8 @@ def test_profile_not_found_for_unknown_member(monkeypatch) -> None:
     async def no_members(group_id, platform):
         return []
 
-    monkeypatch.setattr(bot, "_settlement_members", no_members)
+    monkeypatch.setattr(bot, "_group_member_bindings", no_members)
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "提问的人"))
     data = payload(run(bot.acmer_profile(FakeEvent(), user="查无此人")))
     assert data["ok"] is False and data["error"]["code"] == "not_found"
 
@@ -344,3 +345,64 @@ def test_select_upcoming_skips_finished_contests() -> None:
     )
     assert len(picked) == 1, picked
     assert picked[0][1]["start"] == soon
+
+
+def test_profile_finds_member_by_qq_name(monkeypatch) -> None:
+    """生产实案：绑定记录里 display_name 是 OJ 用户名、QQ 昵称在 qq_name。
+
+    模型把群昵称「道」当 user 传进来时，必须找到这个人（此前只匹配 display_name，回"没找到"）。
+    """
+    _module, bot, _settings = make_bot()
+
+    async def fake_members(group_id, platform):
+        return [("u7", "td1336065617", "645160704", "道")]
+
+    async def fake_profiles(user_id, *, detail=True, force=False, record_metrics=True):
+        assert user_id == "u7", user_id
+        account = types.SimpleNamespace(platform="codeforces", handle="td1336065617")
+        profile = types.SimpleNamespace(platform="codeforces", handle="td1336065617")
+        return {"codeforces": account}, [profile], []
+
+    monkeypatch.setattr(bot, "_group_member_bindings", fake_members)
+    monkeypatch.setattr(bot, "_load_bound_profiles", fake_profiles)
+    monkeypatch.setattr(bot, "_profile_metric", staticmethod(lambda profile: {"Rating": 1500}))
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "提问的人"))
+    data = payload(run(bot.acmer_profile(FakeEvent(), user="道")))
+    assert data["ok"] is True, data
+    assert data["data"]["user"] == "道"
+    assert "1500" in data["data"]["text"]
+
+
+def test_profile_own_nickname_is_treated_as_self(monkeypatch) -> None:
+    """模型把发送者自己的群昵称填进 user 时按"本人"处理，不再去成员表空找一轮。"""
+    _module, bot, _settings = make_bot()
+    asked: dict = {}
+
+    async def fake_profiles(user_id, *, detail=True, force=False, record_metrics=True):
+        asked["user_id"] = user_id
+        return {}, [types.SimpleNamespace(platform="codeforces", handle="me")], []
+
+    async def should_not_call(group_id, platform):
+        raise AssertionError("已经认出是自己，不该再查成员表")
+
+    monkeypatch.setattr(bot, "_group_member_bindings", should_not_call)
+    monkeypatch.setattr(bot, "_load_bound_profiles", fake_profiles)
+    monkeypatch.setattr(bot, "_profile_metric", staticmethod(lambda profile: {"Rating": 1600}))
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "道"))
+    data = payload(run(bot.acmer_profile(FakeEvent(sender="u1"), user="道")))
+    assert data["ok"] is True, data
+    assert asked["user_id"] == "u1"
+    assert data["data"]["user"] == "本人"
+
+
+def test_profile_not_found_hints_to_leave_user_empty(monkeypatch) -> None:
+    _module, bot, _settings = make_bot()
+
+    async def no_members(group_id, platform):
+        return []
+
+    monkeypatch.setattr(bot, "_group_member_bindings", no_members)
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "道"))
+    data = payload(run(bot.acmer_profile(FakeEvent(), user="查无此人")))
+    assert data["ok"] is False and data["error"]["code"] == "not_found"
+    assert "user 留空" in data["error"]["message"], data

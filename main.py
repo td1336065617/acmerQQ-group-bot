@@ -996,7 +996,7 @@ class AcmerGroupBot(Star):
 
         Args:
             platform(string): 可选，指定单个平台（cf/nk/lg/atc）；用 username 查询时必填。
-            user(string): 可选，本群成员昵称（不填且无 username 时查发送者自己）。
+            user(string): 可选，本群成员昵称/QQ 昵称（**问自己的战绩时不要传**，留空即查发送者自己）。
             username(string): 可选，第三方平台用户名/UID（未绑定也能查；会走插件现有限流）。
         """
         blocked = await self._ai_guard(event, "acmer_profile")
@@ -1039,26 +1039,49 @@ class AcmerGroupBot(Star):
         matched_name = ""
         if want_user:
             key = want_user.casefold()
-            search_platforms = [platform] if platform else list(ACCOUNT_PLATFORMS)
-            for item in search_platforms:
-                try:
-                    members = await self._settlement_members(group_id, item)
-                except Exception:
-                    members = []
-                for member in members or []:
-                    handle = str(member[2] if len(member) > 2 else "")
-                    display = str(member[1] if len(member) > 1 else "")
-                    if key in display.casefold() or key in handle.casefold():
-                        user_id = str(member[0])
-                        matched_name = display or handle
+            own_name = self._event_display_name(event).casefold()
+            if key and (key == own_name or key in own_name or own_name in key):
+                # 模型常把发送者自己的群昵称塞进 user（"我的战绩"也被它填了名字）：
+                # 认成"本人"，别再去成员表里空找一轮
+                matched_name = "本人"
+            else:
+                search_platforms = [platform] if platform else list(ACCOUNT_PLATFORMS)
+                found: dict = {}
+                for exact in (True, False):
+                    for item in search_platforms:
+                        try:
+                            members = await self._group_member_bindings(group_id, item)
+                        except Exception:
+                            members = []
+                        for member in members or []:
+                            values = [str(member[0]), str(member[1]), str(member[2])]
+                            values.append(str(member[3]) if len(member) > 3 else "")
+                            candidates = [value for value in values[1:] if value]
+                            for value in candidates:
+                                hit = value.casefold() == key if exact else key in value.casefold()
+                                if hit:
+                                    found = {
+                                        "user_id": str(member[0]),
+                                        "name": (str(member[3]) if len(member) > 3 else "")
+                                        or str(member[1])
+                                        or str(member[2]),
+                                    }
+                                    break
+                            if found:
+                                break
+                        if found:
+                            break
+                    if found:
                         break
-                if matched_name:
-                    break
+                if found:
+                    user_id = found["user_id"]
+                    matched_name = found["name"]
             if not matched_name:
                 return ai_common.fail(
                     "not_found",
-                    "本群没有找到叫「%s」的已绑定成员；也可以用 username 直接按平台用户名查" % want_user,
-                    hint="对方需要先用「绑定cf」等指令绑定账号",
+                    "本群没有找到叫「%s」的已绑定成员；你是「%s」的话，请把 user 留空再查一次（或直接用 username 按平台用户名查）"
+                    % (want_user, self._event_display_name(event)),
+                    hint="问自己的战绩时不要传 user；查别人可以让他先绑定，或改用 username",
                 )
         if not user_id:
             return ai_common.fail("platform_unsupported", "当前通道拿不到发送者账号，无法查询")
@@ -5026,6 +5049,36 @@ class AcmerGroupBot(Star):
                 record.get("display_name") or record.get("handle") or handle
             ).strip()
             members.append((str(user_id), display, handle))
+        return members
+
+
+    async def _group_member_bindings(
+        self, group_id: str, platform: str
+    ) -> List[tuple]:
+        """本群已绑定该平台的成员（含 QQ 昵称）：[(user_id, display_name, handle, qq_name)]。
+
+        与 _settlement_members 同源（同一份绑定表、同一套过滤），只是**额外带上 qq_name**：
+        AI 工具按"群里大家怎么称呼他"找人时必须用它——绑定记录里的 display_name 是
+        OJ 用户名（如 td1336065617），QQ 昵称在 qq_name（如「道」）。
+        不改 _settlement_members 的元组形状：结算侧按 3 元解包，不能加字段。
+        """
+        member_ids = await self.account_registry.get_group_member_ids(group_id)
+        accounts = await self.account_registry.get_all_accounts()
+        members: List[tuple] = []
+        for user_id in member_ids:
+            record = accounts.get(user_id, {}).get(platform)
+            if not isinstance(record, dict):
+                continue
+            handle = str(
+                record.get("platform_user_id") or record.get("handle") or ""
+            ).strip()
+            if not handle:
+                continue
+            display = str(
+                record.get("display_name") or record.get("handle") or handle
+            ).strip()
+            qq_name = str(record.get("qq_name") or "").strip()
+            members.append((str(user_id), display, handle, qq_name))
         return members
 
     @staticmethod
