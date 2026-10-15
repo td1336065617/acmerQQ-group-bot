@@ -115,7 +115,7 @@ QUERY_PLATFORMS = [*DEFAULT_PLATFORMS, OFFLINE_PLATFORM]
 
 PLUGIN_NAME = "acmer_qq_group_bot"
 #: 插件版本：与 metadata.yaml / CHANGELOG 顶部保持一致
-VERSION = "1.22.1"
+VERSION = "1.22.2"
 DEFAULT_MORNING_TIME = "08:00"
 # 文字转图片阈值：可在 WebUI 中调整。这里保留默认值，保证旧配置/旧数据库
 # 没有新增字段时行为与此前版本一致。
@@ -1039,8 +1039,8 @@ class AcmerGroupBot(Star):
         matched_name = ""
         if want_user:
             key = want_user.casefold()
-            own_name = self._event_display_name(event).casefold()
-            if key and (key == own_name or key in own_name or own_name in key):
+            own_name = self._event_display_name(event).strip().casefold()
+            if key and own_name and key == own_name:   # 只认精确相等：子串匹配会把别人误认成自己
                 # 模型常把发送者自己的群昵称塞进 user（"我的战绩"也被它填了名字）：
                 # 认成"本人"，别再去成员表里空找一轮
                 matched_name = "本人"
@@ -5057,29 +5057,28 @@ class AcmerGroupBot(Star):
     ) -> List[tuple]:
         """本群已绑定该平台的成员（含 QQ 昵称）：[(user_id, display_name, handle, qq_name)]。
 
-        与 _settlement_members 同源（同一份绑定表、同一套过滤），只是**额外带上 qq_name**：
-        AI 工具按"群里大家怎么称呼他"找人时必须用它——绑定记录里的 display_name 是
-        OJ 用户名（如 td1336065617），QQ 昵称在 qq_name（如「道」）。
+        直接复用 _settlement_members 的过滤结果（同一份绑定表、同一套过滤），
+        只额外补一个 qq_name——AI 工具按"群里大家怎么称呼他"找人时必须用它：
+        绑定记录里的 display_name 是 OJ 用户名（如 td1336065617），QQ 昵称在 qq_name（如「道」）。
         不改 _settlement_members 的元组形状：结算侧按 3 元解包，不能加字段。
         """
-        member_ids = await self.account_registry.get_group_member_ids(group_id)
-        accounts = await self.account_registry.get_all_accounts()
-        members: List[tuple] = []
-        for user_id in member_ids:
-            record = accounts.get(user_id, {}).get(platform)
-            if not isinstance(record, dict):
+        try:
+            members = await self._settlement_members(group_id, platform)
+            accounts = await self.account_registry.get_all_accounts()
+        except Exception as exc:
+            logger.warning("取本群绑定成员失败：%s", exc)
+            return []
+        enriched: List[tuple] = []
+        for member in members or []:
+            if len(member) < 3:
                 continue
-            handle = str(
-                record.get("platform_user_id") or record.get("handle") or ""
-            ).strip()
-            if not handle:
-                continue
-            display = str(
-                record.get("display_name") or record.get("handle") or handle
-            ).strip()
-            qq_name = str(record.get("qq_name") or "").strip()
-            members.append((str(user_id), display, handle, qq_name))
-        return members
+            user_id, display, handle = str(member[0]), str(member[1]), str(member[2])
+            record = accounts.get(user_id, {}).get(platform) if isinstance(accounts, dict) else None
+            qq_name = ""
+            if isinstance(record, dict):
+                qq_name = str(record.get("qq_name") or "").strip()
+            enriched.append((user_id, display, handle, qq_name))
+        return enriched
 
     @staticmethod
     def _members_fingerprint(members: List[tuple]) -> str:

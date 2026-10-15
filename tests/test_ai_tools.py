@@ -406,3 +406,66 @@ def test_profile_not_found_hints_to_leave_user_empty(monkeypatch) -> None:
     data = payload(run(bot.acmer_profile(FakeEvent(), user="查无此人")))
     assert data["ok"] is False and data["error"]["code"] == "not_found"
     assert "user 留空" in data["error"]["message"], data
+
+
+def test_profile_other_member_name_containing_own_name_is_not_hijacked(monkeypatch) -> None:
+    """发送者叫「道长」、群里有成员叫「道」：查「道」必须查那位成员，不能认成自己。"""
+    _module, bot, _settings = make_bot()
+    asked: dict = {}
+
+    async def fake_members(group_id, platform):
+        return [("u7", "td1336065617", "645160704", "道")]
+
+    async def fake_profiles(user_id, *, detail=True, force=False, record_metrics=True):
+        asked["user_id"] = user_id
+        return {}, [types.SimpleNamespace(platform="codeforces", handle="x")], []
+
+    monkeypatch.setattr(bot, "_group_member_bindings", fake_members)
+    monkeypatch.setattr(bot, "_load_bound_profiles", fake_profiles)
+    monkeypatch.setattr(bot, "_profile_metric", staticmethod(lambda profile: {"Rating": 1500}))
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "道长"))
+    data = payload(run(bot.acmer_profile(FakeEvent(sender="self1"), user="道")))
+    assert data["ok"] is True, data
+    assert asked["user_id"] == "u7", asked
+
+
+def test_profile_exact_match_beats_contains(monkeypatch) -> None:
+    """同时存在「道长」与「道」时，精确的「道」优先（包含匹配会把名字挑错）。"""
+    _module, bot, _settings = make_bot()
+    asked: dict = {}
+
+    async def fake_members(group_id, platform):
+        return [("u1", "a", "h1", "道长"), ("u2", "b", "h2", "道")]
+
+    async def fake_profiles(user_id, *, detail=True, force=False, record_metrics=True):
+        asked["user_id"] = user_id
+        return {}, [types.SimpleNamespace(platform="codeforces", handle="x")], []
+
+    monkeypatch.setattr(bot, "_group_member_bindings", fake_members)
+    monkeypatch.setattr(bot, "_load_bound_profiles", fake_profiles)
+    monkeypatch.setattr(bot, "_profile_metric", staticmethod(lambda profile: {"Rating": 1}))
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "提问者"))
+    data = payload(run(bot.acmer_profile(FakeEvent(), user="道")))
+    assert data["ok"] is True, data
+    assert asked["user_id"] == "u2", asked
+
+
+def test_profile_blank_own_name_does_not_make_everyone_self(monkeypatch) -> None:
+    """适配器给不出昵称（空白）时，不能把任何人当"本人"。"""
+    _module, bot, _settings = make_bot()
+    asked: dict = {}
+
+    async def fake_members(group_id, platform):
+        return [("u7", "td1336065617", "645160704", "道")]
+
+    async def fake_profiles(user_id, *, detail=True, force=False, record_metrics=True):
+        asked["user_id"] = user_id
+        return {}, [types.SimpleNamespace(platform="codeforces", handle="x")], []
+
+    monkeypatch.setattr(bot, "_group_member_bindings", fake_members)
+    monkeypatch.setattr(bot, "_load_bound_profiles", fake_profiles)
+    monkeypatch.setattr(bot, "_profile_metric", staticmethod(lambda profile: {"Rating": 1}))
+    monkeypatch.setattr(bot, "_event_display_name", staticmethod(lambda event: "   "))
+    data = payload(run(bot.acmer_profile(FakeEvent(sender="self1"), user="道")))
+    assert data["ok"] is True, data
+    assert asked["user_id"] == "u7", asked
