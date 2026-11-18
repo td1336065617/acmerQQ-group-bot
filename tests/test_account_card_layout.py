@@ -25,8 +25,8 @@ class FakeFont:
 FONT = FakeFont()
 # 单平台卡：CARD_WIDTH(1200) - 140 = 1060，内容宽 = card_w - 50
 SINGLE_CONTENT_WIDTH = 1060 - 50
-# 双平台卡：(1200 - 140 - gap 24) // 2 = 518
-MULTI_CARD_WIDTH = (1200 - 140 - 24) // 2
+# 双平台卡：(1200 - 140 - gap 18) // 2 = 521，内容宽 = 521 - 50 = 471
+MULTI_CARD_WIDTH = (1200 - 140 - 18) // 2
 MULTI_CONTENT_WIDTH = MULTI_CARD_WIDTH - 50
 
 
@@ -205,3 +205,67 @@ def test_rank_metric_label_infers_platform_from_rows():
     assert rank_metric_label_for_rows(rows, platform="codeforces") == "Rating"   # 显式入参优先
     # 无平台信息时保持原样（不误判）
     assert rank_metric_label_for_rows([{"current_metric_label": "Rating"}]) == "Rating"
+
+def test_profile_meta_wrap_splits_by_font_width():
+    """底部信息（组织/地区、最近赛事）必须按字体度量折行。
+
+    这里用 FakeFont 的确定性度量；真实字体（font.getlength）路径由
+    tests/test_accounts.py 的 Pillow 渲染用例覆盖。
+    """
+    text = "组织：某某信息学竞赛培训中心 · 学校：某某大学计算机科学与技术学院"
+    lines = AccountCardRenderer._profile_meta_wrap(text, 300, font=FONT)
+    assert len(lines) > 1
+    assert "".join(lines) == text
+    for line in lines:
+        assert FONT.getlength(line) <= 300 + 0.01, line
+
+
+def test_profile_meta_wrap_collapses_newlines():
+    """\n/\t 归空白：draw.text 会按 \n 折行，而 getlength 只算单行。"""
+    lines = AccountCardRenderer._profile_meta_wrap(
+        "组织：某中心\n培训部\t· 学校：某大学", 1000, font=FONT
+    )
+    assert "".join(lines) == "组织：某中心 培训部 · 学校：某大学"
+    assert all("\n" not in line and "\t" not in line for line in lines)
+
+
+def test_profile_meta_wrap_handles_blank_and_tiny_width():
+    assert AccountCardRenderer._profile_meta_wrap("", 300, font=FONT) == []
+    assert AccountCardRenderer._profile_meta_wrap(None, 300, font=FONT) == []
+    # 宽度不足时也要吐出整段文本，不能丢字
+    assert AccountCardRenderer._profile_meta_wrap(
+        "本群排行", 0, font=FONT
+    ) == ["本群排行"]
+
+
+def test_meta_wrap_budget_tracks_long_extras():
+    """粗估预留必须随长文本出现，且与卡片高度一致（HTML 页高依赖它）。"""
+    short = AccountProfile(platform="codeforces", handle="h", country="中国")
+    long = AccountProfile(
+        platform="codeforces",
+        handle="h",
+        school="某某大学" + "计算机学院" * 6,
+        organization="某培训中心" * 4,
+        country="中国",
+    )
+    assert AccountCardRenderer._profile_meta_wrap_budget(short) == 0
+    assert AccountCardRenderer._profile_meta_wrap_budget(long) > 0
+    assert AccountCardRenderer._profile_card_height(
+        long, compact=True, has_group_rank=False
+    ) > AccountCardRenderer._profile_card_height(
+        short, compact=True, has_group_rank=False
+    )
+
+
+def test_profile_rank_line_wording_is_shared():
+    """本群排行文案只有一处来源，绘制与高度估算不会各写一套。"""
+    assert (
+        AccountCardRenderer._profile_rank_line({"rank": 37, "total": 152})
+        == "本群排行：第 37 / 152 名"
+    )
+    assert (
+        AccountCardRenderer._profile_rank_line({"unavailable": True})
+        == "本群排行：暂时无法计算"
+    )
+    assert AccountCardRenderer._profile_rank_line({}) == "本群排行：未进入榜单"
+

@@ -1387,6 +1387,57 @@ class AccountCardRenderer:
         )
 
     @classmethod
+    def _profile_meta_wrap(
+        cls, text: object, width: int, *, font: object = None
+    ) -> List[str]:
+        """把卡片底部信息按可用宽度折行。
+
+        传入 `font` 时按真实字体度量（与 `draw.text` 同一字体，像素级一致）；
+        不传时退化为 `_text_width` 的伪单位比较。绘制与高度估算共用这一处，
+        保证「算出来的行数」与「画出来的行数」一致，否则长组织名、长赛事名
+        会冲出卡片右边或压到生成时间上。
+        """
+        # 归空白：\n / \t 会让 draw.text 折行而 getlength 仍按单行算，
+        # 行数就会和实际渲染对不上（后续行被压字）。
+        value = " ".join(str(text or "").split())
+        if not value:
+            return []
+        if width <= 0:
+            return [value]
+
+        def too_wide(candidate: str) -> bool:
+            if font is not None:
+                try:
+                    return float(font.getlength(candidate)) > width
+                except (AttributeError, TypeError):
+                    pass
+            return cls._text_width(candidate) > width
+
+        lines: List[str] = []
+        current = ""
+        for char in value:
+            candidate = current + char
+            if current and too_wide(candidate):
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
+
+    @staticmethod
+    def _profile_rank_line(rank_info: Dict[str, Any]) -> str:
+        """本群排行文案；布局估算与绘制共用，避免两处措辞不一致。"""
+        rank = rank_info.get("rank")
+        total = rank_info.get("total")
+        if rank is not None and total:
+            return f"本群排行：第 {rank} / {total} 名"
+        if rank_info.get("unavailable"):
+            return "本群排行：暂时无法计算"
+        return "本群排行：未进入榜单"
+
+    @classmethod
     def _profile_card_height(
         cls,
         profile: object,
@@ -1396,7 +1447,6 @@ class AccountCardRenderer:
     ) -> int:
         """估算单个平台卡片高度，和 CSS 的主要换行点保持一致。"""
         if isinstance(profile, AccountProfile):
-            recent_contests = profile.recent_contests
             values = {
                 "handle": profile.handle,
                 "rank": profile.rank_text or profile.color or "",
@@ -1406,7 +1456,6 @@ class AccountCardRenderer:
                 "solved_count": profile.solved_count,
             }
         elif isinstance(profile, dict):
-            recent_contests = profile.get("recent_contests") or []
             values = {
                 "handle": profile.get("handle", ""),
                 "rank": profile.get("rank_text") or profile.get("color") or "",
@@ -1462,14 +1511,24 @@ class AccountCardRenderer:
         if rank_width > 24:
             height += min(28, ((rank_width - 1) // 24) * 24)
 
+        height += cls._profile_meta_wrap_budget(profile)
+        return height
+
+    @classmethod
+    def _profile_meta_wrap_budget(cls, profile: object) -> int:
+        """底部信息（组织/地区、最近赛事）在 HTML 侧的换行预留高度。
+
+        这是**粗估**：按字符数而非真实字体宽度算，供 HTML 文档页高预留。
+        Pillow 侧改为按真实字体折行，并用同一函数把这份粗估抵扣掉，
+        避免「估算预留一份、绘制再累加一份」导致卡片底部大片留白。
+        """
+        height = 0
         extras = _profile_extra_text(profile)
         if extras:
             height += min(48, max(0, (cls._text_width(extras) - 1) // 84) * 24)
-
+        contests = _profile_field(profile, "recent_contests", []) or []
         latest = (
-            recent_contests[0]
-            if recent_contests and isinstance(recent_contests[0], dict)
-            else {}
+            contests[0] if contests and isinstance(contests[0], dict) else {}
         )
         if latest.get("name"):
             latest_width = cls._text_width(latest.get("name"))
@@ -3451,10 +3510,66 @@ class AccountCardRenderer:
                 count += 1
             if profile.platform in group_ranks:
                 count += 1
+            # 热力图是独立区块（高度由 _activity_heatmap_height 单列），
+            # 这里 +1 只为与 meta_lines 的计数同步、在差额里抵消。
             if cls._activity_payload(profile) is not None:
                 count += 1
             return count
 
+        meta_text_width = card_width - 50
+
+        def meta_lines(
+            profile: AccountProfile, change_value: object
+        ) -> int:
+            """折行后的实际行数；绘制与高度补偿共用，保证两边一致。"""
+            count = len(
+                cls._profile_meta_wrap(
+                    f"本次变化：{_format_delta(change_value)}",
+                    meta_text_width,
+                    font=body_font,
+                )
+            ) or 1
+            recent = (
+                profile.recent_contests[0]
+                if profile.recent_contests
+                and isinstance(profile.recent_contests[0], dict)
+                and profile.recent_contests[0].get("name")
+                else None
+            )
+            if recent:
+                count += len(
+                    cls._profile_meta_wrap(
+                        f"最近：{recent.get('name')} "
+                        f"{_format_delta(recent.get('delta'))}",
+                        meta_text_width, font=body_font
+                    )
+                )
+            extras = _profile_extra_text(profile)
+            if extras:
+                count += len(cls._profile_meta_wrap(extras, meta_text_width, font=body_font))
+            rank_info = group_ranks.get(profile.platform)
+            if isinstance(rank_info, dict):
+                count += len(
+                    cls._profile_meta_wrap(
+                        cls._profile_rank_line(rank_info), meta_text_width, font=body_font
+                    )
+                )
+            if cls._activity_payload(profile) is not None:
+                count += 1
+            return count
+
+        def meta_wrap_extra(profile: AccountProfile) -> int:
+            """按真实字体折行后的净差额，并抵扣 HTML 侧的粗估预留。"""
+            change_value = weekly_changes.get(
+                profile.platform, profile.recent_delta
+            )
+            exact = (
+                max(0, meta_lines(profile, change_value) - meta_count(profile))
+                * 23
+            )
+            return exact - cls._profile_meta_wrap_budget(profile)
+
+        card_bottoms: List[int] = []
         card_rows = []
         for offset in range(0, len(profiles), 2):
             row_profiles = profiles[offset : offset + 2]
@@ -3480,6 +3595,7 @@ class AccountCardRenderer:
                             if single
                             else 0
                         )
+                        + meta_wrap_extra(profile)
                         for profile in row_profiles
                     ),
                 )
@@ -3549,6 +3665,7 @@ class AccountCardRenderer:
                 outline=accent,
                 width=2,
             )
+            card_bottoms.append(y + card_h)
             draw.text(
                 (x + 25, y + 20),
                 platform_label(profile.platform),
@@ -3742,49 +3859,66 @@ class AccountCardRenderer:
                 profile.platform,
                 profile.recent_delta,
             )
-            draw.text(
-                (x + 25, meta_y),
+            for line in cls._profile_meta_wrap(
                 f"本次变化：{_format_delta(change_value)}",
-                font=body_font,
-                fill="#16835f" if (change_value or 0) >= 0 else "#c03d66",
-            )
-            meta_y += 23
-            if profile.recent_contests and isinstance(profile.recent_contests[0], dict) and profile.recent_contests[0].get("name"):
-                recent = profile.recent_contests[0]
+                meta_text_width, font=body_font
+            ):
                 draw.text(
                     (x + 25, meta_y),
-                    f"最近：{recent.get('name')} {_format_delta(recent.get('delta'))}",
+                    line,
                     font=body_font,
-                    fill="#6e4a67",
+                    fill="#16835f" if (change_value or 0) >= 0 else "#c03d66",
                 )
                 meta_y += 23
+            recent = (
+                profile.recent_contests[0]
+                if profile.recent_contests
+                and isinstance(profile.recent_contests[0], dict)
+                and profile.recent_contests[0].get("name")
+                else None
+            )
+            if recent:
+                for line in cls._profile_meta_wrap(
+                    f"最近：{recent.get('name')} "
+                    f"{_format_delta(recent.get('delta'))}",
+                    meta_text_width, font=body_font
+                ):
+                    draw.text(
+                        (x + 25, meta_y),
+                        line,
+                        font=body_font,
+                        fill="#6e4a67",
+                    )
+                    meta_y += 23
             extras = _profile_extra_text(profile)
             if extras:
-                draw.text(
-                    (x + 25, meta_y),
-                    extras,
-                    font=body_font,
-                    fill="#6e4a67",
-                )
-                meta_y += 23
+                for line in cls._profile_meta_wrap(extras, meta_text_width, font=body_font):
+                    draw.text(
+                        (x + 25, meta_y),
+                        line,
+                        font=body_font,
+                        fill="#6e4a67",
+                    )
+                    meta_y += 23
             rank_info = group_ranks.get(profile.platform)
             if isinstance(rank_info, dict):
                 rank = rank_info.get("rank")
-                total = rank_info.get("total")
-                if rank is not None and total:
-                    rank_text = f"本群排行：第 {rank} / {total} 名"
-                elif rank_info.get("unavailable"):
-                    rank_text = "本群排行：暂时无法计算"
-                else:
-                    rank_text = "本群排行：未进入榜单"
-                draw.text(
-                    (x + 25, meta_y),
-                    rank_text,
-                    font=body_font,
-                    fill="#a92b73" if rank is not None else "#6e4a67",
-                )
+                for line in cls._profile_meta_wrap(
+                    cls._profile_rank_line(rank_info), meta_text_width, font=body_font
+                ):
+                    draw.text(
+                        (x + 25, meta_y),
+                        line,
+                        font=body_font,
+                        fill="#a92b73" if rank is not None else "#6e4a67",
+                    )
+                    meta_y += 23
+        # 生成时间跟随最后一张卡的底边，内容再多也不会压到卡片文字上。
+        # 内容触顶被 MAX_CARD_HEIGHT 截断时，再把它钳回画布内（否则整行不可见）。
+        foot_y = max(card_bottoms) + 24 if card_bottoms else (image.height - 42)
+        foot_y = min(foot_y, image.height - 24)
         draw.text(
-            (70, image.height - 42),
+            (70, foot_y),
             f"生成时间：{_updated_text()} · 仅展示平台公开资料",
             font=body_font,
             fill="#f7dceb",

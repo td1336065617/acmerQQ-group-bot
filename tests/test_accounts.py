@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 from src.account_cards import (
     AccountCardRenderer,
+    _profile_extra_text,
     current_metric_header,
     progress_metric_header,
     rank_metric_label_for_rows,
@@ -1747,3 +1748,167 @@ def test_profile_cache_prune_caps_entries():
         if hasattr(item[1], "handle")
     )
     assert newest_handle.startswith("user_")
+def test_pillow_profile_wraps_long_meta_and_keeps_footer_clear(
+    tmp_path, monkeypatch
+):
+    """长组织名折行后不得越出所属卡片，也不得压到「生成时间」。
+
+    修复前：底部信息是一条 draw.text 直出（不折行）+ 生成时间写死在
+    image.height - 42，长文本会冲出卡片右边或挤到时间行上。
+    """
+    pytest.importorskip("PIL")
+    from PIL import ImageDraw
+
+    real_draw = ImageDraw.Draw
+    texts = []
+    rects = []
+
+    class _Capture:
+        def __init__(self, inner, size):
+            self._inner = inner
+            self._size = size
+
+        def text(self, xy, content, *args, **kwargs):
+            font = kwargs.get("font")
+            width = font.getlength(str(content)) if font is not None else 0
+            if self._size[0] == 1200:
+                texts.append((xy[0], xy[1], str(content), float(width)))
+            return self._inner.text(xy, content, *args, **kwargs)
+
+        def rounded_rectangle(self, xy, *args, **kwargs):
+            if self._size[0] == 1200:
+                rects.append(xy)
+            return self._inner.rounded_rectangle(xy, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def _fake_draw(image, *args, **kwargs):
+        return _Capture(real_draw(image, *args, **kwargs), image.size)
+
+    monkeypatch.setattr(ImageDraw, "Draw", _fake_draw)
+
+    def build(platform):
+        return AccountProfile(
+            platform=platform,
+            handle="demo",
+            rating=1800,
+            school="某某大学" + "计算机科学与技术学院" * 6,
+            organization="某某信息学竞赛培训中心" * 4,
+            country="中国",
+            rating_history=[
+                {"rating": 1500, "timestamp": 1},
+                {"rating": 1800, "timestamp": 2},
+            ],
+        )
+
+    profiles = [build("codeforces"), build("nowcoder")]
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    image_path = tmp_path / "long-meta.png"
+    assert renderer._pillow_profile(
+        profiles,
+        "测试用户",
+        {},
+        {
+            "codeforces": {"rank": 37, "total": 152},
+            "nowcoder": {"rank": 8, "total": 152},
+        },
+        tmp_path,
+        image_path,
+    )
+
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        image_height = image.size[1]
+
+    def card_box(left):
+        for box in rects:
+            if box[0] - 1 <= left <= box[2] + 1:
+                return box
+        return None
+
+    extras = _profile_extra_text(profiles[0])
+    starts = sorted(
+        {row[0] for row in texts if row[2] and row[2] in extras}
+    )
+    assert len(starts) == 2, starts
+    for left in starts:
+        block = sorted(
+            (
+                row
+                for row in texts
+                if row[0] == left and row[2] and row[2] in extras
+            ),
+            key=lambda row: row[1],
+        )
+        assert len(block) >= 3, "长组织名没有折行"
+        # 折行就是把同一段文本按行切开，拼回去必须一字不差
+        assert "".join(row[2] for row in block) == extras
+        for index in range(len(block) - 1):
+            assert block[index + 1][1] - block[index][1] == 23
+        box = card_box(left)
+        assert box is not None
+        for row in block:
+            assert row[0] + row[3] <= box[2] + 0.5, row[2]
+            assert row[1] + 20 <= box[3], row[2]
+
+    prefixes = ("本次变化：", "最近：", "本群排行：", "组织：", "学校：", "地区：")
+    meta_rows = [row for row in texts if row[2].startswith(prefixes)]
+    assert meta_rows, "底部信息缺失"
+
+    card_bottom = max(box[3] for box in rects)
+    footer = [row for row in texts if row[2].startswith("生成时间")][0]
+    assert footer[1] >= card_bottom + 24
+    assert max(row[1] for row in meta_rows) + 20 <= footer[1]
+    assert footer[1] + 20 <= image_height
+
+
+def test_pillow_profile_footer_stays_on_canvas_when_clipped(
+    tmp_path, monkeypatch
+):
+    """画布被 MAX_CARD_HEIGHT 截断时，「生成时间」必须钳回画布内。"""
+    pytest.importorskip("PIL")
+    from src import account_cards as cards_module
+
+    monkeypatch.setattr(cards_module, "MAX_CARD_HEIGHT", 900)
+
+    def build(platform):
+        return AccountProfile(
+            platform=platform,
+            handle="demo",
+            rating=1800,
+            school="某某大学" + "计算机科学与技术学院" * 6,
+            organization="某某信息学竞赛培训中心" * 4,
+            country="中国",
+            rating_history=[
+                {"rating": 1500, "timestamp": 1},
+                {"rating": 1800, "timestamp": 2},
+            ],
+        )
+
+    renderer = AccountCardRenderer(cache_dir=tmp_path)
+    image_path = tmp_path / "clipped.png"
+    assert renderer._pillow_profile(
+        [build("codeforces"), build("nowcoder")],
+        "测试用户",
+        {},
+        {"codeforces": {"rank": 37, "total": 152}},
+        tmp_path,
+        image_path,
+    )
+
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        assert image.size[1] <= 900
+        band = image.crop(
+            (0, image.size[1] - 24, image.size[0], image.size[1] - 4)
+        ).convert("RGB")
+        raw = band.tobytes()
+        bright = sum(
+            1
+            for index in range(0, len(raw), 3)
+            if raw[index] > 150 and raw[index + 1] > 120
+        )
+    assert bright > 30, "生成时间被画到画布外"
