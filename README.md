@@ -48,6 +48,7 @@ XCPC Link（线下赛）
 - 验证码 10 分钟有效、成功后立即失效、只保存哈希，建议在私聊中完成绑定。
 - `我的账号` / `我的战绩` 出四平台总览卡，`我的cf`、`我的牛客`、`我的洛谷`、`我的atcoder` 出单平台卡；群聊中附带自己在对应平台的本群排行。
 - 战绩卡包含最近 Rating 趋势折线图、Codeforces 通过题难度分布、题目级分析摘要与头像缩略图；Codeforces / AtCoder 另有近 12 个月打卡热力图。
+- Rating 趋势图为真实比例绘制（非等比拉伸），跨度大时按时间轴排布，并标注生涯最高参照。
 - `查询cf` / `查询atcoder` / `查询牛客` / `查询洛谷` 可直接查**未绑定用户**的资料卡；加「详细」后缀才抓难度分布与分析。
 
 ### 🏆 群排行
@@ -321,6 +322,7 @@ acmer_qq_group_bot/
 │   ├── account_registry.py # 绑定挑战（验证码哈希）与账号注册
 │   ├── account_store.py    # 本地 SQLite 存储（绑定、群成员、快照、缓存）
 │   ├── account_cards.py    # 战绩卡与排行卡渲染
+│   ├── rating_chart.py      # Rating 曲线几何与 HTML/Pillow 共用坐标
 │   ├── rank_service.py     # 群排行 / 进步榜快照读模型
 │   ├── scheduler.py        # 定时推送：每日早报与赛前 15 分钟提醒
 │   └── utils.py            # 带超时与重试的 HTTP 请求、指令规范化等

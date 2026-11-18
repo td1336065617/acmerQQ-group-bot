@@ -33,8 +33,20 @@ from .output_renderer import (
     prune_cache_dir,
 )
 from .plugin_paths import plugin_cache_dir
+from .rating_chart import (
+    PLOT_INSET_Y,
+    RATING_CHART_AXIS_GAP,
+    RATING_CHART_AXIS_WIDTH,
+    RATING_CHART_DISPLAY_LIMIT,
+    RATING_CHART_HEIGHT,
+    RATING_CHART_HTML_WIDTH_MULTI,
+    RATING_CHART_HTML_WIDTH_SINGLE,
+    RATING_CHART_SVG_HEIGHT,
+    build_rating_chart,
+    rating_point_count,
+)
 
-CARD_FORMAT_VERSION = 19
+CARD_FORMAT_VERSION = 20
 CARD_WIDTH = 1200
 MIN_CARD_HEIGHT = 760
 MAX_CARD_HEIGHT = 5200
@@ -78,8 +90,6 @@ DIFFICULTY_CHART_COLUMNS = 2
 DIFFICULTY_CHART_TITLE_HEIGHT = 32
 DIFFICULTY_CHART_ROW_HEIGHT = 27
 DIFFICULTY_CHART_BOTTOM_PADDING = 16
-RATING_CHART_HEIGHT = 150
-RATING_CHART_DISPLAY_LIMIT = 8
 
 PLATFORM_COLORS = {
     "codeforces": ("#df6c9e", "#f4a7c6"),
@@ -504,28 +514,7 @@ def _difficulty_title(profile: object) -> str:
     return f"CF 做题分布 · 已通过 {total} 题"
 
 
-def _rating_history_values(profile: object, limit: int = 8) -> List[int]:
-    raw = _profile_field(profile, "rating_history", []) or []
-    if not isinstance(raw, list):
-        return []
-    values = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        try:
-            rating = int(item.get("rating"))
-        except (TypeError, ValueError):
-            continue
-        try:
-            timestamp = float(item.get("timestamp") or index)
-        except (TypeError, ValueError):
-            timestamp = float(index)
-        values.append((timestamp, index, rating))
-    values.sort(key=lambda item: (item[0], item[1]))
-    return [rating for _, _, rating in values[-max(2, int(limit)):]]
-
-
-# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——_difficulty_chart_height
+# keep-alive: 预留 API（当前无调用方，接线前请保留）——_difficulty_chart_height
 def _difficulty_chart_height(profile: object) -> int:
     items = _difficulty_items(profile)
     if not items:
@@ -547,11 +536,9 @@ def _distribution_chart_height(items: List[tuple[str, int]]) -> int:
 
 
 def _rating_chart_height(profile: object) -> int:
-    return (
-        RATING_CHART_HEIGHT
-        if len(_rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)) >= 2
-        else 0
-    )
+    if rating_point_count(profile, RATING_CHART_DISPLAY_LIMIT) < 2:
+        return 0
+    return RATING_CHART_HEIGHT
 
 
 def _analysis_distribution_items(profile: object) -> List[tuple[str, int]]:
@@ -795,7 +782,7 @@ def _solved_count_label(profile: object) -> str:
     return "已统计题数" if _difficulty_scan_is_partial(profile) else "通过题数"
 
 
-# keep-alive: 预留 API（当前无调用方，接线前请保留；扫描见 tools/deadcode_scan.py）——_difficulty_text
+# keep-alive: 预留 API（当前无调用方，接线前请保留）——_difficulty_text
 def _difficulty_text(profile: object) -> str:
     items = _difficulty_items(profile)
     return " · ".join(f"{label} {count}" for label, count in items)
@@ -2015,51 +2002,86 @@ class AccountCardRenderer:
         )
 
     @classmethod
-    def _rating_history_html(cls, profile: object) -> str:
-        values = _rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)
-        if len(values) < 2:
+    def _rating_history_html(cls, profile: object, *, compact: bool = False) -> str:
+        width = RATING_CHART_HTML_WIDTH_MULTI if compact else RATING_CHART_HTML_WIDTH_SINGLE
+        chart = build_rating_chart(profile, width=width, height=RATING_CHART_SVG_HEIGHT)
+        if chart is None:
             return ""
 
-        minimum = min(values)
-        maximum = max(values)
-        span = maximum - minimum
-        padding = max(25, int(span * 0.12))
-        lower = minimum - padding
-        upper = maximum + padding
-        scale = max(1, upper - lower)
-        point_coords = []
-        for index, value in enumerate(values):
-            x = 10 + 80 * index / (len(values) - 1)
-            y = 46 - 34 * (value - lower) / scale
-            point_coords.append((x, y, value))
-        point_text = " ".join(
-            f"{x:.2f},{y:.2f}" for x, y, _ in point_coords
+        title_html = _escape(_rating_chart_title(profile))
+        span = chart.width
+        mid_y = chart.height / 2
+        bottom_y = chart.height - PLOT_INSET_Y
+        grid = "".join(
+            f'<line class="rating-chart-gridline" x1="0" y1="{y:.2f}" '
+            f'x2="{span:.2f}" y2="{y:.2f}"></line>'
+            for y in (PLOT_INSET_Y, mid_y, bottom_y)
         )
-        area_text = f"{point_text} 90,48 10,48"
-        circles = "".join(
-            f'<circle class="rating-chart-dot" cx="{x:.2f}" cy="{y:.2f}" r="1.7">'
-            f"<title>第 {index + 1} 场：{value}</title></circle>"
-            for index, (x, y, value) in enumerate(point_coords)
+        point_text = " ".join(f"{p.x:.2f},{p.y:.2f}" for p in chart.points)
+        area_text = f"{point_text} {span:.2f},{chart.height:.2f} 0,{chart.height:.2f}"
+        dots = "".join(
+            f'<circle class="rating-chart-dot{" flat" if p.is_flat else ""}" '
+            f'cx="{p.x:.2f}" cy="{p.y:.2f}" r="3"></circle>'
+            for p in chart.points if p.show_dot
         )
+        pb_html = ""
+        if chart.pb is not None and chart.pb_y is not None:
+            pb_html = (
+                f'<line class="rating-chart-pb" x1="0" y1="{chart.pb_y:.2f}" '
+                f'x2="{span:.2f}" y2="{chart.pb_y:.2f}"></line>'
+            )
+        # 标签压在虚线上会被线穿过，基线放到线下方 14px；图外无虚线则贴顶。
+        pb_label_y = 14.0
+        if chart.pb_y is not None:
+            pb_label_y = min(chart.height - 2, chart.pb_y + 14)
+        pb_label_html = ""
+        if chart.pb is not None:
+            pb_label_html = (
+                f'<text class="rating-chart-pb-label" x="{span - 2:.2f}" y="{pb_label_y:.2f}" '
+                f'text-anchor="end">PB {_escape(chart.pb)}</text>'
+            )
+        elif chart.pb_out_of_range is not None:
+            pb_label_html = (
+                f'<text class="rating-chart-pb-label" x="{span - 2:.2f}" y="{pb_label_y:.2f}" '
+                f'text-anchor="end">PB {_escape(chart.pb_out_of_range)}（图外）</text>'
+            )
+        if chart.flat:
+            axis_html = f"<span></span><span>{chart.points[0].value}</span><span></span>"
+        else:
+            axis_html = "".join(
+                f"<span>{value}</span>"
+                for value in (chart.upper, round((chart.upper + chart.lower) / 2), chart.lower)
+            )
+        head_extra = ""
+        if chart.first_month and chart.last_month:
+            head_extra = f" · {chart.first_month} → {chart.last_month}"
+        latest_extra = ""
+        if chart.flat:
+            latest_extra = f'<i class="rating-chart-flat">{len(chart.points)} 场持平</i>'
+        elif chart.latest_delta is not None:
+            latest_extra = f'<i class="rating-chart-delta">{_escape(_format_delta(chart.latest_delta))}</i>'
+        foot_right = chart.last_month or ""
         return (
             '<div class="rating-chart">'
             '<div class="rating-chart-head">'
-            f'<span class="rating-chart-title">{_escape(_rating_chart_title(profile))}</span>'
-            f'<small>最近 {len(values)} 场</small>'
+            f'<span class="rating-chart-title">{title_html}</span>'
+            f"<small>最近 {len(chart.points)} 场{head_extra}</small>"
             "</div>"
-            '<svg class="rating-chart-svg" viewBox="0 0 100 58" '
-            f'preserveAspectRatio="none" role="img" aria-label="{_escape(_rating_chart_title(profile))}">'
-            '<line class="rating-chart-gridline" x1="10" y1="12" x2="90" y2="12"></line>'
-            '<line class="rating-chart-gridline" x1="10" y1="29" x2="90" y2="29"></line>'
-            '<line class="rating-chart-gridline" x1="10" y1="46" x2="90" y2="46"></line>'
+            '<div class="rating-chart-body">'
+            f'<div class="rating-chart-axis">{axis_html}</div>'
+            f'<svg class="rating-chart-svg" viewBox="0 0 {chart.width:.0f} {chart.height:.0f}" '
+            'preserveAspectRatio="none" role="img" '
+            f'aria-label="{_escape(chart.aria_label)}">'
+            f"{grid}{pb_html}"
             f'<polygon class="rating-chart-area" points="{area_text}"></polygon>'
             f'<polyline class="rating-chart-line" points="{point_text}"></polyline>'
-            f"{circles}"
+            f"{dots}{pb_label_html}"
             "</svg>"
+            "</div>"
             '<div class="rating-chart-scale">'
-            f"<span>{_escape(minimum)}</span>"
-            f"<b>最新 {_escape(values[-1])}</b>"
-            f"<span>{_escape(maximum)}</span>"
+            f"<span>{_escape(chart.first_month or '')}</span>"
+            f"<b>最新 {_escape(str(chart.latest))}</b>{latest_extra}"
+            f"<span>{_escape(foot_right)}</span>"
             "</div>"
             "</div>"
         )
@@ -2106,7 +2128,7 @@ class AccountCardRenderer:
             )
             secondary_analysis_html = cls._secondary_analysis_html(profile)
             analysis_summary_html = cls._analysis_summary_html(profile)
-            rating_history_html = cls._rating_history_html(profile)
+            rating_history_html = cls._rating_history_html(profile, compact=not single)
             latest_text = ""
             if isinstance(latest, dict) and latest.get("name"):
                 latest_text = (
@@ -2464,7 +2486,8 @@ class AccountCardRenderer:
     .group-rank b {{ color:#6b315f; font-size:17px; }}
     .group-rank.muted {{ color:#6e4a67; }}
     .profile-meta {{ position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:11px; }}
-    .difficulty-panel, .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
+    .difficulty-panel {{ flex:1 1 100%; min-width:0; padding:12px 14px 13px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
+    .rating-chart {{ flex:1 1 100%; min-width:0; padding:12px 14px 10px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
     .activity-panel {{ flex:1 1 100%; min-width:0; padding:12px 14px 10px; border:1px solid rgba(205,145,184,.4); border-radius:14px; background:linear-gradient(105deg,rgba(255,245,251,.84),rgba(228,247,252,.66)); }}
     .activity-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; margin-bottom:12px; }}
     .activity-empty-note {{ color:#8a6b83; font-size:12px; line-height:1.3; padding:2px 0 4px; }}
@@ -2498,16 +2521,22 @@ class AccountCardRenderer:
     .analysis-chip strong {{ color:#452852; font-size:13px; font-weight:800; }}
     .analysis-detail {{ margin-top:8px; color:#6e4a67; font-size:12px; font-weight:600; overflow-wrap:anywhere; }}
     .analysis-source {{ margin-top:7px; color:#655669; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }}
-    .rating-chart {{ padding-bottom:10px; }}
     .rating-chart-head {{ display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:5px; }}
     .rating-chart-title {{ color:#6b4564; font-size:14px; font-weight:800; letter-spacing:.2px; }}
     .rating-chart-head small {{ color:#6f4b69; font-size:12px; font-weight:600; }}
-    .rating-chart-svg {{ display:block; width:100%; height:78px; overflow:visible; color:var(--accent); }}
+    .rating-chart-body {{ display:flex; gap:8px; align-items:stretch; }}
+    .rating-chart-axis {{ flex:0 0 46px; display:flex; flex-direction:column; justify-content:space-between; text-align:right; color:#6e4a67; font-size:11px; font-weight:600; }}
+    .rating-chart-svg {{ flex:1 1 auto; min-width:0; display:block; width:auto; height:120px; overflow:visible; color:var(--accent); }}
     .rating-chart-gridline {{ stroke:rgba(159,117,148,.22); stroke-width:.7; vector-effect:non-scaling-stroke; }}
     .rating-chart-area {{ fill:color-mix(in srgb,var(--accent),transparent 82%); }}
     .rating-chart-line {{ fill:none; stroke:var(--accent); stroke-width:2.8; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; filter:drop-shadow(0 2px 3px color-mix(in srgb,var(--accent),transparent 60%)); }}
     .rating-chart-dot {{ fill:#fffafd; stroke:var(--accent); stroke-width:1.8; vector-effect:non-scaling-stroke; }}
-    .rating-chart-scale {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:2px; color:#6e4a67; font-size:11px; font-weight:600; }}
+    .rating-chart-dot.flat {{ fill:#fffafd; stroke-width:1.2; opacity:.62; }}
+    .rating-chart-pb {{ stroke:#b03a7a; stroke-width:1; stroke-dasharray:4 3; opacity:.55; }}
+    .rating-chart-pb-label {{ fill:#b03a7a; font-size:11px; font-weight:700; }}
+    .rating-chart-delta {{ font-style:normal; color:#16835f; margin-left:4px; }}
+    .rating-chart-flat {{ font-style:normal; color:#6e4a67; margin-left:4px; }}
+    .rating-chart-scale {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:4px; color:#6e4a67; font-size:11px; font-weight:600; }}
     .rating-chart-scale b {{ color:#5e3b5d; font-size:12px; }}
     .profile-meta > .trend,
     .profile-meta > .recent,
@@ -2597,7 +2626,6 @@ class AccountCardRenderer:
     .profile-document .difficulty-row {{ grid-template-columns:96px minmax(80px,1fr) 46px; }}
     .profile-document .difficulty-label {{ font-size:13px; }}
     .profile-document .difficulty-count {{ font-size:15px; }}
-    .profile-document .rating-chart-svg {{ height:84px; }}
     .profile-document .trend {{ margin-top:11px; font-size:15px; }}
     .profile-document .recent,
     .profile-document .extra {{ margin-top:9px; font-size:14px; }}
@@ -3275,114 +3303,98 @@ class AccountCardRenderer:
         profile: object,
         x: int,
         y: int,
-        width: int,
+        container_width: int,
         *,
         title_font,
         label_font,
     ) -> int:
-        values = _rating_history_values(profile, RATING_CHART_DISPLAY_LIMIT)
-        height = _rating_chart_height(profile)
-        if len(values) < 2 or not height:
+        box_left = x
+        box_right = x + container_width
+        inset = 1 + 14
+        plot_left = box_left + inset + RATING_CHART_AXIS_WIDTH + RATING_CHART_AXIS_GAP
+        plot_right = box_right - inset
+        plot_width = container_width - 84
+        chart = build_rating_chart(
+            profile, width=max(40, plot_width), height=RATING_CHART_SVG_HEIGHT
+        )
+        if chart is None or plot_width <= 0:
             return 0
 
-        minimum = min(values)
-        maximum = max(values)
-        span = maximum - minimum
-        padding = max(25, int(span * 0.12))
-        lower = minimum - padding
-        upper = maximum + padding
-        scale = max(1, upper - lower)
+        height = RATING_CHART_HEIGHT
         accent = PLATFORM_COLORS.get(
             str(_profile_field(profile, "platform", "") or ""),
             ("#d34f93", "#f4a7c6"),
         )[0]
-
         draw.rounded_rectangle(
-            (x, y, x + width, y + height),
-            radius=14,
-            fill="#fff8fc",
-            outline="#e0bfd7",
-            width=1,
+            (box_left, y, box_right, y + height),
+            radius=14, fill="#fff8fc", outline="#e0bfd7", width=1,
         )
-        draw.text(
-            (x + 12, y + 8),
-            _rating_chart_title(profile),
-            font=title_font,
-            fill="#6b4564",
-        )
-        recent_text = f"最近 {len(values)} 场"
-        recent_box = draw.textbbox((0, 0), recent_text, font=label_font)
-        draw.text(
-            (
-                x + width - 12 - (recent_box[2] - recent_box[0]),
-                y + 10,
-            ),
-            recent_text,
-            font=label_font,
-            fill="#6f4b69",
-        )
+        draw.text((box_left + 12, y + 8), _rating_chart_title(profile), font=title_font, fill="#6b4564")
+        head_right = f"最近 {len(chart.points)} 场"
+        if chart.first_month and chart.last_month:
+            head_right += f" · {chart.first_month} → {chart.last_month}"
+        head_box = draw.textbbox((0, 0), head_right, font=label_font)
+        draw.text((box_right - 12 - (head_box[2] - head_box[0]), y + 10), head_right, font=label_font, fill="#6f4b69")
 
-        left = x + 18
-        right = x + width - 18
-        top = y + 37
-        bottom = y + 95
-        chart_width = max(40, right - left)
-        chart_height = bottom - top
-        points = []
-        for index, value in enumerate(values):
-            point_x = left + chart_width * index / (len(values) - 1)
-            point_y = bottom - chart_height * (value - lower) / scale
-            points.append((round(point_x), round(point_y)))
+        plot_top = y + 37
+        plot_bottom = plot_top + RATING_CHART_SVG_HEIGHT
+        def to_px(point):
+            return plot_left + point.x, plot_top + point.y
+        for offset in (PLOT_INSET_Y, RATING_CHART_SVG_HEIGHT / 2, RATING_CHART_SVG_HEIGHT - PLOT_INSET_Y):
+            draw.line((plot_left, plot_top + offset, plot_right, plot_top + offset), fill="#e7d9e4", width=1)
+        if chart.pb_y is not None:
+            dash_x = plot_left
+            while dash_x < plot_right:
+                draw.line((dash_x, plot_top + chart.pb_y, min(dash_x + 4, plot_right), plot_top + chart.pb_y), fill="#b03a7a", width=1)
+                dash_x += 7
+        pts = [to_px(p) for p in chart.points]
+        draw.polygon(pts + [(plot_right, plot_bottom), (plot_left, plot_bottom)], fill="#f8e3ef")
+        draw.line([(round(a), round(b)) for a, b in pts], fill=accent, width=3)
+        for point, (px_pos, py_pos) in zip(chart.points, pts):
+            if not point.show_dot:
+                continue
+            draw.ellipse((px_pos - 3, py_pos - 3, px_pos + 3, py_pos + 3), fill="#fffafd", outline=accent, width=1 if point.is_flat else 2)
 
-        for ratio in (0, 0.5, 1):
-            grid_y = round(bottom - chart_height * ratio)
-            draw.line(
-                (left, grid_y, right, grid_y),
-                fill="#e7d9e4",
-                width=1,
-            )
-        draw.polygon(
-            points + [(right, bottom), (left, bottom)],
-            fill="#f8e3ef",
+        axis_right = plot_left - RATING_CHART_AXIS_GAP
+        axis_values = ((chart.points[0].value, plot_top + RATING_CHART_SVG_HEIGHT / 2),) if chart.flat else (
+            (chart.upper, plot_top + PLOT_INSET_Y),
+            (round((chart.upper + chart.lower) / 2), plot_top + RATING_CHART_SVG_HEIGHT / 2),
+            (chart.lower, plot_top + RATING_CHART_SVG_HEIGHT - PLOT_INSET_Y),
         )
-        draw.line(points, fill=accent, width=3)
-        for point_x, point_y in points:
-            draw.ellipse(
-                (
-                    point_x - 4,
-                    point_y - 4,
-                    point_x + 4,
-                    point_y + 4,
-                ),
-                fill="#fffafd",
-                outline=accent,
-                width=2,
-            )
+        for value, py_pos in axis_values:
+            text = str(value)
+            box = draw.textbbox((0, 0), text, font=label_font)
+            draw.text((axis_right - (box[2] - box[0]), py_pos - 6), text, font=label_font, fill="#6e4a67")
 
-        minimum_text = str(minimum)
-        latest_text = f"最新 {values[-1]}"
-        maximum_text = str(maximum)
-        draw.text((left, y + 105), minimum_text, font=label_font, fill="#6e4a67")
+        foot_y = y + 164
+        draw.text((box_left + 12, foot_y), chart.first_month or "", font=label_font, fill="#6e4a67")
+        latest_text = f"最新 {chart.latest}"
+        if chart.flat:
+            latest_text += f" {len(chart.points)} 场持平"
+        elif chart.latest_delta is not None:
+            latest_text += f" ({_format_delta(chart.latest_delta)})"
         latest_box = draw.textbbox((0, 0), latest_text, font=label_font)
-        draw.text(
-            (
-                x + (width - (latest_box[2] - latest_box[0])) // 2,
-                y + 105,
-            ),
-            latest_text,
-            font=label_font,
-            fill="#5e3b5d",
-        )
-        maximum_box = draw.textbbox((0, 0), maximum_text, font=label_font)
-        draw.text(
-            (
-                x + width - 18 - (maximum_box[2] - maximum_box[0]),
-                y + 105,
-            ),
-            maximum_text,
-            font=label_font,
-            fill="#6e4a67",
-        )
+        draw.text((box_left + (container_width - (latest_box[2] - latest_box[0])) // 2, foot_y), latest_text, font=label_font, fill="#5e3b5d")
+        right_text = chart.last_month or ""
+        right_box = draw.textbbox((0, 0), right_text, font=label_font)
+        draw.text((box_right - 12 - (right_box[2] - right_box[0]), foot_y), right_text, font=label_font, fill="#6e4a67")
+        pb_text = ""
+        if chart.pb is not None:
+            pb_text = f"PB {chart.pb}"
+        elif chart.pb_out_of_range is not None:
+            pb_text = f"PB {chart.pb_out_of_range}（图外）"
+        if pb_text:
+            pb_box = draw.textbbox((0, 0), pb_text, font=label_font)
+            # 同 HTML：有虚线时把标签压到线下方，避免虚线穿着文字。
+            pb_label_y = plot_top + 1
+            if chart.pb_y is not None:
+                pb_label_y = min(
+                    plot_top + RATING_CHART_SVG_HEIGHT - 14, plot_top + int(chart.pb_y) + 2
+                )
+            draw.text(
+                (plot_right - 2 - (pb_box[2] - pb_box[0]), pb_label_y),
+                pb_text, font=label_font, fill="#b03a7a",
+            )
         return height
 
     @classmethod
