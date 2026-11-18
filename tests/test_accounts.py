@@ -1800,6 +1800,43 @@ def test_pillow_profile_wraps_long_meta_and_keeps_footer_clear(
                 {"rating": 1500, "timestamp": 1},
                 {"rating": 1800, "timestamp": 2},
             ],
+            # 真实档案形态：带难度分布 / 打卡 / 趋势 / 摘要面板。
+            # 卡片高度若仍复用 HTML 估算，这些面板会把底部信息挤出卡片。
+            analysis={
+                "source": "Codeforces 官方 user.status API",
+                "coverage": "最近 82 条公开提交（已读完当前公开记录）",
+                "submission_count": 82,
+                "accepted_submission_count": 51,
+                "solved_count": 42,
+                "acceptance_rate": 62.2,
+                "active_days_30": 0,
+                "active_days_90": 0,
+                "activity_daily": {},
+                "activity_summary": {
+                    "active_days": 0,
+                    "current_streak": 0,
+                    "longest_streak": 0,
+                },
+                "difficulty_title": "Codeforces 题目难度分布",
+                "difficulty_distribution": [
+                    {"label": "≤999", "count": 24},
+                    {"label": "1000–1199", "count": 8},
+                    {"label": "1200–1399", "count": 2},
+                    {"label": "1400–1599", "count": 4},
+                    {"label": "1600–1799", "count": 1},
+                    {"label": "2000–2199", "count": 1},
+                ],
+                "language_distribution": [
+                    {"label": "C++14 (GCC 6-32)", "count": 44},
+                    {"label": "GNU C++11", "count": 21},
+                    {"label": "C++20 (GCC 13-64)", "count": 16},
+                ],
+                "summary": [
+                    {"label": "提交", "value": 82},
+                    {"label": "通过题", "value": 42},
+                    {"label": "提交通过率", "value": "62.2%"},
+                ],
+            },
         )
 
     profiles = [build("codeforces"), build("nowcoder")]
@@ -1856,6 +1893,11 @@ def test_pillow_profile_wraps_long_meta_and_keeps_footer_clear(
     prefixes = ("本次变化：", "最近：", "本群排行：", "组织：", "学校：", "地区：")
     meta_rows = [row for row in texts if row[2].startswith(prefixes)]
     assert meta_rows, "底部信息缺失"
+    # 每一行底部信息都必须在自己的卡片底板之内（不能溢出边框）
+    for row in meta_rows:
+        box = card_box(row[0])
+        assert box is not None, row[2]
+        assert row[1] + 20 <= box[3], f"{row[2]} 溢出卡片: {row[1]} > {box[3]}"
 
     card_bottom = max(box[3] for box in rects)
     footer = [row for row in texts if row[2].startswith("生成时间")][0]
@@ -1871,7 +1913,7 @@ def test_pillow_profile_footer_stays_on_canvas_when_clipped(
     pytest.importorskip("PIL")
     from src import account_cards as cards_module
 
-    monkeypatch.setattr(cards_module, "MAX_CARD_HEIGHT", 900)
+    monkeypatch.setattr(cards_module, "MAX_CARD_HEIGHT", 400)
 
     def build(platform):
         return AccountProfile(
@@ -1901,7 +1943,7 @@ def test_pillow_profile_footer_stays_on_canvas_when_clipped(
     from PIL import Image
 
     with Image.open(image_path) as image:
-        assert image.size[1] <= 900
+        assert image.size[1] == 400
         band = image.crop(
             (0, image.size[1] - 24, image.size[0], image.size[1] - 4)
         ).convert("RGB")
@@ -1912,3 +1954,152 @@ def test_pillow_profile_footer_stays_on_canvas_when_clipped(
             if raw[index] > 150 and raw[index + 1] > 120
         )
     assert bright > 30, "生成时间被画到画布外"
+
+
+def test_pillow_profile_card_height_follows_real_content(tmp_path):
+    """真实档案（含难度分布/打卡/趋势/摘要）画出来，底部信息必须在卡片内。
+
+    fixture 是线上真实档案的脱敏副本。曾经用 _profile_card_height（HTML 侧
+    估算）当 Pillow 卡片高度，真实档案下矮 92px：「最近」「组织」两行被画到
+    卡片底板外面，正好压在「生成时间」上。
+    """
+    import dataclasses
+    import json
+    from pathlib import Path
+
+    from PIL import ImageDraw as PILImageDraw
+
+    pytest.importorskip("PIL")
+    fixture = Path(__file__).parent / "fixtures" / "real_cf_profile.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+
+    from src.account_models import AccountProfile as Model
+
+    fields = {f.name for f in dataclasses.fields(Model)}
+    profile = AccountProfile(**{k: v for k, v in payload.items() if k in fields})
+
+    rects: list = []
+    texts: list = []
+    real_draw = PILImageDraw.Draw
+
+    class _Capture:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def text(self, xy, text, *args, **kwargs):
+            font = kwargs.get("font")
+            width = font.getlength(text) if font is not None else 0
+            texts.append((round(xy[0]), round(xy[1]), str(text), width))
+            return self._inner.text(xy, text, *args, **kwargs)
+
+        def rounded_rectangle(self, xy, *args, **kwargs):
+            if round(xy[2] - xy[0]) == 1060:
+                rects.append(tuple(round(v) for v in xy))
+            return self._inner.rounded_rectangle(xy, *args, **kwargs)
+
+    def fake_draw(image, *args, **kwargs):
+        return _Capture(real_draw(image, *args, **kwargs))
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(PILImageDraw, "Draw", fake_draw)
+    try:
+        renderer = AccountCardRenderer(cache_dir=tmp_path)
+        image_path = tmp_path / "real.png"
+        assert renderer._pillow_profile(
+            [profile], "测试用户", {}, {}, tmp_path, image_path
+        )
+    finally:
+        monkeypatch.undo()
+
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        image_height = image.size[1]
+
+    assert rects, "没有画出卡片底板"
+    card_bottom = max(box[3] for box in rects)
+    prefixes = ("本次变化：", "最近：", "本群排行：", "组织：", "学校：", "地区：")
+    meta_rows = [row for row in texts if row[2].startswith(prefixes)]
+    assert meta_rows, "底部信息缺失"
+    for row in meta_rows:
+        assert row[1] + 20 <= card_bottom, f"{row[2]} 溢出卡片底板"
+    footer = [row for row in texts if row[2].startswith("生成时间")][0]
+    assert footer[1] >= card_bottom + 24
+    assert footer[1] + 20 <= image_height
+    # 画布高度完全由实测内容决定：卡底 + 60，不叠 HTML 粗估（否则底部大留白）
+    assert image_height == card_bottom + 60
+
+
+def test_pillow_profile_long_handle_stays_inside_card(tmp_path):
+    """超长 handle 不能冲出卡片右边（与本卡高度无关的水平不溢出）。"""
+    pytest.importorskip("PIL")
+    import json
+    from pathlib import Path
+
+    from PIL import ImageDraw as PILImageDraw
+
+    fixture = Path(__file__).parent / "fixtures" / "real_cf_profile.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    import dataclasses
+
+    from src.account_models import AccountProfile as Model
+
+    fields = {f.name for f in dataclasses.fields(Model)}
+    base = {k: v for k, v in payload.items() if k in fields}
+    base["handle"] = "very_long_handle_" * 4 + "code"
+    profile = AccountProfile(**base)
+
+    rects: list = []
+    texts: list = []
+    real_draw = PILImageDraw.Draw
+
+    class _Capture:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def text(self, xy, text, *args, **kwargs):
+            font = kwargs.get("font")
+            width = font.getlength(text) if font is not None else 0
+            texts.append((round(xy[0]), round(xy[1]), str(text), width))
+            return self._inner.text(xy, text, *args, **kwargs)
+
+        def rounded_rectangle(self, xy, *args, **kwargs):
+            width = round(xy[2] - xy[0])
+            if width in (1060, 521):
+                rects.append(tuple(round(v) for v in xy))
+            return self._inner.rounded_rectangle(xy, *args, **kwargs)
+
+    def fake_draw(image, *args, **kwargs):
+        return _Capture(real_draw(image, *args, **kwargs))
+
+    for multi in (False, True):
+        rects.clear()
+        texts.clear()
+        monitor = pytest.MonkeyPatch()
+        monitor.setattr(PILImageDraw, "Draw", fake_draw)
+        try:
+            profiles = [profile]
+            if multi:
+                profiles.append(profile)
+            renderer = AccountCardRenderer(cache_dir=tmp_path)
+            image_path = tmp_path / f"handle-{multi}.png"
+            assert renderer._pillow_profile(
+                profiles, "测试用户", {}, {}, tmp_path, image_path
+            )
+        finally:
+            monitor.undo()
+
+        assert rects, "没有画出卡片底板"
+        for left, top, text, width in texts:
+            for box in rects:
+                if box[0] - 2 <= left <= box[2] and top + 20 <= box[3]:
+                    assert left + width <= box[2] + 0.5, f"{text} 冲出卡片右边"
+        handles = [t for t in texts if t[2].startswith("very_long_handle")]
+        assert handles, "handle 没画出来"
+        assert all(t[2].endswith("…") for t in handles), handles

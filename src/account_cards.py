@@ -3498,37 +3498,248 @@ class AccountCardRenderer:
         card_gap = 18
         card_width = CARD_WIDTH - 140 if single else (CARD_WIDTH - 140 - card_gap) // 2
 
-        def meta_count(profile: AccountProfile) -> int:
-            count = 1  # 本次变化
-            if (
-                profile.recent_contests
-                and isinstance(profile.recent_contests[0], dict)
-                and profile.recent_contests[0].get("name")
-            ):
-                count += 1
-            if _profile_extra_text(profile):
-                count += 1
-            if profile.platform in group_ranks:
-                count += 1
-            # 热力图是独立区块（高度由 _activity_heatmap_height 单列），
-            # 这里 +1 只为与 meta_lines 的计数同步、在差额里抵消。
-            if cls._activity_payload(profile) is not None:
-                count += 1
-            return count
-
         meta_text_width = card_width - 50
 
-        def meta_lines(
-            profile: AccountProfile, change_value: object
-        ) -> int:
-            """折行后的实际行数；绘制与高度补偿共用，保证两边一致。"""
-            count = len(
-                cls._profile_meta_wrap(
-                    f"本次变化：{_format_delta(change_value)}",
-                    meta_text_width,
-                    font=body_font,
+        class _MeasureDraw:
+            """量尺用的绘制对象：真实实现画在 1x1 图上（只为取真实度量/不报错）。"""
+
+            def __init__(self):
+                self._inner = ImageDraw.Draw(PILImage.new("RGB", (1, 1)))
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        class _MeasureSurface:
+            def paste(self, *args, **kwargs):
+                return None
+
+        def draw_body(body_draw, target, profile, x, y, measure=False) -> int:
+            """画一张卡的主体，返回内容底边（最后一行行高之后）。"""
+            accent = PLATFORM_COLORS.get(
+                profile.platform,
+                ("#df6c9e", "#f4a7c6"),
+            )[0]
+            text_accent = PLATFORM_TEXT_COLORS.get(
+                profile.platform,
+                "#8b4d8d",
+            )
+            body_draw.text(
+                (x + 25, y + 20),
+                platform_label(profile.platform),
+                font=platform_font,
+                fill=text_accent,
+            )
+            avatar_size = 96 if single else 64
+            avatar_x = x + 25 if single else x + card_w - 25 - avatar_size
+            avatar_y = y + 54 if single else y + 18
+            # 量尺遍不加载头像：占位块与头像同尺寸，高度不受影响。
+            avatar = (
+                None
+                if measure
+                else cls._load_avatar(
+                    avatar_cache_dir,
+                    profile.avatar_url,
+                    avatar_size,
+                    profile.platform,
                 )
-            ) or 1
+            )
+            if avatar is not None:
+                avatar_mask = PILImage.new(
+                    "L",
+                    (avatar_size, avatar_size),
+                    0,
+                )
+                ImageDraw.Draw(avatar_mask).rounded_rectangle(
+                    (0, 0, avatar_size - 1, avatar_size - 1),
+                    radius=16,
+                    fill=255,
+                )
+                target.paste(avatar, (avatar_x, avatar_y), avatar_mask)
+            else:
+                body_draw.rounded_rectangle(
+                    (
+                        avatar_x,
+                        avatar_y,
+                        avatar_x + avatar_size,
+                        avatar_y + avatar_size,
+                    ),
+                    radius=16,
+                    fill=accent,
+                    outline="#ffffff",
+                    width=1,
+                )
+            initial = platform_label(profile.platform)[:1] or "A"
+            if avatar is None:
+                body_draw.text(
+                    (
+                        avatar_x + avatar_size // 2 - 12,
+                        avatar_y + avatar_size // 2 - 18,
+                    ),
+                    initial,
+                    font=platform_font,
+                    fill="#ffffff",
+                ),
+            body_draw.text(
+                (
+                    x + 25 + avatar_size + 14
+                    if single
+                    else x + 25,
+                    y + (66 if single else 56),
+                ),
+                cls._fit_rank_pillow_text(
+                    profile.handle,
+                    handle_font,
+                    max(
+                        0,
+                        (x + card_w - 25)
+                        - (x + 25 + avatar_size + 14 if single else x + 25),
+                    ),
+                ),
+                font=handle_font,
+                fill="#51315d",
+            )
+            primary_label, primary_value = _primary_metric(profile)
+            body_draw.text(
+                (x + 25, y + (160 if single else 100)),
+                primary_value,
+                font=rating_font,
+                fill=text_accent,
+            )
+            body_draw.text(
+                (x + (310 if single else 270), y + (180 if single else 120)),
+                primary_label,
+                font=body_font,
+                fill="#704966",
+            )
+            rank_display = _rank_display_text(profile)
+            rank_x = x + (420 if single else 370)
+            rank_y = y + (180 if single else 120)
+            body_draw.text(
+                (rank_x, rank_y),
+                cls._fit_rank_pillow_text(
+                    rank_display,
+                    body_font,
+                    max(0, (x + card_w - 18) - rank_x),
+                ),
+                font=body_font,
+                fill="#5e3b5d",
+            )
+            details = [
+                f"{label}：{value}"
+                for label, value in _profile_stats(profile)
+            ]
+            detail_top = y + (220 if single else 164)
+            content_x = x + 25
+            content_w = card_w - 50
+            # C：列数按最宽单元格自适应（4→3→2）
+            columns = cls._pillow_stat_columns(
+                details,
+                body_font,
+                content_w,
+                preferred=4 if single else 2,
+            )
+            detail_width = content_w / columns
+            cell_padding = 14
+            for line_index, value in enumerate(details):
+                detail_col = line_index % columns
+                detail_row = line_index // columns
+                # A：仍超宽的单元格（例如自定义长头衔）用省略号兜底
+                fitted = cls._fit_rank_pillow_text(
+                    value, body_font, detail_width - cell_padding
+                )
+                # 「平台排名：#48 · Top 0.04%」这类组合值在窄列里放不下时，
+                # 优先保留名次（可读），而不是截成「#48 · Top 0…」
+                if "…" in fitted and " · " in value:
+                    shorter = cls._fit_rank_pillow_text(
+                        value.split(" · ")[0], body_font, detail_width - cell_padding
+                    )
+                    if "…" not in shorter:
+                        fitted = shorter
+                body_draw.text(
+                    (
+                        int(content_x + detail_col * detail_width),
+                        int(detail_top + detail_row * 27),
+                    ),
+                    fitted,
+                    font=body_font,
+                    fill="#6e4a67",
+                )
+            detail_rows = (len(details) + columns - 1) // columns
+            meta_y = int(detail_top + detail_rows * 27 + 7)
+            chart_width = card_w - 50
+            difficulty_height = cls._pillow_difficulty_chart(
+                body_draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+                value_font=chart_value_font,
+            )
+            if difficulty_height:
+                meta_y += difficulty_height + 10
+            activity_height = cls._pillow_activity_heatmap(
+                body_draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+                compact=not single,
+            )
+            if activity_height:
+                meta_y += activity_height + 10
+            secondary_height = cls._pillow_secondary_chart(
+                body_draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+                value_font=chart_value_font,
+            )
+            if secondary_height:
+                meta_y += secondary_height + 10
+            rating_height = cls._pillow_rating_chart(
+                body_draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+            )
+            if rating_height:
+                meta_y += rating_height + 10
+            summary_height = cls._pillow_analysis_summary(
+                body_draw,
+                profile,
+                x + 25,
+                meta_y,
+                chart_width,
+                title_font=chart_title_font,
+                label_font=chart_label_font,
+            )
+            if summary_height:
+                meta_y += summary_height + 10
+            change_value = weekly_changes.get(
+                profile.platform,
+                profile.recent_delta,
+            )
+            for line in cls._profile_meta_wrap(
+                f"本次变化：{_format_delta(change_value)}",
+                meta_text_width, font=body_font
+            ):
+                body_draw.text(
+                    (x + 25, meta_y),
+                    line,
+                    font=body_font,
+                    fill="#16835f" if (change_value or 0) >= 0 else "#c03d66",
+                )
+                meta_y += 23
             recent = (
                 profile.recent_contests[0]
                 if profile.recent_contests
@@ -3537,74 +3748,66 @@ class AccountCardRenderer:
                 else None
             )
             if recent:
-                count += len(
-                    cls._profile_meta_wrap(
-                        f"最近：{recent.get('name')} "
-                        f"{_format_delta(recent.get('delta'))}",
-                        meta_text_width, font=body_font
+                for line in cls._profile_meta_wrap(
+                    f"最近：{recent.get('name')} "
+                    f"{_format_delta(recent.get('delta'))}",
+                    meta_text_width, font=body_font
+                ):
+                    body_draw.text(
+                        (x + 25, meta_y),
+                        line,
+                        font=body_font,
+                        fill="#6e4a67",
                     )
-                )
+                    meta_y += 23
             extras = _profile_extra_text(profile)
             if extras:
-                count += len(cls._profile_meta_wrap(extras, meta_text_width, font=body_font))
+                for line in cls._profile_meta_wrap(extras, meta_text_width, font=body_font):
+                    body_draw.text(
+                        (x + 25, meta_y),
+                        line,
+                        font=body_font,
+                        fill="#6e4a67",
+                    )
+                    meta_y += 23
             rank_info = group_ranks.get(profile.platform)
             if isinstance(rank_info, dict):
-                count += len(
-                    cls._profile_meta_wrap(
-                        cls._profile_rank_line(rank_info), meta_text_width, font=body_font
+                rank = rank_info.get("rank")
+                for line in cls._profile_meta_wrap(
+                    cls._profile_rank_line(rank_info), meta_text_width, font=body_font
+                ):
+                    body_draw.text(
+                        (x + 25, meta_y),
+                        line,
+                        font=body_font,
+                        fill="#a92b73" if rank is not None else "#6e4a67",
                     )
-                )
-            if cls._activity_payload(profile) is not None:
-                count += 1
-            return count
-
-        def meta_wrap_extra(profile: AccountProfile) -> int:
-            """按真实字体折行后的净差额，并抵扣 HTML 侧的粗估预留。"""
-            change_value = weekly_changes.get(
-                profile.platform, profile.recent_delta
-            )
-            exact = (
-                max(0, meta_lines(profile, change_value) - meta_count(profile))
-                * 23
-            )
-            return exact - cls._profile_meta_wrap_budget(profile)
-
+                    meta_y += 23
+            return meta_y
+        # 卡片高度由图内实际内容决定（先量后画）。
+        # 复用 HTML 侧的 _profile_card_height 估算会让内容溢出底板：
+        # 真实档案实测矮 92px，「最近/组织」两行被画到卡片外，正好压住生成时间。
+        card_w = card_width
         card_bottoms: List[int] = []
+        content_bottoms: List[int] = []
+        for index, profile in enumerate(profiles):
+            probe_x = 70 + (index % 2) * (card_w + card_gap)
+            content_bottoms.append(
+                draw_body(
+                    _MeasureDraw(),
+                    _MeasureSurface(),
+                    profile,
+                    probe_x,
+                    0,
+                    measure=True,
+                )
+            )
         card_rows = []
         for offset in range(0, len(profiles), 2):
-            row_profiles = profiles[offset : offset + 2]
-            card_rows.append(
-                max(
-                    270 if single else 300,
-                    max(
-                        cls._profile_card_height(
-                            profile,
-                            compact=single,
-                            has_group_rank=profile.platform in group_ranks,
-                        )
-                        for profile in row_profiles
-                    ),
-                    max(
-                        cls._profile_card_height(
-                            profile,
-                            compact=single,
-                            has_group_rank=profile.platform in group_ranks,
-                        )
-                        + (
-                            max(0, meta_count(profile) - 2) * 23
-                            if single
-                            else 0
-                        )
-                        + meta_wrap_extra(profile)
-                        for profile in row_profiles
-                    ),
-                )
-            )
+            card_rows.append(max(content_bottoms[offset : offset + 2]) + 24)
         grid_height = sum(card_rows) + max(0, len(card_rows) - 1) * card_gap
-        height = max(
-            cls._profile_height(profiles),
-            205 + grid_height + 60,
-        )
+        # 画布高度只由实测内容决定；再叠一份 HTML 粗估会凭空多出底部留白。
+        height = 205 + grid_height + 60
         image = PILImage.new(
             "RGB",
             (CARD_WIDTH, min(MAX_CARD_HEIGHT, height)),
@@ -3654,10 +3857,6 @@ class AccountCardRenderer:
                 profile.platform,
                 ("#df6c9e", "#f4a7c6"),
             )[0]
-            text_accent = PLATFORM_TEXT_COLORS.get(
-                profile.platform,
-                "#8b4d8d",
-            )
             draw.rounded_rectangle(
                 (x, y, x + card_w, y + card_h),
                 radius=18,
@@ -3666,253 +3865,7 @@ class AccountCardRenderer:
                 width=2,
             )
             card_bottoms.append(y + card_h)
-            draw.text(
-                (x + 25, y + 20),
-                platform_label(profile.platform),
-                font=platform_font,
-                fill=text_accent,
-            )
-            avatar_size = 96 if single else 64
-            avatar_x = x + 25 if single else x + card_w - 25 - avatar_size
-            avatar_y = y + 54 if single else y + 18
-            avatar = cls._load_avatar(
-                avatar_cache_dir,
-                profile.avatar_url,
-                avatar_size,
-                profile.platform,
-            )
-            if avatar is not None:
-                avatar_mask = PILImage.new(
-                    "L",
-                    (avatar_size, avatar_size),
-                    0,
-                )
-                ImageDraw.Draw(avatar_mask).rounded_rectangle(
-                    (0, 0, avatar_size - 1, avatar_size - 1),
-                    radius=16,
-                    fill=255,
-                )
-                image.paste(avatar, (avatar_x, avatar_y), avatar_mask)
-            else:
-                draw.rounded_rectangle(
-                    (
-                        avatar_x,
-                        avatar_y,
-                        avatar_x + avatar_size,
-                        avatar_y + avatar_size,
-                    ),
-                    radius=16,
-                    fill=accent,
-                    outline="#ffffff",
-                    width=1,
-                )
-            initial = platform_label(profile.platform)[:1] or "A"
-            if avatar is None:
-                draw.text(
-                    (
-                        avatar_x + avatar_size // 2 - 12,
-                        avatar_y + avatar_size // 2 - 18,
-                    ),
-                    initial,
-                    font=platform_font,
-                    fill="#ffffff",
-                ),
-            draw.text(
-                (
-                    x + 25 + avatar_size + 14
-                    if single
-                    else x + 25,
-                    y + (66 if single else 56),
-                ),
-                profile.handle,
-                font=handle_font,
-                fill="#51315d",
-            )
-            primary_label, primary_value = _primary_metric(profile)
-            draw.text(
-                (x + 25, y + (160 if single else 100)),
-                primary_value,
-                font=rating_font,
-                fill=text_accent,
-            )
-            draw.text(
-                (x + (310 if single else 270), y + (180 if single else 120)),
-                primary_label,
-                font=body_font,
-                fill="#704966",
-            )
-            rank_display = _rank_display_text(profile)
-            rank_x = x + (420 if single else 370)
-            rank_y = y + (180 if single else 120)
-            draw.text(
-                (rank_x, rank_y),
-                cls._fit_rank_pillow_text(
-                    rank_display,
-                    body_font,
-                    max(0, (x + card_w - 18) - rank_x),
-                ),
-                font=body_font,
-                fill="#5e3b5d",
-            )
-            details = [
-                f"{label}：{value}"
-                for label, value in _profile_stats(profile)
-            ]
-            detail_top = y + (220 if single else 164)
-            content_x = x + 25
-            content_w = card_w - 50
-            # C：列数按最宽单元格自适应（4→3→2）
-            columns = cls._pillow_stat_columns(
-                details,
-                body_font,
-                content_w,
-                preferred=4 if single else 2,
-            )
-            detail_width = content_w / columns
-            cell_padding = 14
-            for line_index, value in enumerate(details):
-                detail_col = line_index % columns
-                detail_row = line_index // columns
-                # A：仍超宽的单元格（例如自定义长头衔）用省略号兜底
-                fitted = cls._fit_rank_pillow_text(
-                    value, body_font, detail_width - cell_padding
-                )
-                # 「平台排名：#48 · Top 0.04%」这类组合值在窄列里放不下时，
-                # 优先保留名次（可读），而不是截成「#48 · Top 0…」
-                if "…" in fitted and " · " in value:
-                    shorter = cls._fit_rank_pillow_text(
-                        value.split(" · ")[0], body_font, detail_width - cell_padding
-                    )
-                    if "…" not in shorter:
-                        fitted = shorter
-                draw.text(
-                    (
-                        int(content_x + detail_col * detail_width),
-                        int(detail_top + detail_row * 27),
-                    ),
-                    fitted,
-                    font=body_font,
-                    fill="#6e4a67",
-                )
-            detail_rows = (len(details) + columns - 1) // columns
-            meta_y = int(detail_top + detail_rows * 27 + 7)
-            chart_width = card_w - 50
-            difficulty_height = cls._pillow_difficulty_chart(
-                draw,
-                profile,
-                x + 25,
-                meta_y,
-                chart_width,
-                title_font=chart_title_font,
-                label_font=chart_label_font,
-                value_font=chart_value_font,
-            )
-            if difficulty_height:
-                meta_y += difficulty_height + 10
-            activity_height = cls._pillow_activity_heatmap(
-                draw,
-                profile,
-                x + 25,
-                meta_y,
-                chart_width,
-                title_font=chart_title_font,
-                label_font=chart_label_font,
-                compact=not single,
-            )
-            if activity_height:
-                meta_y += activity_height + 10
-            secondary_height = cls._pillow_secondary_chart(
-                draw,
-                profile,
-                x + 25,
-                meta_y,
-                chart_width,
-                title_font=chart_title_font,
-                label_font=chart_label_font,
-                value_font=chart_value_font,
-            )
-            if secondary_height:
-                meta_y += secondary_height + 10
-            rating_height = cls._pillow_rating_chart(
-                draw,
-                profile,
-                x + 25,
-                meta_y,
-                chart_width,
-                title_font=chart_title_font,
-                label_font=chart_label_font,
-            )
-            if rating_height:
-                meta_y += rating_height + 10
-            summary_height = cls._pillow_analysis_summary(
-                draw,
-                profile,
-                x + 25,
-                meta_y,
-                chart_width,
-                title_font=chart_title_font,
-                label_font=chart_label_font,
-            )
-            if summary_height:
-                meta_y += summary_height + 10
-            change_value = weekly_changes.get(
-                profile.platform,
-                profile.recent_delta,
-            )
-            for line in cls._profile_meta_wrap(
-                f"本次变化：{_format_delta(change_value)}",
-                meta_text_width, font=body_font
-            ):
-                draw.text(
-                    (x + 25, meta_y),
-                    line,
-                    font=body_font,
-                    fill="#16835f" if (change_value or 0) >= 0 else "#c03d66",
-                )
-                meta_y += 23
-            recent = (
-                profile.recent_contests[0]
-                if profile.recent_contests
-                and isinstance(profile.recent_contests[0], dict)
-                and profile.recent_contests[0].get("name")
-                else None
-            )
-            if recent:
-                for line in cls._profile_meta_wrap(
-                    f"最近：{recent.get('name')} "
-                    f"{_format_delta(recent.get('delta'))}",
-                    meta_text_width, font=body_font
-                ):
-                    draw.text(
-                        (x + 25, meta_y),
-                        line,
-                        font=body_font,
-                        fill="#6e4a67",
-                    )
-                    meta_y += 23
-            extras = _profile_extra_text(profile)
-            if extras:
-                for line in cls._profile_meta_wrap(extras, meta_text_width, font=body_font):
-                    draw.text(
-                        (x + 25, meta_y),
-                        line,
-                        font=body_font,
-                        fill="#6e4a67",
-                    )
-                    meta_y += 23
-            rank_info = group_ranks.get(profile.platform)
-            if isinstance(rank_info, dict):
-                rank = rank_info.get("rank")
-                for line in cls._profile_meta_wrap(
-                    cls._profile_rank_line(rank_info), meta_text_width, font=body_font
-                ):
-                    draw.text(
-                        (x + 25, meta_y),
-                        line,
-                        font=body_font,
-                        fill="#a92b73" if rank is not None else "#6e4a67",
-                    )
-                    meta_y += 23
+            draw_body(draw, image, profile, x, y)
         # 生成时间跟随最后一张卡的底边，内容再多也不会压到卡片文字上。
         # 内容触顶被 MAX_CARD_HEIGHT 截断时，再把它钳回画布内（否则整行不可见）。
         foot_y = max(card_bottoms) + 24 if card_bottoms else (image.height - 42)

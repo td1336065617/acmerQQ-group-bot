@@ -1,0 +1,270 @@
+{
+ "platform": "codeforces",
+ "handle": "demo_user_01",
+ "avatar_url": "",
+ "rating": 1199,
+ "max_rating": 1199,
+ "rank_text": "newbie",
+ "max_rank_text": "newbie",
+ "solved_count": 42,
+ "contest_count": 6,
+ "contribution": 0,
+ "school": "某大学计算机科学与技术学院",
+ "organization": "某信息学竞赛培训中心",
+ "country": "中国",
+ "city": "杭州",
+ "rating_history": [
+  {
+   "name": "Codeforces Round 936 (Div. 2)",
+   "rank": 7704,
+   "delta": 30,
+   "old_rating": 1169,
+   "rating": 1199,
+   "timestamp": 1711125300.0,
+   "url": "https://codeforces.com/contest/1946"
+  },
+  {
+   "name": "Educational Codeforces Round 149 (Rated for Div. 2)",
+   "rank": 9124,
+   "delta": 54,
+   "old_rating": 1115,
+   "rating": 1169,
+   "timestamp": 1685032500.0,
+   "url": "https://codeforces.com/contest/1837"
+  },
+  {
+   "name": "Grakn Forces 2020",
+   "rank": 4625,
+   "delta": 149,
+   "old_rating": 966,
+   "rating": 1115,
+   "timestamp": 1601486400.0,
+   "url": "https://codeforces.com/contest/1408"
+  },
+  {
+   "name": "Codeforces Round 661 (Div. 3)",
+   "rank": 7099,
+   "delta": 213,
+   "old_rating": 753,
+   "rating": 966,
+   "timestamp": 1596646200.0,
+   "url": "https://codeforces.com/contest/1399"
+  },
+  {
+   "name": "Codeforces Round 656 (Div. 3)",
+   "rank": 10243,
+   "delta": 251,
+   "old_rating": 502,
+   "rating": 753,
+   "timestamp": 1595004600.0,
+   "url": "https://codeforces.com/contest/1385"
+  },
+  {
+   "name": "Codeforces Global Round 9",
+   "rank": 5367,
+   "delta": 502,
+   "old_rating": 0,
+   "rating": 502,
+   "timestamp": 1593882900.0,
+   "url": "https://codeforces.com/contest/1375"
+  }
+ ],
+ "recent_contests": [
+  {
+   "name": "Codeforces Round 936 (Div. 2)",
+   "rank": 7704,
+   "delta": 30,
+   "old_rating": 1169,
+   "rating": 1199,
+   "timestamp": 1711125300.0,
+   "url": "https://codeforces.com/contest/1946"
+  },
+  {
+   "name": "Educational Codeforces Round 149 (Rated for Div. 2)",
+   "rank": 9124,
+   "delta": 54,
+   "old_rating": 1115,
+   "rating": 1169,
+   "timestamp": 1685032500.0,
+   "url": "https://codeforces.com/contest/1837"
+  },
+  {
+   "name": "Grakn Forces 2020",
+   "rank": 4625,
+   "delta": 149,
+   "old_rating": 966,
+   "rating": 1115,
+   "timestamp": 1601486400.0,
+   "url": "https://codeforces.com/contest/1408"
+  },
+  {
+   "name": "Codeforces Round 661 (Div. 3)",
+   "rank": 7099,
+   "delta": 213,
+   "old_rating": 753,
+   "rating": 966,
+   "timestamp": 1596646200.0,
+   "url": "https://codeforces.com/contest/1399"
+  },
+  {
+   "name": "Codeforces Round 656 (Div. 3)",
+   "rank": 10243,
+   "delta": 251,
+   "old_rating": 502,
+   "rating": 753,
+   "timestamp": 1595004600.0,
+   "url": "https://codeforces.com/contest/1385"
+  }
+ ],
+ "recent_delta": 30,
+ "analysis": {
+  "source": "Codeforces 官方 user.status API",
+  "coverage": "最近 82 条公开提交（已读完当前公开记录）",
+  "submission_count": 82,
+  "accepted_submission_count": 51,
+  "solved_count": 42,
+  "acceptance_rate": 62.2,
+  "active_days_30": 0,
+  "active_days_90": 0,
+  "activity_daily": {},
+  "activity_summary": {
+   "active_days": 0,
+   "current_streak": 0,
+   "longest_streak": 0,
+   "start": "2025-11-20",
+   "end": "2026-11-19"
+  },
+  "solved_problem_ids": [
+   "891C",
+   "2036C",
+   "2036B",
+   "2036A",
+   "2037C",
+   "2037B",
+   "2037A",
+   "1985D",
+   "1985F",
+   "1985C",
+   "1985B",
+   "1985A",
+   "14A",
+   "12A",
+   "877D",
+   "1389C",
+   "1389B",
+   "1389A",
+   "11A",
+   "10A",
+   "9A",
+   "6A",
+   "5A",
+   "1946B",
+   "1946A",
+   "1837C",
+   "1837B",
+   "1837A",
+   "103055J",
+   "509A",
+   "1408B",
+   "1408A",
+   "1399B",
+   "1399C",
+   "1399A",
+   "1385B",
+   "1385A",
+   "1375B",
+   "1375A",
+   "1375C",
+   "4A",
+   "1A"
+  ],
+  "difficulty_title": "Codeforces 题目难度分布",
+  "difficulty_distribution": [
+   {
+    "label": "≤999",
+    "count": 24
+   },
+   {
+    "label": "1000–1199",
+    "count": 8
+   },
+   {
+    "label": "1200–1399",
+    "count": 2
+   },
+   {
+    "label": "1400–1599",
+    "count": 4
+   },
+   {
+    "label": "1600–1799",
+    "count": 1
+   },
+   {
+    "label": "2000–2199",
+    "count": 1
+   },
+   {
+    "label": "2200–2399",
+    "count": 1
+   },
+   {
+    "label": "未标分",
+    "count": 1
+   }
+  ],
+  "language_distribution": [
+   {
+    "label": "C++14 (GCC 6-32)",
+    "count": 44
+   },
+   {
+    "label": "GNU C++11",
+    "count": 21
+   },
+   {
+    "label": "C++20 (GCC 13-64)",
+    "count": 16
+   },
+   {
+    "label": "GNU C11",
+    "count": 1
+   }
+  ],
+  "summary": [
+   {
+    "label": "提交",
+    "value": 82
+   },
+   {
+    "label": "通过题",
+    "value": 42
+   },
+   {
+    "label": "提交通过率",
+    "value": "62.2%"
+   },
+   {
+    "label": "30日活跃",
+    "value": "0天"
+   },
+   {
+    "label": "90日活跃",
+    "value": "0天"
+   }
+  ]
+ },
+ "platform_user_id": "",
+ "rating_rank": 49552,
+ "rating_rank_total": 125938,
+ "rating_rank_note": "",
+ "profile_url": "",
+ "fetched_at": 0,
+ "source_url": "",
+ "color": "gray",
+ "extra": {
+  "difficulty_scan_limit": 50000,
+  "difficulty_scanned_submissions": 82
+ },
+ "display_name": "demo_user_01"
+}
